@@ -40,6 +40,8 @@ providers:
   # here). Sign in once with `provenance-core weblogin`. Against OpenAI's terms for the web app: the account can be
   # limited or banned, so it is slow on purpose (one request at a time, a pause between requests, a daily cap).
   # Only /v1/responses tier requests (Provenance, Codex) and requests naming the model use it; see docs/TECHNICAL.md.
+  # `driver: patchright` under web: (or PCORE_CHATGPT_WEB_DRIVER=patchright) gets past the site's automatic browser
+  # check by not announcing the automation; the default `playwright` driver is stopped by it.
   chatgpt-web: {type: chatgpt_web, base_url: "https://chatgpt.com", api_key_env: none,
                 web: {daily_cap: 200, min_gap_s: 4, max_gap_s: 9, endpoints: [responses]}}
 

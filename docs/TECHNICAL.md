@@ -108,13 +108,28 @@ stateless completion engine.
 rate limited, flagged or banned. Everything below is built to stay small and visible rather than to hide: it is
 opt-in, serial, paced, capped, and stops at the first sign that the site wants a human.
 
-**Status on 2026-11-21.** Verified: everything against the local mock page; the text tool protocol with real
-Provenance requests (about 42k characters, 12 tools, including a repair round) answered by a pool model that saw
-only the rendered prompt; failover with real Provenance when the login is missing and when the page is challenged.
-Not verified: a real reply from chatgpt.com. After a manual sign-in, the first automated check of the signed-in page
-passed, and every later load was answered with a Cloudflare "Just a moment..." page that does not clear by itself.
-The bridge stops there by design (6 h block, requests go to the normal pool), so the signed-in page's markup, prompt
-fidelity in the real composer, the model picker and the model's score are still unmeasured.
+**Status on 2026-11-21.** Verified against the local mock page and a capture of the real page's markup
+(`tests/real_page_2026_11.html`); the text tool protocol with real Provenance requests answered by a pool model;
+failover when the login is missing and when the page is challenged. On the real site: with the stock `playwright`
+driver every load after the first was answered with a Cloudflare "Just a moment..." page that never clears (6 h
+block, requests go to the normal pool). With `driver: patchright` the check passes and real replies come back
+(seven requests, 9 to 50 s each; headings, lists, tables, code blocks, math and a ```` ```tool_call ```` block read
+back intact). Two things found there: the page's markup had changed (turns are `[data-turn-key]` /
+`[data-response-body]`, code blocks are an editor widget; both generations are read now), and the test account was on
+the Free plan, which has **no model picker**: `chatgpt-web/luna` is correctly reported as not selectable, and the
+Free default model (`auto`, served by `gpt-6`) ignored the text tool protocol in 2 of 2 tool requests and used
+ChatGPT's own sandbox instead (it "ran" `pytest` and read `/etc/hosts` in OpenAI's container, not on this machine).
+So `auto` on a Free account is not usable for agent work; prompt fidelity for long requests, the model picker on a
+paid plan and the model's score are still unmeasured.
+
+**Drivers.** `playwright` (default) is a stock Playwright-driven Chrome and says so (`navigator.webdriver` is true).
+`patchright` (`driver: patchright` under the provider's `web:`, or `PCORE_CHATGPT_WEB_DRIVER=patchright`; needs
+`pip install patchright`) is the approach CatGPT-Gateway uses, reduced to its core: the same installed Chrome, the
+same hand-signed-in profile, launched the way patchright documents (persistent profile, no viewport override, no
+extra flags), driven without the automation markers. Not taken from CatGPT-Gateway: the playwright-stealth
+fingerprint patches, viewport jitter and fake mouse movement (not needed to pass the check, and each is one more
+thing to be wrong about). This driver hides the automation from the site on purpose. Everything else stays: one
+request at a time, the pauses, the daily cap, and stopping at any challenge that does not pass by itself.
 
 **What it does per request**
 
@@ -133,10 +148,10 @@ Nothing carries over between requests: every request is a new temporary chat, so
 not involved and nothing is saved in the account. If temporary chat can't be confirmed, nothing is sent and the
 provider goes unavailable.
 
-**What it never does:** read cookies or tokens from any browser profile, handle your password, use stealth /
-anti-detection flags or fingerprint changes (it is a stock Playwright-driven Chrome and says so:
-`navigator.webdriver` is true), forge sentinel / proof-of-work / Turnstile tokens, solve or click through captchas
-or challenges, or call ChatGPT's private backend API.
+**What it never does:** read cookies or tokens from any browser profile, handle your password, forge sentinel /
+proof-of-work / Turnstile tokens, solve or click through captchas or challenges, or call ChatGPT's private backend
+API. With the default driver it also uses no anti-detection measures at all; `driver: patchright` is the one
+exception, described above.
 
 **Tool-call protocol.** The prompt tells the model to call a tool with a fenced block:
 

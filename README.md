@@ -65,7 +65,7 @@ as one message, and reads the answer back (tool calls included). Nothing is kept
 harness keeps owning context, tools and memory.
 
 ```bash
-.venv/bin/pip install playwright          # uses your installed Google Chrome
+.venv/bin/pip install playwright patchright   # uses your installed Google Chrome
 provenance-core weblogin                  # opens Chrome on the dedicated profile: sign in, then quit it (Cmd+Q)
 echo 'PCORE_CHATGPT_WEB=1' >> ~/.tierlm/keys.env    # turn it on, then restart the server
 provenance-core webstatus --probe         # on? signed in? how many requests today?
@@ -75,12 +75,17 @@ The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked 
 sits in a tier by its score like any other model; Provenance / Codex requests for that tier try it first and fall
 back to the normal pool whenever it is busy, signed out, rate limited or showing a challenge.
 
-As of 2026-11-21 chatgpt.com answers the automated window with a Cloudflare check that does not clear by itself, so
-in practice the bridge reports itself unavailable and requests use the normal pool; it does not try to get past it.
+As of 2026-11-21 chatgpt.com answers a stock automated window with a Cloudflare check that does not clear by itself,
+so with the default driver the bridge reports itself unavailable. `PCORE_CHATGPT_WEB_DRIVER=patchright` in
+`~/.tierlm/keys.env` (or `driver: patchright` under the provider's `web:`) drives the same Chrome with
+[patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python), the approach
+[CatGPT-Gateway](https://github.com/GautamVhavle/CatGPT-Gateway) uses: the window no longer announces itself as
+automated and the check passes. That is hiding the automation from the site, which raises the stakes of the next
+paragraph; it is off unless you set it.
 
 **Know the risk:** automating the ChatGPT web app is against OpenAI's terms of use. The realistic downside is your
 ChatGPT account being limited or banned. The bridge is therefore slow on purpose (one request at a time, a pause
-between requests, a daily cap of 200) and never tries to get around a captcha, challenge or "unusual activity"
+between requests, a daily cap of 200) and never solves or clicks a captcha, challenge or "unusual activity"
 notice: it stops and tells you. Details: [docs/TECHNICAL.md](docs/TECHNICAL.md#chatgpt-web-provider).
 
 ## Keys

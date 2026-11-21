@@ -5,9 +5,12 @@ rendered into one message, sent in a NEW temporary chat, and the reply is parsed
 How it stays honest and gentle (read docs/TECHNICAL.md before turning it on):
 - a real, visible Chrome window on its own profile (~/.tierlm/chatgpt-web-profile) that you sign into by hand once
   (`provenance-core weblogin`); nothing is read from any other browser profile and no password is ever handled
-- the page is driven like a user would: open, type, press send, read the answer. No stealth or anti-detection
-  flags, no fingerprint tricks, no forged sentinel / proof-of-work / Turnstile tokens, no captcha solving, no calls
-  to the private backend API
+- the page is driven like a user would: open, type, press send, read the answer. No forged sentinel /
+  proof-of-work / Turnstile tokens, no captcha solving or clicking, no calls to the private backend API
+- two drivers. `playwright` (default) is stock: the window says it is automated, and chatgpt.com answers it with a
+  browser check that never clears. `patchright` (opt-in: `driver: patchright` or PCORE_CHATGPT_WEB_DRIVER=patchright;
+  the approach CatGPT-Gateway uses) drives the same Chrome and profile without the automation markers, so the
+  automatic check passes as it does for you. That is hiding the automation from the site: your call, your account
 - a challenge, captcha, "unusual activity" notice, login wall, usage-limit banner or a missing temporary-chat mode
   marks the provider unavailable (with a reason) and the router fails over to its normal pool
 - one request at a time, a human-scale pause between requests, a daily cap, off unless enabled
@@ -364,18 +367,23 @@ PROBE_JS = r"""(fresh) => {
     }
   }
   out.temp = temp;
-  out.stop = !!first(['[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]']);
+  // two generations of markup: [data-message-author-role] turns, and (2026-11) [data-turn-key] turns whose parts are
+  // [data-content-search-unit-key="<turn>:<n>:user|assistant"] with the reply in [data-response-body]
+  const turnStates = [...document.querySelectorAll('[data-talvt-turn-state]')].map(e => e.getAttribute('data-talvt-turn-state'));
+  out.stop = !!first(['[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]', 'button[aria-label="Stop generating"]', 'button[aria-label="Stop"]'])
+             || turnStates[turnStates.length - 1] === 'in_progress';
   const send = first(['[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label="Send message"]', 'button[aria-label="Send"]']);
   out.send = !!send;
   out.sendEnabled = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
   const msgs = [...document.querySelectorAll('[data-message-author-role]')];
-  out.users = msgs.filter(e => e.getAttribute('data-message-author-role') === 'user').length;
-  const as = msgs.filter(e => e.getAttribute('data-message-author-role') === 'assistant');
+  out.users = msgs.filter(e => e.getAttribute('data-message-author-role') === 'user').length
+              + document.querySelectorAll('[data-content-search-unit-key$=":user"]').length;
+  const as = msgs.filter(e => e.getAttribute('data-message-author-role') === 'assistant').concat([...document.querySelectorAll('[data-response-body]')]);
   out.assistants = as.length;
   const last = as[as.length - 1];
   out.lastLen = last ? (last.innerText || '').length : 0;
   out.slug = last ? last.getAttribute('data-message-model-slug') : null;
-  out.actions = document.querySelectorAll('[data-testid="copy-turn-action-button"]').length;
+  out.actions = document.querySelectorAll('[data-testid="copy-turn-action-button"], [data-talvt-turn-state] button[aria-label="Copy"]').length;
   const sw = first(['[data-testid="model-switcher-dropdown-button"]', 'button[aria-label^="Model selector" i]', 'button[aria-haspopup="menu"][aria-label*="model" i]']);
   out.model = sw ? ((sw.innerText || '').trim() || sw.getAttribute('aria-label') || '').replace(/\s+/g, ' ') : null;
   return out;
@@ -384,10 +392,30 @@ PROBE_JS = r"""(fresh) => {
 # The assistant messages after the last user message, turned back into markdown. Code blocks come back exactly
 # (their text content); the rest is rebuilt from the rendered elements.
 READ_JS = r"""() => {
-  const all = [...document.querySelectorAll('[data-message-author-role]')];
+  // both generations of markup (see PROBE_JS): everything the assistant wrote after the last user message
+  const role = e => e.getAttribute('data-message-author-role') || (e.hasAttribute('data-response-body') ? 'assistant' : 'user');
+  const all = [...document.querySelectorAll('[data-message-author-role], [data-content-search-unit-key$=":user"], [data-response-body]')];
   let lastUser = -1;
-  all.forEach((e, i) => { if (e.getAttribute('data-message-author-role') === 'user') lastUser = i; });
-  const as = all.slice(lastUser + 1).filter(e => e.getAttribute('data-message-author-role') === 'assistant');
+  all.forEach((e, i) => { if (role(e) === 'user') lastUser = i; });
+  const as = all.slice(lastUser + 1).filter(e => role(e) === 'assistant');
+  const isWidget = n => n.nodeType === 1 && n.getAttribute('data-client-defined-widget') === 'code_block';
+  const isMath = n => n.nodeType === 1 && n.getAttribute('data-d-component') === 'math';
+  function widget(el) {   // the 2026-11 code block: an editor widget; the code itself is kept verbatim in an attribute
+    const holder = el.querySelector('[data-chatgpt-copy-code]');
+    const ed = el.querySelector('[data-language]');
+    let text = holder ? holder.getAttribute('data-chatgpt-copy-code') : null;
+    const body = ed || el.querySelector('[role="textbox"], [contenteditable="true"]');   // one child per line
+    if (text === null && body) text = body.children.length ? [...body.children].map(l => l.textContent).join('\n') : body.textContent;
+    if (text === null) { const c = el.cloneNode(true); c.querySelectorAll('[data-markdown-copy="exclude"], button').forEach(x => x.remove()); text = c.textContent; }
+    let lang = ed ? (ed.getAttribute('data-language') || '') : '';
+    const label = el.querySelector('[data-markdown-copy="exclude"] div');
+    const shown = label ? (label.textContent || '').trim() : '';
+    if ((!lang || /^(text|plain|plaintext)$/i.test(lang)) && shown.length <= 24 && /^[\w+#.-]+$/.test(shown)) lang = shown.toLowerCase();
+    if (/^(code|text|plain|plaintext)$/.test(lang)) lang = '';   // the header's label for a block with no language
+    text = text.replace(/\n$/, '');
+    const f = fence(text, 3);
+    return f + lang + '\n' + text + '\n' + f;
+  }
   const fence = (s, min) => { let n = min; for (const x of (s.match(/`+/g) || [])) n = Math.max(n, x.length + 1); return '`'.repeat(n); };
   const BLOCK = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'ul', 'ol', 'blockquote', 'table', 'hr', 'div', 'section', 'article', 'details', 'li']);
   const SKIP = new Set(['button', 'svg', 'style', 'script', 'noscript']);
@@ -399,6 +427,8 @@ READ_JS = r"""() => {
     if (SKIP.has(t)) return '';
     if (node.classList.contains('katex-display')) return '$$' + tex(node) + '$$';
     if (node.classList.contains('katex')) return '$' + tex(node) + '$';
+    if (isMath(node)) return '$' + tex(node) + '$';
+    if (isWidget(node)) return '\n' + widget(node) + '\n';
     if (t === 'br') return '\n';
     if (t === 'pre') return '\n' + pre(node) + '\n';
     if (t === 'code') { const s = node.textContent, f = fence(s, 1); return f + (s.startsWith('`') || s.endsWith('`') ? ' ' + s + ' ' : s) + f; }
@@ -407,7 +437,7 @@ READ_JS = r"""() => {
     if (t === 'strong' || t === 'b') return '**' + kids + '**';
     if (t === 'em' || t === 'i') return '*' + kids + '*';
     if (t === 'del' || t === 's') return '~~' + kids + '~~';
-    if (t === 'a') { const h = node.getAttribute('href'); return h && h !== kids ? '[' + kids + '](' + h + ')' : kids; }
+    if (t === 'a') { const h = (node.getAttribute('href') || '').replace(/[?&]utm_source=chatgpt\.com$/, ''); return h && h !== kids ? '[' + kids + '](' + h + ')' : kids; }
     return kids;
   }
   function pre(el) {
@@ -451,6 +481,9 @@ READ_JS = r"""() => {
     for (const node of container.childNodes) {
       const t = node.nodeType === 1 ? node.tagName.toLowerCase() : '';
       if (node.nodeType === 1 && node.classList.contains('katex-display')) { flush(); out.push('$$' + tex(node) + '$$'); continue; }
+      if (isMath(node)) { flush(); out.push('$$' + tex(node) + '$$'); continue; }
+      if (isWidget(node)) { flush(); out.push(widget(node)); continue; }
+      if (node.nodeType === 1 && node.getAttribute('data-d-component') === 'divider') { flush(); out.push('---'); continue; }
       if (!BLOCK.has(t)) { buf += inl(node); continue; }
       flush();
       if (t === 'p') out.push(inl(node).trim());
@@ -493,6 +526,7 @@ DEFAULTS = {
     "cooldown_login_s": 1800, "cooldown_challenge_s": 6 * 3600, "cooldown_limit_s": 3600,
     "cooldown_closed_s": 600, "cooldown_tempchat_s": 6 * 3600, "cooldown_model_s": 3600,
     "challenge_wait_s": 20.0,  # an automatic browser check gets this long to pass by itself; nothing is clicked
+    "driver": "playwright",    # or "patchright": drive Chrome without the automation markers (docs/TECHNICAL.md)
     "headless": False,         # tests only: the real thing is always a visible window
     "notify": True,            # macOS notification when the provider goes unavailable
     "profile": None,           # default: <PCORE_HOME>/chatgpt-web-profile
@@ -520,6 +554,8 @@ class Bridge:
                  sleep=asyncio.sleep, clock=time.time, rand=random.uniform):
         self.base_url = base_url.rstrip("/")
         self.o = {**DEFAULTS, **(options or {})}
+        if env("CHATGPT_WEB_DRIVER"):   # PCORE_CHATGPT_WEB_DRIVER=patchright: a per-machine choice, kept out of the catalog
+            self.o["driver"] = env("CHATGPT_WEB_DRIVER").strip()
         self.home = Path(home) if home else home_dir()
         self.profile = Path(self.o["profile"] or self.home / "chatgpt-web-profile").expanduser()
         self.state_path = self.home / "chatgpt_web.json"
@@ -593,14 +629,23 @@ class Bridge:
         await self._shutdown()
         if gone:   # closing the window is a "not now": stay out of the way for a while instead of reopening it
             raise WebUnavailable("the ChatGPT window was closed", float(self.o["cooldown_closed_s"]), "closed")
+        driver = str(self.o["driver"]).lower()
+        if driver not in ("playwright", "patchright"):
+            raise WebUnavailable(f"unknown chatgpt-web driver {driver!r} (playwright or patchright)", 3600, "setup")
         try:
-            from playwright.async_api import async_playwright
+            if driver == "patchright":
+                from patchright.async_api import async_playwright
+            else:
+                from playwright.async_api import async_playwright
         except ImportError:
-            raise WebUnavailable("playwright is not installed (pip install playwright)", 3600, "setup") from None
+            raise WebUnavailable(f"{driver} is not installed (pip install {driver})", 3600, "setup") from None
         self.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._pw = await async_playwright().start()
         try:
-            # plain Playwright defaults on purpose: nothing here hides that the window is automated
+            # playwright: stock defaults, the window says it is automated (navigator.webdriver is true).
+            # patchright (the approach CatGPT-Gateway uses): the same real Chrome and profile, driven without the
+            # automation markers, so the site's automatic browser check treats it like the hand-opened window.
+            # Launched the way patchright documents: real Chrome, persistent profile, no viewport, no extra flags.
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(self.profile), channel="chrome", headless=bool(self.o["headless"]), no_viewport=True,
                 args=["--window-size=1180,860"])
@@ -655,6 +700,13 @@ class Bridge:
             self._idle = None
 
     async def _probe(self, page, fresh: bool) -> dict:
+        for _ in range(8):   # the page may navigate under the probe (a browser check passing, a redirect): look again
+            try:
+                return await page.evaluate(PROBE_JS, fresh)
+            except Exception as e:  # noqa: BLE001
+                if "context was destroyed" not in str(e) and "navigation" not in str(e):
+                    raise
+                await asyncio.sleep(0.5)
         return await page.evaluate(PROBE_JS, fresh)
 
     def _notices(self, p: dict):

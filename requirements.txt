@@ -4,3 +4,4 @@ httpx
 pyyaml
 pytest
 playwright   # only for the chatgpt-web provider (drives your installed Google Chrome; no browser download needed)
+patchright   # only for the chatgpt-web provider with driver: patchright

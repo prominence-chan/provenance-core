@@ -4,6 +4,8 @@ import asyncio
 import json
 
 import httpx
+import os
+
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -319,7 +321,7 @@ def bridge_for(mock, tmp_path, **opts):
 
     async def sleep(s):
         sleeps.append(s)
-    b = cw.Bridge(mock.url, {"headless": True, "notify": False, "min_gap_s": 3, "max_gap_s": 3, "challenge_wait_s": 1,
+    b = cw.Bridge(mock.url, {"driver": os.environ.get("PCORE_TEST_DRIVER", "playwright"), "headless": True, "notify": False, "min_gap_s": 3, "max_gap_s": 3, "challenge_wait_s": 1,
                              "profile": str(tmp_path / "profile"), **opts}, home=tmp_path, sleep=sleep)
     b.sleeps = sleeps
     return b
@@ -468,3 +470,33 @@ def test_page_end_to_end_through_the_responses_api(mock, tmp_path, monkeypatch):
         st = c.get("/chatgpt-web/status?probe=1").json()
         assert st["ok"] and not st["blocked"] and st["models"][0]["available"]
         c.post("/chatgpt-web/release")
+
+
+@browser
+def test_reads_the_2026_11_markup():
+    """chatgpt.com's markup as captured on 2026-11-21 (no data-message-author-role; an editor widget for code)."""
+    from pathlib import Path
+
+    from playwright.async_api import async_playwright
+    html = (Path(__file__).parent / "real_page_2026_11.html").read_text()
+
+    async def go():
+        async with async_playwright() as pw:
+            br = await pw.chromium.launch(channel="chrome", headless=True)
+            page = await br.new_page()
+            await page.set_content(html)
+            out = await page.evaluate(cw.PROBE_JS, False), await page.evaluate(cw.READ_JS)
+            await br.close()
+            return out
+    p, r = run(go())
+    assert (p["users"], p["assistants"], p["actions"], p["stop"]) == (1, 1, 1, False) and p["lastLen"] > 0
+    md = r["md"]
+    assert md.startswith("## **Example Formatting**")
+    assert "**bold text**, inline code `print(\"Hello\")`, and a [link to example.com](https://example.com)." in md
+    assert "- Nested item" in md and "1. First step\n2. Second step" in md and "> This is a blockquote." in md
+    assert "| Column 1 | Column 2 |\n| --- | --- |\n| A | B |\n| C | D |" in md
+    assert '```python\ndef f(x):\n    # <tag> & "q"\n    return x**2\n```' in md
+    assert "$x^2$" in md and "\n\n---\n\n" in md
+    text, calls = cw.parse_reply(md, {"read_file": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}})
+    assert [(c["name"], json.loads(c["arguments"])) for c in calls] == [("read_file", {"path": "/etc/hosts"})]
+    assert "Python\n" not in md and "Run" not in md and "tool_call" not in text
