@@ -1,0 +1,36 @@
+# Providers: OpenAI-compatible chat endpoints with a free tier. One API key per provider, from your own account.
+# Models: `score` is a prior (0-100) until `python -m tierlm calibrate` measures it; limits are the free-tier caps
+# as published by each provider (check and adjust: they change often). Use `python -m tierlm discover <provider>`
+# to see current model names.
+tiers:
+  - {name: tier-1, min_score: 80}   # frontier-ish
+  - {name: tier-2, min_score: 60}   # strong mid
+  - {name: tier-3, min_score: 0}    # fast / small
+
+providers:
+  google:     {base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: GEMINI_API_KEY}
+  groq:       {base_url: "https://api.groq.com/openai/v1", api_key_env: GROQ_API_KEY}
+  cerebras:   {base_url: "https://api.cerebras.ai/v1", api_key_env: CEREBRAS_API_KEY}
+  openrouter: {base_url: "https://openrouter.ai/api/v1", api_key_env: OPENROUTER_API_KEY}
+  mistral:    {base_url: "https://api.mistral.ai/v1", api_key_env: MISTRAL_API_KEY}
+  github:     {base_url: "https://models.github.ai/inference", api_key_env: GITHUB_TOKEN}
+  nvidia:     {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}
+
+models:
+  - {provider: google, model: gemini-2.5-pro, score: 88, context: 1000000, limits: {rpm: 5, rpd: 100}}
+  - {provider: google, model: gemini-2.5-flash, score: 78, context: 1000000, limits: {rpm: 10, rpd: 250}}
+  - {provider: google, model: gemini-2.5-flash-lite, score: 62, context: 1000000, limits: {rpm: 15, rpd: 1000}}
+  - {provider: groq, model: openai/gpt-oss-120b, score: 82, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000}}
+  - {provider: groq, model: llama-3.3-70b-versatile, score: 62, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 12000}}
+  - {provider: groq, model: llama-3.1-8b-instant, score: 35, context: 131072, limits: {rpm: 30, rpd: 14400, tpm: 6000}}
+  - {provider: cerebras, model: gpt-oss-120b, score: 82, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
+  - {provider: cerebras, model: qwen-3-235b-a22b-instruct-2507, score: 80, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
+  - {provider: openrouter, model: "deepseek/deepseek-r1:free", score: 84, context: 65536, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "deepseek/deepseek-chat-v3.1:free", score: 78, context: 65536, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "qwen/qwen3-coder:free", score: 74, context: 65536, limits: {rpm: 20, rpd: 50}}
+  - {provider: mistral, model: mistral-large-latest, score: 72, context: 131072, limits: {rpm: 60}}
+  - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}
+  - {provider: github, model: openai/gpt-4.1, score: 76, context: 128000, limits: {rpm: 10, rpd: 50}}
+  - {provider: github, model: openai/gpt-4.1-mini, score: 64, context: 128000, limits: {rpm: 15, rpd: 150}}
+  - {provider: nvidia, model: deepseek-ai/deepseek-v3.1, score: 78, context: 131072, limits: {rpm: 40}}
+  - {provider: nvidia, model: meta/llama-3.3-70b-instruct, score: 62, context: 131072, limits: {rpm: 40}}
