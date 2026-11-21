@@ -106,11 +106,20 @@ def text_of(content) -> str:
     return "".join(p.get("text", "") for p in content if isinstance(p, dict))
 
 
+async def _call_named(router: Router, m, body: dict, stream: bool):
+    """A request that names its model has nowhere to fail over to, so on a chatgpt_web model it queues for the one
+    window for `named_wait_s` (a few agents sharing the chat) instead of the short `queue_wait_s` of tier requests."""
+    p = router.catalog.providers[m.provider]
+    if p.type == "chatgpt_web":
+        return await router._web_call(m, body, stream, wait=float(router.bridge(m.provider).o["named_wait_s"]))
+    return await router.call(m, body, stream=stream)
+
+
 async def complete(router: Router, body: dict, target: Target, session: str, web: bool = False):
     if target.concrete:
         m = router.catalog.models[target.concrete]
         try:
-            return await router.call(m, body), m
+            return await _call_named(router, m, body, False), m
         except Exception as e:  # noqa: BLE001
             raise NoCapacity(str(e)) from e
     return await router.complete(body, target.tier, session, target.fallback, web=web)
@@ -120,7 +129,7 @@ async def open_stream(router: Router, body: dict, target: Target, session: str, 
     if target.concrete:
         m = router.catalog.models[target.concrete]
         try:
-            resp, t0 = await router.call(m, body, stream=True)
+            resp, t0 = await _call_named(router, m, body, True)
         except Exception as e:  # noqa: BLE001
             raise NoCapacity(str(e)) from e
         router.state.record(m, estimate_tokens(body))

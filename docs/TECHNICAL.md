@@ -263,6 +263,7 @@ page is fine again.
 | `daily_cap` | 200 | requests per local day (repair messages count) |
 | `min_gap_s`, `max_gap_s` | 4, 9 | pause between requests, a random time in that range |
 | `queue_wait_s` | 45 | how long a request waits for the one in flight |
+| `named_wait_s` | 300 | the same wait for a request that names the model (no pool to fail over to; lets a few agents share the window) |
 | `reply_timeout_s` | 600 | longest wait for one reply |
 | `idle_close_s` | 900 | close the window after this long without a request |
 | `max_prompt_chars` | 120000 | larger requests skip the bridge |

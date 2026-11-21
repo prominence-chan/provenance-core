@@ -777,6 +777,7 @@ DEFAULTS = {
     "min_gap_s": 4.0,  # pause between requests: a random time in [min_gap_s, max_gap_s]
     "max_gap_s": 9.0,
     "queue_wait_s": 45.0,  # a request waits this long for the one in flight, then goes to the normal pool
+    "named_wait_s": 300.0,  # the same wait for a request that names the model (it has no pool to go to)
     "reply_timeout_s": 600.0,  # longest wait for one reply (thinking models take minutes)
     "idle_close_s": 900.0,  # close the window after this long without a request
     "max_prompt_chars": 120000,
