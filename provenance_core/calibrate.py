@@ -86,7 +86,7 @@ def _eval24(text: str, digits: str) -> bool:
 def grade(text: str, pattern: str) -> bool:
     if pattern.startswith("EVAL24:"):
         return _eval24(text, pattern.split(":", 1)[1])
-    t = (text or "").strip()
+    t = re.sub(r"<(thought|think)>.*?</\1>", "", text or "", flags=re.S).strip()   # inline reasoning blocks
     t = re.sub(r"^```\w*\n?|```$", "", t).strip()
     last = t.splitlines()[-1] if t else ""
     return bool(re.search(pattern, last, re.I) or re.search(pattern, t, re.I))
