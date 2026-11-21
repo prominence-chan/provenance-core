@@ -84,6 +84,16 @@ def test_parse_tool_calls():
     assert text == "Running it." and calls[0]["name"] == "shell"
 
 
+def test_parse_drops_what_the_model_wrote_past_its_turn():
+    md = ('Patching.\n\n```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```\n\n'
+          '<<<tool result: shell>>>\na.py\n\nDone, the file is fixed.')
+    text, calls = cw.parse_reply(md, SCHEMAS)
+    assert text == "Patching." and len(calls) == 1
+    md = 'Note.\n\n```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```\n\nThe output will be a.py.'
+    assert cw.parse_reply(md, SCHEMAS)[0] == "Note."
+    assert cw.parse_reply("<<<assistant>>>\nAll good.\n\n<<<user>>>\nthanks", SCHEMAS) == ("All good.", [])
+
+
 def test_parse_leaves_ordinary_replies_alone():
     md = 'Here is a config:\n\n```json\n{"name": "demo", "version": 1}\n```\n\nand code:\n\n```python\nprint("hi")\n```'
     assert cw.parse_reply(md, SCHEMAS) == (md, [])

@@ -75,6 +75,9 @@ The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked 
 sits in a tier by its score like any other model; Provenance / Codex requests for that tier try it first and fall
 back to the normal pool whenever it is busy, signed out, rate limited or showing a challenge.
 
+As of 2026-11-21 chatgpt.com answers the automated window with a Cloudflare check that does not clear by itself, so
+in practice the bridge reports itself unavailable and requests use the normal pool; it does not try to get past it.
+
 **Know the risk:** automating the ChatGPT web app is against OpenAI's terms of use. The realistic downside is your
 ChatGPT account being limited or banned. The bridge is therefore slow on purpose (one request at a time, a pause
 between requests, a daily cap of 200) and never tries to get around a captcha, challenge or "unusual activity"

@@ -126,17 +126,27 @@ class Router:
         closed window, bad tool call) surfaces here and the caller can still fail over."""
         from .chatgpt_web import BufferedStream, WebSkip, WebUnavailable
         t0 = time.time()
+        size = len(json.dumps(body.get("messages", []), default=str))
+
+        def log(what: str):   # one line per attempt in the server log: the bridge is slow and worth being able to follow
+            print(f"chatgpt-web: {m.id} {what} ({size} chars in, {time.time() - t0:.0f} s)", flush=True)
         try:
             data = await self.bridge(m.provider).complete(m.model, body, model_id=m.id, wait=wait)
         except WebUnavailable as e:
             self.state.failure(m, retry_after=max(1.0, e.cooldown), rate_limited=True)
+            log(f"unavailable for {int(e.cooldown)} s: {e.reason}")
             raise RuntimeError(f"{m.id}: unavailable: {e.reason}") from e
         except WebSkip as e:
+            log(f"skipped: {e}")
             raise RuntimeError(f"{m.id}: skipped: {e}") from e
         except Exception as e:  # noqa: BLE001
             self.state.failure(m)
+            log(f"failed: {e}")
             raise RuntimeError(f"{m.id}: {e}") from e
         self.state.success(m, (time.time() - t0) * 1000)
+        msg = data["choices"][0]["message"]
+        log(f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
+            + (", repaired" if data["pcore"]["web"].get("repaired") else ""))
         if stream:
             return BufferedStream(data), t0
         self.state.record(m, data["usage"]["total_tokens"])

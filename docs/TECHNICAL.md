@@ -108,6 +108,14 @@ stateless completion engine.
 rate limited, flagged or banned. Everything below is built to stay small and visible rather than to hide: it is
 opt-in, serial, paced, capped, and stops at the first sign that the site wants a human.
 
+**Status on 2026-11-21.** Verified: everything against the local mock page; the text tool protocol with real
+Provenance requests (about 42k characters, 12 tools, including a repair round) answered by a pool model that saw
+only the rendered prompt; failover with real Provenance when the login is missing and when the page is challenged.
+Not verified: a real reply from chatgpt.com. After a manual sign-in, the first automated check of the signed-in page
+passed, and every later load was answered with a Cloudflare "Just a moment..." page that does not clear by itself.
+The bridge stops there by design (6 h block, requests go to the normal pool), so the signed-in page's markup, prompt
+fidelity in the real composer, the model picker and the model's score are still unmeasured.
+
 **What it does per request**
 
 1. Renders the whole chat request (system prompt, tool definitions, every message, earlier tool calls and their

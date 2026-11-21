@@ -169,6 +169,9 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
 _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*([\w+#.-]*)[^\n]*\n(.*?)\n[ \t]*\1[ \t]*$", re.S | re.M)
 
 
+_TURN = re.compile(r"^[ \t]*<<<(?:user|assistant|tool result[^>\n]*)>>>[ \t]*$", re.M)
+
+
 def _loads(s: str):
     s = s.strip()
     try:
@@ -214,6 +217,10 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
     """The reply (as markdown) -> (text, [{id, name, arguments (JSON str)}]). Raises Malformed when a tool call is
     there but unusable, or when one was required and none came."""
     rules = rules or {}
+    md = re.sub(r"\A\s*<<<assistant>>>[ \t]*\n", "", md)
+    m = _TURN.search(md)
+    if m:   # the model kept writing the transcript (the next turn, or a made-up tool result): its turn ends there
+        md = md[:m.start()]
     calls, keep, pos = [], [], 0
     if tools:
         for m in _FENCE.finditer(md):
@@ -235,7 +242,8 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
             calls += [_check(c, tools) for c in found]
             keep.append(md[pos:m.start()])
             pos = m.end()
-    text = ("".join(keep) + md[pos:]).strip() if calls else md.strip()
+    # with a call, the turn is what came before the last block: anything after it is not the model's to write
+    text = "".join(keep).strip() if calls else md.strip()
     if tools and not calls:
         # a call written without its fence: the page renders it as prose, so the JSON may be mangled
         m = re.search(r"(?:^|\n)[ \t]*(?:tool_call|tool call)\b[^\n{]*\n?[ \t]*(\{)", md, re.I)
@@ -249,7 +257,7 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
             except ValueError:
                 raise Malformed("the tool call must be inside a ```tool_call fenced block containing valid JSON") from None
             calls = [_check(c, tools)]
-            text = (md[:m.start() if m else start] + md[start + end:]).strip()
+            text = md[:m.start() if m else start].strip()
     if rules.get("only") and any(c["name"] != rules["only"] for c in calls):
         raise Malformed(f"this turn must call the tool {rules['only']}")
     if rules.get("must") and not calls:
