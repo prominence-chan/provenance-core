@@ -19,6 +19,7 @@ How it stays honest and gentle (read docs/TECHNICAL.md before turning it on):
 
 Automating the web app is against OpenAI's terms of use; the realistic downside is the ChatGPT account being
 limited or banned. That is why this is opt-in and deliberately slow."""
+
 from __future__ import annotations
 
 import asyncio
@@ -148,7 +149,11 @@ def raw_arg(schema: dict) -> str | None:
     (exec_command's `cmd`), i.e. the one required argument when it is free text. None for every other tool."""
     props = (schema or {}).get("properties") or {}
     req = (schema or {}).get("required") or (list(props) if len(props) == 1 else [])
-    if len(req) == 1 and req[0] in ("cmd", "command", "input", "script") and (props.get(req[0]) or {}).get("type") == "string":
+    if (
+        len(req) == 1
+        and req[0] in ("cmd", "command", "input", "script")
+        and (props.get(req[0]) or {}).get("type") == "string"
+    ):
         return req[0]
     return None
 
@@ -163,7 +168,7 @@ def call_block(name: str, arguments, tools: dict | None = None) -> str:
     key = raw_arg((tools or {}).get(name) or {}) if tools and name in tools else None
     if key and isinstance(arguments, dict) and list(arguments) == [key] and isinstance(arguments[key], str):
         body = arguments[key]
-        if body.strip() and ("\n" in body or '"' in body or "\\" in body):   # where the shorthand reads better than JSON
+        if body.strip() and ("\n" in body or '"' in body or "\\" in body):  # where the shorthand reads better than JSON
             ticks = max([3] + [len(x) + 1 for x in re.findall(r"`{3,}", body)])
             return "`" * ticks + name + "\n" + body.strip("\n") + "\n" + "`" * ticks
     return "```tool_call\n" + json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False) + "\n```"
@@ -225,8 +230,11 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
         if fn.get("name") and choice != "none":
             tools[fn["name"]] = fn.get("parameters") or {"type": "object", "properties": {}}
             descs[fn["name"]] = fn.get("description") or ""
-    rules = {"single": body.get("parallel_tool_calls") is False or bool(body.get("_single_tool_call")), "must": False,
-             "only": None}
+    rules = {
+        "single": body.get("parallel_tool_calls") is False or bool(body.get("_single_tool_call")),
+        "must": False,
+        "only": None,
+    }
     if tools and choice == "required":
         rules["must"] = True
     elif tools and isinstance(choice, dict) and (choice.get("function") or {}).get("name") in tools:
@@ -234,38 +242,55 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
 
     raw = {n: raw_arg(s) for n, s in tools.items() if raw_arg(s)}
     shell = next((n for n in SHELL_TOOLS if n in raw), None)
-    system = "\n\n".join(_text(m.get("content")) for m in body.get("messages") or []
-                         if m.get("role") in ("system", "developer") and m.get("content"))
+    system = "\n\n".join(
+        _text(m.get("content"))
+        for m in body.get("messages") or []
+        if m.get("role") in ("system", "developer") and m.get("content")
+    )
     parts = [FRAME if tools else FRAME_PLAIN]
     if system.strip():
         patch = ""
         if tools and shell and "apply_patch" in system and "apply_patch" not in tools:
-            patch = (f" (in particular, there is no separate apply_patch tool here: to edit a file, run `apply_patch` "
-                     f"as a shell command through {shell}, with the patch in a heredoc)")
+            patch = (
+                f" (in particular, there is no separate apply_patch tool here: to edit a file, run `apply_patch` "
+                f"as a shell command through {shell}, with the patch in a heredoc)"
+            )
         head = INSTRUCTIONS_HEAD % patch if tools else "# Instructions"
         parts.append(head + "\n\n" + system.strip())
     if tools:
-        many = ("At most one tool block per turn." if rules["single"]
-                else "One block per call; several blocks call several tools in one turn.")
+        many = (
+            "At most one tool block per turn."
+            if rules["single"]
+            else "One block per call; several blocks call several tools in one turn."
+        )
         sec = [TOOLS_HEAD % many]
         if raw:
             ex = shell or next(iter(raw))
             names = ", ".join(f"`{n}` (body = `{k}`)" for n, k in raw.items())
-            sample = ("apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/app.py\n@@\n-old line\n+new line\n"
-                      "*** End Patch\nEOF" if ex == shell and "apply_patch" in system else
-                      "rg -n \"TODO\" src | head -20" if ex == shell else f"<the {raw[ex]} text>")
+            sample = (
+                "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/app.py\n@@\n-old line\n+new line\n"
+                "*** End Patch\nEOF"
+                if ex == shell and "apply_patch" in system
+                else 'rg -n "TODO" src | head -20'
+                if ex == shell
+                else f"<the {raw[ex]} text>"
+            )
             sec.append(RAW_HEAD % (names, "text of that argument", ex, sample))
         if rules["only"]:
             sec.append(f"In this turn you must call the tool `{rules['only']}`.")
         elif rules["must"]:
             sec.append("In this turn you must call a tool.")
-        sec.append("The tools, as TypeScript signatures (`_` is the arguments object, `?` marks an optional argument):\n\n"
-                   + "\n\n".join(tool_decl(n, descs[n], s) for n, s in tools.items()))
+        sec.append(
+            "The tools, as TypeScript signatures (`_` is the arguments object, `?` marks an optional argument):\n\n"
+            + "\n\n".join(tool_decl(n, descs[n], s) for n, s in tools.items())
+        )
         parts.append("\n\n".join(sec))
     fmt = body.get("response_format") or {}
     if fmt.get("type") == "json_schema":
-        parts.append("# Output format\nReply with one JSON value only (no prose, no code fence) matching this schema: "
-                     + json.dumps((fmt.get("json_schema") or {}).get("schema") or {}, separators=(",", ":")))
+        parts.append(
+            "# Output format\nReply with one JSON value only (no prose, no code fence) matching this schema: "
+            + json.dumps((fmt.get("json_schema") or {}).get("schema") or {}, separators=(",", ":"))
+        )
     elif fmt.get("type") == "json_object":
         parts.append("# Output format\nReply with one JSON object only (no prose, no code fence).")
 
@@ -286,12 +311,19 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
             convo.append(f"<<<tool result: {name}>>>\n" + _text(m.get("content")))
         else:
             convo.append("<<<user>>>\n" + _text(m.get("content")))
-    parts.append("# Conversation\nEach turn starts with a <<<role>>> line. <<<user>>> is me (or context the harness adds "
-                 "for me), <<<assistant>>> is you, <<<tool result>>> is what a tool returned on my computer.\n\n"
-                 + "\n\n".join(convo))
+    parts.append(
+        "# Conversation\nEach turn starts with a <<<role>>> line. <<<user>>> is me (or context the harness adds "
+        "for me), <<<assistant>>> is you, <<<tool result>>> is what a tool returned on my computer.\n\n"
+        + "\n\n".join(convo)
+    )
     if tools:
-        how = (f", or the ```{shell} shorthand for a command" if shell else
-               f", or the ```{next(iter(raw))} shorthand" if raw else "")
+        how = (
+            f", or the ```{shell} shorthand for a command"
+            if shell
+            else f", or the ```{next(iter(raw))} shorthand"
+            if raw
+            else ""
+        )
         parts.append(REMINDER_TOOLS % how)
     else:
         parts.append(REMINDER_PLAIN)
@@ -310,14 +342,14 @@ def _loads(s: str):
     try:
         return json.loads(s)
     except json.JSONDecodeError:
-        return json.loads(s, strict=False)   # raw newlines / tabs inside strings
+        return json.loads(s, strict=False)  # raw newlines / tabs inside strings
 
 
 def _as_call(obj, tools: dict) -> dict | None:
     """A JSON value as a tool call {name, arguments}, or None when it isn't shaped like one."""
     if not isinstance(obj, dict):
         return None
-    if isinstance(obj.get("function"), dict):   # {"type": "function", "function": {"name", "arguments"}}
+    if isinstance(obj.get("function"), dict):  # {"type": "function", "function": {"name", "arguments"}}
         obj = obj["function"]
     name = obj.get("name") or obj.get("tool") or obj.get("tool_name")
     args = next((obj[k] for k in ("arguments", "args", "parameters", "input") if k in obj), None)
@@ -330,14 +362,14 @@ def _check(call: dict, tools: dict) -> dict:
     name, args = call["name"], call["arguments"]
     if name not in tools:
         raise Malformed(f"unknown tool {name!r}; the tools are: {', '.join(tools)}")
-    if isinstance(args, str):   # arguments given as a JSON string
+    if isinstance(args, str):  # arguments given as a JSON string
         try:
             args = _loads(args)
         except json.JSONDecodeError:
-            props = (tools[name].get("properties") or {})
+            props = tools[name].get("properties") or {}
             if len(props) != 1:
                 raise Malformed(f"arguments of {name} must be a JSON object") from None
-            args = {next(iter(props)): args}   # a single-string tool given its raw string
+            args = {next(iter(props)): args}  # a single-string tool given its raw string
     if not isinstance(args, dict):
         raise Malformed(f"arguments of {name} must be a JSON object")
     missing = [k for k in tools[name].get("required") or [] if k not in args]
@@ -352,15 +384,15 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
     rules = rules or {}
     md = re.sub(r"\A\s*<<<assistant>>>[ \t]*\n", "", md)
     m = _TURN.search(md)
-    if m:   # the model kept writing the transcript (the next turn, or a made-up tool result): its turn ends there
-        md = md[:m.start()]
+    if m:  # the model kept writing the transcript (the next turn, or a made-up tool result): its turn ends there
+        md = md[: m.start()]
     calls, keep, pos = [], [], 0
     shorthand = {n.lower(): (n, raw_arg(sc)) for n, sc in tools.items() if raw_arg(sc)}
     if tools:
         for m in _FENCE.finditer(md):
             lang, inner = m.group(2).lower(), m.group(3)
             short = shorthand.get(lang)
-            if short:   # ```exec_command: the body is the raw argument (or, from a careful model, JSON after all)
+            if short:  # ```exec_command: the body is the raw argument (or, from a careful model, JSON after all)
                 name, key = short
                 args = None
                 if inner.lstrip().startswith("{"):
@@ -369,7 +401,11 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                         c = _as_call(obj, tools) if isinstance(obj, dict) else None
                         if c and c["name"] == name and isinstance(c["arguments"], dict):
                             args = c["arguments"]
-                        elif isinstance(obj, dict) and key in obj and set(obj) <= set(tools[name].get("properties") or {}):
+                        elif (
+                            isinstance(obj, dict)
+                            and key in obj
+                            and set(obj) <= set(tools[name].get("properties") or {})
+                        ):
                             args = obj
                     except json.JSONDecodeError:
                         pass
@@ -378,7 +414,7 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                         raise Malformed(f"the {name} block is empty")
                     args = {key: inner}
                 calls.append(_check({"name": name, "arguments": args}, tools))
-                keep.append(md[pos:m.start()])
+                keep.append(md[pos : m.start()])
                 pos = m.end()
                 continue
             tagged = lang in TOOL_TAGS
@@ -388,15 +424,17 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                 obj = _loads(inner)
             except json.JSONDecodeError as e:
                 if tagged:
-                    raise Malformed(f"a tool_call block is not valid JSON ({e.msg} at line {e.lineno} column {e.colno})") from None
+                    raise Malformed(
+                        f"a tool_call block is not valid JSON ({e.msg} at line {e.lineno} column {e.colno})"
+                    ) from None
                 continue
             found = [_as_call(o, tools) for o in (obj if isinstance(obj, list) else [obj])]
             if not tagged and not all(c and c["name"] in tools for c in found):
-                continue   # an ordinary json block, not a call
+                continue  # an ordinary json block, not a call
             if not found or not all(found):
                 raise Malformed('a tool_call block must be {"name": ..., "arguments": {...}}')
             calls += [_check(c, tools) for c in found]
-            keep.append(md[pos:m.start()])
+            keep.append(md[pos : m.start()])
             pos = m.end()
     # with a call, the turn is what came before the last block: anything after it is not the model's to write
     text = "".join(keep).strip() if calls else md.strip()
@@ -411,23 +449,29 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                 if not c:
                     raise ValueError
             except ValueError:
-                raise Malformed("the tool call must be inside a ```tool_call fenced block containing valid JSON") from None
+                raise Malformed(
+                    "the tool call must be inside a ```tool_call fenced block containing valid JSON"
+                ) from None
             calls = [_check(c, tools)]
-            text = md[:m.start() if m else start].strip()
+            text = md[: m.start() if m else start].strip()
     if rules.get("only") and any(c["name"] != rules["only"] for c in calls):
         raise Malformed(f"this turn must call the tool {rules['only']}")
     if rules.get("must") and not calls:
-        raise Malformed("this turn must contain a tool_call block" + (f" for {rules['only']}" if rules.get("only") else ""))
+        raise Malformed(
+            "this turn must contain a tool_call block" + (f" for {rules['only']}" if rules.get("only") else "")
+        )
     if rules.get("single"):
         calls = calls[:1]
     return text, calls
 
 
 def repair_message(err: Malformed) -> str:
-    return (f"The program could not use that reply: {err}.\nSend the whole turn again, corrected. A tool call is a "
-            'fenced code block tagged tool_call holding one valid JSON object {"name": ..., "arguments": {...}} '
-            "(newlines inside strings written as \\n), or the shorthand block tagged with the tool's name. It runs "
-            "on my computer; do not use your built-in tools instead.")
+    return (
+        f"The program could not use that reply: {err}.\nSend the whole turn again, corrected. A tool call is a "
+        'fenced code block tagged tool_call holding one valid JSON object {"name": ..., "arguments": {...}} '
+        "(newlines inside strings written as \\n), or the shorthand block tagged with the tool's name. It runs "
+        "on my computer; do not use your built-in tools instead."
+    )
 
 
 # A turn with no call that isn't an answer either. Two kinds seen from the web model: it looked for the tools in its
@@ -443,8 +487,10 @@ _STALL = re.compile(
     r"|\bso (?:that )?I can (?:continue|proceed)\b"
     r"|\bI(?:['’]ll| will| am going to|['’]m going to)(?: \w+){0,2} (?:use|run|inspect|check|look|read|open|start|begin|apply|"
     r"patch|create|add|implement|update|fix|search|list|examine|proceed|continue|try|write|edit|verify|test|reproduce)\b"
-    r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b", re.I)
-STALL_MAX = 1500   # longer than this is a real answer that happens to mention a limitation or a next step
+    r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b",
+    re.I,
+)
+STALL_MAX = 1500  # longer than this is a real answer that happens to mention a limitation or a next step
 
 
 def stalled(text: str, tools: dict) -> bool:
@@ -454,27 +500,36 @@ def stalled(text: str, tools: dict) -> bool:
 def nudge_message(tools: dict) -> str:
     raw = {n: raw_arg(s) for n, s in tools.items() if raw_arg(s)}
     shell = next((n for n in SHELL_TOOLS if n in raw), None)
-    how = (f"```{shell}\n<the command>\n```" if shell else
-           '```tool_call\n{"name": "<tool name>", "arguments": {...}}\n```')
-    return ("That reply had no tool block, so nothing ran, and sent as it is it would end the agent's run. Nobody "
-            "else runs commands for you here. A tool call is just text in your reply (it does not need your "
-            "function-calling interface) and my program runs it on my computer. If there is a next step, write the "
-            f"turn again and take it now by ending the turn with a block like this:\n\n{how}\n\n"
-            "A command that failed is a reason to try another way, not to stop. If you really are finished, or need "
-            "a decision from me, repeat your answer instead.")
+    how = (
+        f"```{shell}\n<the command>\n```" if shell else '```tool_call\n{"name": "<tool name>", "arguments": {...}}\n```'
+    )
+    return (
+        "That reply had no tool block, so nothing ran, and sent as it is it would end the agent's run. Nobody "
+        "else runs commands for you here. A tool call is just text in your reply (it does not need your "
+        "function-calling interface) and my program runs it on my computer. If there is a next step, write the "
+        f"turn again and take it now by ending the turn with a block like this:\n\n{how}\n\n"
+        "A command that failed is a reason to try another way, not to stop. If you really are finished, or need "
+        "a decision from me, repeat your answer instead."
+    )
 
 
 def chat_completion(model_id: str, text: str, calls: list[dict], prompt: str, extra: dict | None = None) -> dict:
     msg: dict = {"role": "assistant", "content": text or None}
     if calls:
-        msg["tool_calls"] = [{"id": c["id"], "type": "function",
-                              "function": {"name": c["name"], "arguments": c["arguments"]}} for c in calls]
+        msg["tool_calls"] = [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+            for c in calls
+        ]
     out = len(text) // 4 + sum(len(c["arguments"]) for c in calls) // 4
-    return {"id": "chatcmpl-web-" + secrets.token_hex(10), "object": "chat.completion", "created": int(time.time()),
-            "model": model_id, "choices": [{"index": 0, "message": msg,
-                                            "finish_reason": "tool_calls" if calls else "stop"}],
-            "usage": {"prompt_tokens": len(prompt) // 4, "completion_tokens": out,
-                      "total_tokens": len(prompt) // 4 + out}, "pcore": {"web": extra or {}}}
+    return {
+        "id": "chatcmpl-web-" + secrets.token_hex(10),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if calls else "stop"}],
+        "usage": {"prompt_tokens": len(prompt) // 4, "completion_tokens": out, "total_tokens": len(prompt) // 4 + out},
+        "pcore": {"web": extra or {}},
+    }
 
 
 class BufferedStream:
@@ -488,11 +543,23 @@ class BufferedStream:
         base = {"id": data["id"], "object": "chat.completion.chunk", "created": data["created"], "model": data["model"]}
         chunks = [{**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}]
         if msg.get("content"):
-            chunks.append({**base, "choices": [{"index": 0, "delta": {"content": msg["content"]}, "finish_reason": None}]})
+            chunks.append(
+                {**base, "choices": [{"index": 0, "delta": {"content": msg["content"]}, "finish_reason": None}]}
+            )
         for i, tc in enumerate(msg.get("tool_calls") or []):
-            chunks.append({**base, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": i, **tc}]}, "finish_reason": None}]})
-        chunks.append({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": ch["finish_reason"]}],
-                       "usage": data["usage"]})
+            chunks.append(
+                {
+                    **base,
+                    "choices": [{"index": 0, "delta": {"tool_calls": [{"index": i, **tc}]}, "finish_reason": None}],
+                }
+            )
+        chunks.append(
+            {
+                **base,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": ch["finish_reason"]}],
+                "usage": data["usage"],
+            }
+        )
         self.lines = ["data: " + json.dumps(c) for c in chunks] + ["data: [DONE]"]
         self.status_code = 200
         self.headers: dict = {}
@@ -696,28 +763,36 @@ READ_JS = r"""() => {
 }"""
 
 COMPOSER = '#prompt-textarea, div[contenteditable][role="textbox"], textarea[name="prompt"], main textarea'
-SEND = ('[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], '
-        'button[aria-label="Send"]')
-SWITCHER = ('[data-testid="model-switcher-dropdown-button"], button[aria-label^="Model selector" i], '
-            'button[aria-haspopup="menu"][aria-label*="model" i]')
+SEND = (
+    '[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"], '
+    'button[aria-label="Send"]'
+)
+SWITCHER = (
+    '[data-testid="model-switcher-dropdown-button"], button[aria-label^="Model selector" i], '
+    'button[aria-haspopup="menu"][aria-label*="model" i]'
+)
 
 DEFAULTS = {
-    "daily_cap": 200,          # requests per local day; then unavailable until midnight
-    "min_gap_s": 4.0,          # pause between requests: a random time in [min_gap_s, max_gap_s]
+    "daily_cap": 200,  # requests per local day; then unavailable until midnight
+    "min_gap_s": 4.0,  # pause between requests: a random time in [min_gap_s, max_gap_s]
     "max_gap_s": 9.0,
-    "queue_wait_s": 45.0,      # a request waits this long for the one in flight, then goes to the normal pool
+    "queue_wait_s": 45.0,  # a request waits this long for the one in flight, then goes to the normal pool
     "reply_timeout_s": 600.0,  # longest wait for one reply (thinking models take minutes)
-    "idle_close_s": 900.0,     # close the window after this long without a request
+    "idle_close_s": 900.0,  # close the window after this long without a request
     "max_prompt_chars": 120000,
-    "strict_model": True,      # a model other than "auto" must be the one selected in the page's model picker
-    "endpoints": ["responses"],   # tier requests from these front ends may use the bridge (responses, messages, chat)
-    "cooldown_login_s": 1800, "cooldown_challenge_s": 6 * 3600, "cooldown_limit_s": 3600,
-    "cooldown_closed_s": 600, "cooldown_tempchat_s": 6 * 3600, "cooldown_model_s": 3600,
+    "strict_model": True,  # a model other than "auto" must be the one selected in the page's model picker
+    "endpoints": ["responses"],  # tier requests from these front ends may use the bridge (responses, messages, chat)
+    "cooldown_login_s": 1800,
+    "cooldown_challenge_s": 6 * 3600,
+    "cooldown_limit_s": 3600,
+    "cooldown_closed_s": 600,
+    "cooldown_tempchat_s": 6 * 3600,
+    "cooldown_model_s": 3600,
     "challenge_wait_s": 20.0,  # an automatic browser check gets this long to pass by itself; nothing is clicked
-    "driver": "playwright",    # or "patchright": drive Chrome without the automation markers (docs/TECHNICAL.md)
-    "headless": False,         # tests only: the real thing is always a visible window
-    "notify": True,            # macOS notification when the provider goes unavailable
-    "profile": None,           # default: <PCORE_HOME>/chatgpt-web-profile
+    "driver": "playwright",  # or "patchright": drive Chrome without the automation markers (docs/TECHNICAL.md)
+    "headless": False,  # tests only: the real thing is always a visible window
+    "notify": True,  # macOS notification when the provider goes unavailable
+    "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
 }
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 LOGIN_HINT = "run `provenance-core weblogin` and sign in to ChatGPT in the window it opens"
@@ -738,11 +813,20 @@ def enabled(options: dict | None) -> bool:
 class Bridge:
     """One Chrome window on the dedicated profile; one request at a time."""
 
-    def __init__(self, base_url: str = "https://chatgpt.com", options: dict | None = None, home: Path | None = None,
-                 sleep=asyncio.sleep, clock=time.time, rand=random.uniform):
+    def __init__(
+        self,
+        base_url: str = "https://chatgpt.com",
+        options: dict | None = None,
+        home: Path | None = None,
+        sleep=asyncio.sleep,
+        clock=time.time,
+        rand=random.uniform,
+    ):
         self.base_url = base_url.rstrip("/")
         self.o = {**DEFAULTS, **(options or {})}
-        if env("CHATGPT_WEB_DRIVER"):   # PCORE_CHATGPT_WEB_DRIVER=patchright: a per-machine choice, kept out of the catalog
+        if env(
+            "CHATGPT_WEB_DRIVER"
+        ):  # PCORE_CHATGPT_WEB_DRIVER=patchright: a per-machine choice, kept out of the catalog
             self.o["driver"] = env("CHATGPT_WEB_DRIVER").strip()
         self.home = Path(home) if home else home_dir()
         self.profile = Path(self.o["profile"] or self.home / "chatgpt-web-profile").expanduser()
@@ -751,7 +835,7 @@ class Bridge:
         self.lock = asyncio.Lock()
         self._pw = self._ctx = self._page = None
         self._closing = False
-        self._gone = False        # the user closed the window themselves
+        self._gone = False  # the user closed the window themselves
         self._last_done = 0.0
         self._idle: asyncio.Task | None = None
         self._notified: str | None = None
@@ -778,11 +862,19 @@ class Bridge:
     def status(self) -> dict:
         s = self.load()
         left = (s.get("blocked_until") or 0) - self.clock()
-        return {"signed_in": s.get("signed_in"), "checked_at": s.get("checked_at"), "today": s.get("count", 0),
-                "daily_cap": self.o["daily_cap"], "blocked": left > 0, "blocked_for_s": max(0, int(left)),
-                "reason": s.get("reason") if left > 0 else None, "kind": s.get("kind") if left > 0 else None,
-                "model_seen": s.get("model_seen"), "window_open": self._page is not None,
-                "profile": str(self.profile)}
+        return {
+            "signed_in": s.get("signed_in"),
+            "checked_at": s.get("checked_at"),
+            "today": s.get("count", 0),
+            "daily_cap": self.o["daily_cap"],
+            "blocked": left > 0,
+            "blocked_for_s": max(0, int(left)),
+            "reason": s.get("reason") if left > 0 else None,
+            "kind": s.get("kind") if left > 0 else None,
+            "model_seen": s.get("model_seen"),
+            "window_open": self._page is not None,
+            "profile": str(self.profile),
+        }
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
@@ -815,7 +907,7 @@ class Bridge:
             return self._page
         gone, self._gone = self._gone, False
         await self._shutdown()
-        if gone:   # closing the window is a "not now": stay out of the way for a while instead of reopening it
+        if gone:  # closing the window is a "not now": stay out of the way for a while instead of reopening it
             raise WebUnavailable("the ChatGPT window was closed", float(self.o["cooldown_closed_s"]), "closed")
         driver = str(self.o["driver"]).lower()
         if driver not in ("playwright", "patchright"):
@@ -835,14 +927,19 @@ class Bridge:
             # automation markers, so the site's automatic browser check treats it like the hand-opened window.
             # Launched the way patchright documents: real Chrome, persistent profile, no viewport, no extra flags.
             self._ctx = await self._pw.chromium.launch_persistent_context(
-                str(self.profile), channel="chrome", headless=bool(self.o["headless"]), no_viewport=True,
-                args=["--window-size=1180,860"])
+                str(self.profile),
+                channel="chrome",
+                headless=bool(self.o["headless"]),
+                no_viewport=True,
+                args=["--window-size=1180,860"],
+            )
         except Exception as e:  # noqa: BLE001 - profile in use (weblogin still open), Chrome missing, ...
             await self._shutdown()
-            raise WebUnavailable(f"could not open Chrome on the chatgpt-web profile: {str(e).splitlines()[0][:160]}",
-                                 120, "browser") from None
+            raise WebUnavailable(
+                f"could not open Chrome on the chatgpt-web profile: {str(e).splitlines()[0][:160]}", 120, "browser"
+            ) from None
         self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
-        try:   # a just-opened window is still loading its blank first tab; navigating over that gets interrupted
+        try:  # a just-opened window is still loading its blank first tab; navigating over that gets interrupted
             await self._page.wait_for_load_state("load", timeout=5000)
         except Exception:  # noqa: BLE001
             pass
@@ -850,6 +947,7 @@ class Bridge:
         def closed(*_):
             if not self._closing:
                 self._gone = True
+
         self._page.on("close", closed)
         self._ctx.on("close", closed)
         return self._page
@@ -882,13 +980,14 @@ class Bridge:
             await asyncio.sleep(float(self.o["idle_close_s"]))
             if not self.lock.locked():
                 await self.release()
+
         try:
             self._idle = asyncio.get_running_loop().create_task(later())
         except RuntimeError:
             self._idle = None
 
     async def _probe(self, page, fresh: bool) -> dict:
-        for _ in range(8):   # the page may navigate under the probe (a browser check passing, a redirect): look again
+        for _ in range(8):  # the page may navigate under the probe (a browser check passing, a redirect): look again
             try:
                 return await page.evaluate(PROBE_JS, fresh)
             except Exception as e:  # noqa: BLE001
@@ -900,11 +999,15 @@ class Bridge:
     def _notices(self, p: dict):
         """Anything on the page that means "stop": never interact with it, just report."""
         if p.get("challenge"):
-            raise WebUnavailable(f"the page shows a challenge or block notice ({p['challenge']!r}); open the window "
-                                 "yourself to see it", float(self.o["cooldown_challenge_s"]), "challenge")
+            raise WebUnavailable(
+                f"the page shows a challenge or block notice ({p['challenge']!r}); open the window yourself to see it",
+                float(self.o["cooldown_challenge_s"]),
+                "challenge",
+            )
         if p.get("limit"):
-            raise WebUnavailable(f"ChatGPT reports a usage limit ({p['limit']!r})",
-                                 float(self.o["cooldown_limit_s"]), "limit")
+            raise WebUnavailable(
+                f"ChatGPT reports a usage limit ({p['limit']!r})", float(self.o["cooldown_limit_s"]), "limit"
+            )
 
     async def _open_chat(self, model: str) -> dict:
         """A fresh temporary chat, ready for typing. Raises WebUnavailable for anything a user would have to sort
@@ -921,15 +1024,18 @@ class Bridge:
         deadline, ok, p, challenged = time.time() + 40, 0, {}, None
         while True:
             p = await self._probe(page, True)
-            if p.get("challenge"):   # an automatic "just a moment" check may pass by itself; wait like a user would
+            if p.get("challenge"):  # an automatic "just a moment" check may pass by itself; wait like a user would
                 challenged = challenged or time.time()
                 if time.time() - challenged > float(self.o["challenge_wait_s"]):
                     self._notices(p)
             elif p.get("login"):
                 ok += 1
                 if ok >= 3:
-                    raise WebUnavailable("not signed in to ChatGPT in the chatgpt-web profile",
-                                         float(self.o["cooldown_login_s"]), "login")
+                    raise WebUnavailable(
+                        "not signed in to ChatGPT in the chatgpt-web profile",
+                        float(self.o["cooldown_login_s"]),
+                        "login",
+                    )
             elif p.get("composer"):
                 ok += 1
                 if ok >= (2 if p.get("account") else 4):
@@ -943,7 +1049,7 @@ class Bridge:
             await asyncio.sleep(0.6)
         self._notices(p)
         self.save(signed_in=True, checked_at=int(self.clock()))
-        if p.get("temp") is not True:   # the url flag didn't take: try the page's own toggle once
+        if p.get("temp") is not True:  # the url flag didn't take: try the page's own toggle once
             toggle = page.locator('button[aria-label*="temporary chat" i]').first
             try:
                 await toggle.click(timeout=3000)
@@ -952,8 +1058,12 @@ class Bridge:
             except Exception:  # noqa: BLE001
                 pass
         if p.get("temp") is not True or p.get("users") or p.get("assistants"):
-            raise WebUnavailable("temporary chat is not available on the page, so nothing was sent (a normal chat "
-                                 "would be kept in the account's history)", float(self.o["cooldown_tempchat_s"]), "tempchat")
+            raise WebUnavailable(
+                "temporary chat is not available on the page, so nothing was sent (a normal chat "
+                "would be kept in the account's history)",
+                float(self.o["cooldown_tempchat_s"]),
+                "tempchat",
+            )
         if model and model.lower() != "auto":
             p = await self._pick_model(page, model, p)
         return p
@@ -962,12 +1072,15 @@ class Bridge:
         want = model.lower()
         if want in (p.get("model") or "").lower():
             return p
-        if p.get("model") is None:   # no model picker at all (the Free plan): the account has one model, and it answers
+        if p.get("model") is None:  # no model picker at all (the Free plan): the account has one model, and it answers
             return p
         try:
             await page.locator(SWITCHER).first.click(timeout=4000)
-            item = page.locator('[role="menuitem"], [role="menuitemradio"], [role="option"]').filter(
-                has_text=re.compile(re.escape(model), re.I)).first
+            item = (
+                page.locator('[role="menuitem"], [role="menuitemradio"], [role="option"]')
+                .filter(has_text=re.compile(re.escape(model), re.I))
+                .first
+            )
             await item.click(timeout=4000)
             await asyncio.sleep(0.8)
         except Exception:  # noqa: BLE001
@@ -978,12 +1091,18 @@ class Bridge:
         shown, p = p.get("model"), await self._probe(page, True)
         # a picker that is gone on the second look was something else on a half-loaded page: same as no picker
         if p.get("model") is not None and want not in p["model"].lower() and self.o["strict_model"]:
-            raise WebUnavailable(f"model {model!r} is not selectable in the page's model picker (it shows "
-                                 f"{p['model']!r}, before the attempt {shown!r})",
-                                 float(self.o["cooldown_model_s"]), "model")
+            raise WebUnavailable(
+                f"model {model!r} is not selectable in the page's model picker (it shows "
+                f"{p['model']!r}, before the attempt {shown!r})",
+                float(self.o["cooldown_model_s"]),
+                "model",
+            )
         if p.get("temp") is not True:
-            raise WebUnavailable("temporary chat was lost while picking the model, so nothing was sent",
-                                 float(self.o["cooldown_tempchat_s"]), "tempchat")
+            raise WebUnavailable(
+                "temporary chat was lost while picking the model, so nothing was sent",
+                float(self.o["cooldown_tempchat_s"]),
+                "tempchat",
+            )
         return p
 
     async def _send(self, page, text: str) -> dict:
@@ -992,7 +1111,9 @@ class Bridge:
         box = page.locator(COMPOSER).first
         await box.click(timeout=10000)
         await box.fill(text, timeout=30000)
-        typed = await box.evaluate("el => (el.value !== undefined ? el.value : el.innerText || '').replace(/\\s+/g, '').length")
+        typed = await box.evaluate(
+            "el => (el.value !== undefined ? el.value : el.innerText || '').replace(/\\s+/g, '').length"
+        )
         if typed < 0.9 * len(re.sub(r"\s+", "", text)):
             raise WebError(f"the composer took {typed} of {len(text)} characters (message too long for the page?)")
         self.save(count=self.load().get("count", 0) + 1)
@@ -1028,7 +1149,9 @@ class Bridge:
                 break
             if time.time() - t0 > timeout:
                 await self._dump(page, p, "timeout")
-                raise WebError(f"no complete reply after {int(timeout)} s (page state saved in {self.home / 'chatgpt-web-debug'})")
+                raise WebError(
+                    f"no complete reply after {int(timeout)} s (page state saved in {self.home / 'chatgpt-web-debug'})"
+                )
         r = await page.evaluate(READ_JS)
         if not (r.get("md") or "").strip():
             raise WebError("the reply was empty")
@@ -1047,7 +1170,8 @@ class Bridge:
                 const e = t[t.length - 1] || document.querySelector('main') || document.body; return e.outerHTML.slice(0, 400000); }""")
             read = await page.evaluate(READ_JS)
             (d / f"{time.strftime('%Y%m%d-%H%M%S')}-{why}.json").write_text(
-                json.dumps({"why": why, "probe": probe, "read": read, "last_turn_html": html}, indent=1))
+                json.dumps({"why": why, "probe": probe, "read": read, "last_turn_html": html}, indent=1)
+            )
         except Exception:  # noqa: BLE001 - diagnostics only
             pass
 
@@ -1078,7 +1202,7 @@ class Bridge:
     async def _acquire(self, wait: float | None):
         try:
             await asyncio.wait_for(self.lock.acquire(), self.o["queue_wait_s"] if wait is None else wait)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise WebSkip("another request is using the ChatGPT window") from None
 
     # ---- public --------------------------------------------------------------------------------------------------
@@ -1099,7 +1223,7 @@ class Bridge:
                 repaired = False
                 try:
                     text, calls = parse_reply(r["md"], tools, rules)
-                except Malformed as e:   # one repair round, in the same temporary chat
+                except Malformed as e:  # one repair round, in the same temporary chat
                     repaired = True
                     await self.sleep(self.rand(1.0, 2.5))
                     r = await self._send(self._page, repair_message(e))
@@ -1108,7 +1232,9 @@ class Bridge:
                     except Malformed as e2:
                         raise WebError(f"unusable tool call after one repair: {e2}") from None
                 nudged = False
-                if not calls and not repaired and stalled(text, tools):   # "the shell isn't available to me": say how, once
+                if (
+                    not calls and not repaired and stalled(text, tools)
+                ):  # "the shell isn't available to me": say how, once
                     nudged = True
                     await self.sleep(self.rand(1.0, 2.5))
                     r2 = await self._send(self._page, nudge_message(tools))
@@ -1116,8 +1242,9 @@ class Bridge:
                         text, calls = parse_reply(r2["md"], tools, rules)
                         r = r2
                     except Malformed:
-                        pass   # keep the first answer
+                        pass  # keep the first answer
                 return text, calls, {"model_slug": r.get("slug"), "repaired": repaired, "nudged": nudged}
+
             text, calls, extra = await self._guarded(run)
             fmt = (body.get("response_format") or {}).get("type")
             if fmt in ("json_schema", "json_object") and not calls:
@@ -1150,8 +1277,11 @@ class Bridge:
 
 def notify(text: str):
     try:
-        subprocess.Popen(["osascript", "-e", f'display notification {json.dumps(text)} with title "provenance-core"'],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["osascript", "-e", f'display notification {json.dumps(text)} with title "provenance-core"'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError:
         pass
 
@@ -1165,11 +1295,22 @@ def login_window(bridge: Bridge, wait_min: float = 45) -> int:
         return 2
     bridge.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     # the same key-storage switches Playwright's Chrome uses, so both read the same cookie jar
-    cmd = [CHROME, f"--user-data-dir={bridge.profile}", "--use-mock-keychain", "--password-store=basic",
-           "--no-first-run", "--no-default-browser-check", "--window-size=1180,860", bridge.base_url + "/"]
-    print("Opening Chrome on the chatgpt-web profile.\n"
-          "  1. sign in to ChatGPT in that window (your password goes to OpenAI only)\n"
-          "  2. quit that Chrome when you're in (Cmd+Q on the window that just opened)", flush=True)
+    cmd = [
+        CHROME,
+        f"--user-data-dir={bridge.profile}",
+        "--use-mock-keychain",
+        "--password-store=basic",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1180,860",
+        bridge.base_url + "/",
+    ]
+    print(
+        "Opening Chrome on the chatgpt-web profile.\n"
+        "  1. sign in to ChatGPT in that window (your password goes to OpenAI only)\n"
+        "  2. quit that Chrome when you're in (Cmd+Q on the window that just opened)",
+        flush=True,
+    )
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         proc.wait(timeout=wait_min * 60)
@@ -1179,8 +1320,10 @@ def login_window(bridge: Bridge, wait_min: float = 45) -> int:
     print("checking the sign-in...", flush=True)
     r = asyncio.run(bridge.check(close=True))
     if r["ok"]:
-        print("signed in, temporary chat works. chatgpt-web is ready"
-              + ("" if enabled(bridge.o) else " (still off: set PCORE_CHATGPT_WEB=1 to use it)"))
+        print(
+            "signed in, temporary chat works. chatgpt-web is ready"
+            + ("" if enabled(bridge.o) else " (still off: set PCORE_CHATGPT_WEB=1 to use it)")
+        )
         return 0
     print(f"not ready: {r.get('reason')}")
     return 1

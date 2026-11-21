@@ -1,5 +1,6 @@
 """Environment settings. Every variable is read as PCORE_<NAME>, falling back to the pre-rename TIERLM_<NAME>, so
 setups written for tierlm keep working."""
+
 from __future__ import annotations
 
 import os

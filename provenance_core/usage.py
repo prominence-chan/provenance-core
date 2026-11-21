@@ -11,6 +11,7 @@ Where the numbers come from (all local, nothing is fetched):
 
 A tool counts as low when any window is at or above the threshold (PCORE_LOW_PCT, default 95) and hasn't reset yet.
 Fallback is only offered when provenance-core is actually up and has a usable model, so a dead proxy never makes things worse."""
+
 from __future__ import annotations
 
 import glob
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from .settings import env
 
-HOME = Path(env("HOME") or Path.home() / ".tierlm")   # state dir; keeps the pre-rename location
+HOME = Path(env("HOME") or Path.home() / ".tierlm")  # state dir; keeps the pre-rename location
 CLAUDE_FILE = HOME / "claude_limits.json"
 BASE = env("BASE_URL", "http://127.0.0.1:4141").rstrip("/").removesuffix("/v1")
 LOW_PCT = float(env("LOW_PCT", 95))
@@ -50,6 +51,7 @@ def _ts(v) -> float | None:
         return float(v) / (1000 if v > 1e11 else 1)
     try:
         from datetime import datetime
+
         return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
@@ -89,6 +91,7 @@ def record_claude_blocked(message: str = ""):
     m = re.search(r"resets\s+(?:at\s+)?(\w+\s+\d+,?\s+)?(\d{1,2})(?::(\d\d))?\s*(am|pm)", message or "", re.I)
     if m:
         import datetime as dt
+
         h = int(m.group(2)) % 12 + (12 if m.group(4).lower() == "pm" else 0)
         now = dt.datetime.now()
         t = now.replace(hour=h, minute=int(m.group(3) or 0), second=0, microsecond=0)
@@ -106,12 +109,17 @@ def claude_status() -> dict:
     worst, resets = 0.0, None
     for w in (d.get("windows") or {}).values():
         if w.get("resets_at") and w["resets_at"] < now:
-            continue   # that window already reset
+            continue  # that window already reset
         if w["pct"] >= worst:
             worst, resets = w["pct"], w.get("resets_at")
     blocked = (d.get("blocked_until") or 0) > now
-    return {"pct": worst, "resets_at": d.get("blocked_until") if blocked else resets, "blocked": blocked,
-            "low": blocked or worst >= LOW_PCT, "seen": d.get("at")}
+    return {
+        "pct": worst,
+        "resets_at": d.get("blocked_until") if blocked else resets,
+        "blocked": blocked,
+        "low": blocked or worst >= LOW_PCT,
+        "seen": d.get("at"),
+    }
 
 
 def codex_status(root: str | None = None) -> dict:
@@ -139,9 +147,13 @@ def codex_status(root: str | None = None) -> dict:
                 if w["used_percent"] >= worst:
                     worst, resets = float(w["used_percent"]), w.get("resets_at")
             credits = rl.get("credits") or {}
-            return {"pct": worst, "resets_at": resets, "low": worst >= LOW_PCT,
-                    "credits": credits.get("balance") if credits.get("has_credits") else None,
-                    "seen": os.path.getmtime(f)}
+            return {
+                "pct": worst,
+                "resets_at": resets,
+                "low": worst >= LOW_PCT,
+                "credits": credits.get("balance") if credits.get("has_credits") else None,
+                "seen": os.path.getmtime(f),
+            }
     return {"pct": 0.0, "resets_at": None, "low": False, "seen": None}
 
 
@@ -153,7 +165,7 @@ def pcore_up(timeout: float = 2.0) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.load(r).get("data", [])
-        return any("/" in m.get("id", "") for m in data)   # at least one concrete model has a key
+        return any("/" in m.get("id", "") for m in data)  # at least one concrete model has a key
     except Exception:  # noqa: BLE001
         return False
 
@@ -162,7 +174,7 @@ def status() -> dict:
     return {"claude": claude_status(), "codex": codex_status(), "pcore_up": pcore_up()}
 
 
-tierlm_up = pcore_up   # pre-rename name
+tierlm_up = pcore_up  # pre-rename name
 
 
 def fallback_env(tool: str, force: bool = False) -> dict | None:
@@ -173,7 +185,11 @@ def fallback_env(tool: str, force: bool = False) -> dict | None:
         return None
     tok = env("TOKEN") or "pcore"
     if tool == "claude":
-        return {"ANTHROPIC_BASE_URL": BASE, "ANTHROPIC_AUTH_TOKEN": tok, "ANTHROPIC_API_KEY": "",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+        return {
+            "ANTHROPIC_BASE_URL": BASE,
+            "ANTHROPIC_AUTH_TOKEN": tok,
+            "ANTHROPIC_API_KEY": "",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
     # Provenance (the codex fork) still reads the TIERLM_ names
     return {"PCORE_BASE_URL": f"{BASE}/v1", "PCORE_TOKEN": tok, "TIERLM_BASE_URL": f"{BASE}/v1", "TIERLM_TOKEN": tok}

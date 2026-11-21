@@ -1,4 +1,5 @@
 """No-auth providers, ${VAR} base URLs, provider pools, and the PCORE_/TIERLM_ env fallback."""
+
 import asyncio
 import importlib
 import json
@@ -61,10 +62,13 @@ def make_router(path, clock=None):
 
     def handler(req: httpx.Request):
         seen.append(req)
-        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}],
-                                         "usage": {"total_tokens": 100}})
-    router = Router(load(path), State(clock=clock) if clock else State(),
-                    httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"total_tokens": 100}}
+        )
+
+    router = Router(
+        load(path), State(clock=clock) if clock else State(), httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
     return router, seen
 
 
@@ -72,7 +76,7 @@ def test_no_auth_provider_is_usable_and_sends_no_authorization(cat):
     router, seen = make_router(cat)
     c = router.catalog
     assert c.providers["anon"].usable and c.providers["anon"].api_key_env is None
-    assert not c.providers["keyed"].usable   # missing key -> unusable
+    assert not c.providers["keyed"].usable  # missing key -> unusable
     assert [m.id for m in c.models_in("hi")] == ["anon/free-big", "anon2/m"]
     data, m = asyncio.run(router.complete({"messages": [{"role": "user", "content": "hi"}]}, "hi"))
     assert m.id == "anon/free-big"
@@ -100,7 +104,7 @@ def test_base_url_var_expansion(cat, monkeypatch):
     monkeypatch.setenv("CF_TOKEN", "t")
     router, seen = make_router(cat)
     cf = router.catalog.providers["cf"]
-    assert not cf.usable   # ${CF_ACCT} unset: unusable even with a token
+    assert not cf.usable  # ${CF_ACCT} unset: unusable even with a token
     monkeypatch.setenv("CF_ACCT", "abc123")
     assert cf.usable and cf.base_url == "https://cf.test/accounts/abc123/ai/v1"
     asyncio.run(router.call(router.catalog.models["cf/@cf/a"], {"messages": []}))
@@ -120,7 +124,7 @@ def test_provider_pool_rph_spans_models(cat):
     for m in (p1, p1, p2):
         assert st.headroom(m, 10) > 0
         st.record(m, 10)
-    assert st.headroom(p1, 10) == 0 and st.headroom(p2, 10) == 0   # 3 requests/hour across the provider
+    assert st.headroom(p1, 10) == 0 and st.headroom(p2, 10) == 0  # 3 requests/hour across the provider
     clock.t += 3601
     assert st.headroom(p2, 10) > 0
 
@@ -131,11 +135,11 @@ def test_shared_tpd_is_one_daily_allowance(cat, monkeypatch):
     clock = Clock()
     router, _ = make_router(cat, clock)
     st, a, b = router.state, router.catalog.models["cf/@cf/a"], router.catalog.models["cf/@cf/b"]
-    st.record(a, 500)                        # half of a's share -> half of the provider's day
-    assert st.headroom(b, 2004) == 0         # just over half a day on b would exceed it
+    st.record(a, 500)  # half of a's share -> half of the provider's day
+    assert st.headroom(b, 2004) == 0  # just over half a day on b would exceed it
     assert st.headroom(b, 1900) > 0
     st.record(b, 1900)
-    assert st.headroom(a, 100) == 0          # 0.5 + 0.475 + 0.1 > 1
+    assert st.headroom(a, 100) == 0  # 0.5 + 0.475 + 0.1 > 1
 
 
 def test_env_prefers_pcore_then_tierlm(monkeypatch):
@@ -160,11 +164,17 @@ def test_legacy_tierlm_env_still_maps(cat, monkeypatch):
 
 def test_tierlm_shim_reexports_usage():
     import provenance_core.usage
+
     tierlm = importlib.import_module("tierlm")
     from tierlm import usage
+
     assert usage is provenance_core.usage and tierlm.catalog is importlib.import_module("provenance_core.catalog")
-    out = subprocess.run([sys.executable, "-m", "tierlm", "tiers", "--catalog", str(ROOT / "catalog.yaml"),
-                          "--scores", "/nonexistent"], capture_output=True, text=True, cwd=ROOT)
+    out = subprocess.run(
+        [sys.executable, "-m", "tierlm", "tiers", "--catalog", str(ROOT / "catalog.yaml"), "--scores", "/nonexistent"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
     assert out.returncode == 0 and "calibrated" in out.stdout
 
 
@@ -179,6 +189,9 @@ def test_catalog_yaml_loads():
 def test_concrete_model_failure_is_reported_not_500(cat):
     def handler(req):
         return httpx.Response(429, headers={"retry-after": "100"})
+
     router = Router(load(cat), State(), httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    r = TestClient(create_app(router=router)).post("/v1/chat/completions", json={"model": "anon/free-big", "messages": []})
+    r = TestClient(create_app(router=router)).post(
+        "/v1/chat/completions", json={"model": "anon/free-big", "messages": []}
+    )
     assert r.status_code == 429 and "rate limited" in r.json()["detail"]

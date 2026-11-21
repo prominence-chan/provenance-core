@@ -1,13 +1,14 @@
 """OpenAI-compatible HTTP API.
 
-  POST /v1/chat/completions   model = a tier name or alias (see catalog.yaml) | "auto" | a concrete catalog id
-                              optional body fields: "pcore": {"fallback": "none|down1|any",
-                                                               "ensemble": {"k": 3, "strategy": "judge|majority|first"}}
-                              optional header X-PCore-Session: sticky model per conversation
-  GET  /v1/models             the tier aliases plus every usable concrete model
-  GET  /status                tiers, models, scores, headroom, health
-  POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_api.py
-  POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py"""
+POST /v1/chat/completions   model = a tier name or alias (see catalog.yaml) | "auto" | a concrete catalog id
+                            optional body fields: "pcore": {"fallback": "none|down1|any",
+                                                             "ensemble": {"k": 3, "strategy": "judge|majority|first"}}
+                            optional header X-PCore-Session: sticky model per conversation
+GET  /v1/models             the tier aliases plus every usable concrete model
+GET  /status                tiers, models, scores, headroom, health
+POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_api.py
+POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py"""
+
 from __future__ import annotations
 
 import time
@@ -22,10 +23,11 @@ from .router import NoCapacity, Router, estimate_tokens
 from .settings import env
 
 
-def create_app(catalog_path: str | None = None, scores_path: str | None = None, router: Router | None = None) -> FastAPI:
+def create_app(
+    catalog_path: str | None = None, scores_path: str | None = None, router: Router | None = None
+) -> FastAPI:
     if router is None:
-        catalog = load(catalog_path or env("CATALOG", "catalog.yaml"),
-                       scores_path or env("SCORES", "scores.yaml"))
+        catalog = load(catalog_path or env("CATALOG", "catalog.yaml"), scores_path or env("SCORES", "scores.yaml"))
         router = Router(catalog)
     app = FastAPI(title="provenance-core")
     token = env("TOKEN")  # optional bearer token for the proxy itself
@@ -53,29 +55,52 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
         # both SDKs' models.list() parse it
         # tier entries keep owned_by "tierlm": existing clients (the Provenance UI) pick out tiers by it
         data = [{"id": t, "object": "model", "created": now, "owned_by": "tierlm"} for t, _ in router.catalog.tiers]
-        data += [{"id": m.id, "object": "model", "created": now, "owned_by": m.provider}
-                 for m in router.catalog.models.values() if router.catalog.providers[m.provider].usable]
+        data += [
+            {"id": m.id, "object": "model", "created": now, "owned_by": m.provider}
+            for m in router.catalog.models.values()
+            if router.catalog.providers[m.provider].usable
+        ]
         for d in data:
             d.update(type="model", display_name=d["id"], created_at=iso)
-        return {"object": "list", "data": data, "has_more": False,
-                "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
+        return {
+            "object": "list",
+            "data": data,
+            "has_more": False,
+            "first_id": data[0]["id"] if data else None,
+            "last_id": data[-1]["id"] if data else None,
+        }
 
     @app.get("/status")
     async def status(authorization: str | None = Header(None)):
         check(authorization)
         out = {}
         for t, floor in router.catalog.tiers:
-            out[t] = {"min_score": floor, "models": [
-                {"id": m.id, "score": m.score, "calibrated": m.calibrated,
-                 "usable": router.catalog.providers[m.provider].usable,
-                 "available": router.state.available(m), "headroom": round(router.state.headroom(m, 1000), 3),
-                 "latency_ms": (router.state.health.get(m.id).latency_ms if router.state.health.get(m.id) else None)}
-                for m in router.catalog.models_in(t, usable_only=False)]}
+            out[t] = {
+                "min_score": floor,
+                "models": [
+                    {
+                        "id": m.id,
+                        "score": m.score,
+                        "calibrated": m.calibrated,
+                        "usable": router.catalog.providers[m.provider].usable,
+                        "available": router.state.available(m),
+                        "headroom": round(router.state.headroom(m, 1000), 3),
+                        "latency_ms": (
+                            router.state.health.get(m.id).latency_ms if router.state.health.get(m.id) else None
+                        ),
+                    }
+                    for m in router.catalog.models_in(t, usable_only=False)
+                ],
+            }
         return out
 
     @app.post("/v1/chat/completions")
-    async def chat(request: Request, authorization: str | None = Header(None),
-                   x_pcore_session: str | None = Header(None), x_tierlm_session: str | None = Header(None)):
+    async def chat(
+        request: Request,
+        authorization: str | None = Header(None),
+        x_pcore_session: str | None = Header(None),
+        x_tierlm_session: str | None = Header(None),
+    ):
         check(authorization)
         body = await request.json()
         opts = body.pop("pcore", None) or body.pop("tierlm", None) or {}
@@ -103,7 +128,7 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
             return JSONResponse(data, headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
         except NoCapacity as e:
             raise HTTPException(503, str(e)) from e
-        except (RuntimeError, httpx.HTTPError) as e:   # a concrete model failed: report it instead of a bare 500
+        except (RuntimeError, httpx.HTTPError) as e:  # a concrete model failed: report it instead of a bare 500
             raise HTTPException(429 if "rate limited" in str(e) else 502, str(e)[:300]) from e
 
     # ---- chatgpt_web provider: status, live check, freeing the profile for `weblogin` ----------------------------
@@ -121,16 +146,27 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
             raise HTTPException(404, "no chatgpt_web provider in the catalog")
         on = router.catalog.providers[name].usable
         b = router.bridge(name)
-        if probe and on:   # opens a fresh temporary chat, sends nothing
+        if probe and on:  # opens a fresh temporary chat, sends nothing
             st = await b.check(next((m.model for m in web_models(name)), "auto"))
             if st["ok"]:
                 for m in web_models(name):
                     router.state.health.pop(m.id, None)
         else:
             st = b.status()
-        return {"enabled": on, **st, "models": [
-            {"id": m.id, "tier": router.catalog.tier_of(m), "score": m.score, "calibrated": m.calibrated,
-             "available": router.state.available(m)} for m in web_models(name)]}
+        return {
+            "enabled": on,
+            **st,
+            "models": [
+                {
+                    "id": m.id,
+                    "tier": router.catalog.tier_of(m),
+                    "score": m.score,
+                    "calibrated": m.calibrated,
+                    "available": router.state.available(m),
+                }
+                for m in web_models(name)
+            ],
+        }
 
     @app.post("/chatgpt-web/release")
     async def web_release(reset: int = 0, authorization: str | None = Header(None)):
@@ -140,7 +176,7 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
             raise HTTPException(404, "no chatgpt_web provider in the catalog")
         b = router.bridge(name)
         await b.release()
-        if reset:   # after a fresh sign-in: forget the block and the router's cooldown
+        if reset:  # after a fresh sign-in: forget the block and the router's cooldown
             b.reset()
             for m in web_models(name):
                 router.state.health.pop(m.id, None)
@@ -149,13 +185,19 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
     anthropic_api.register(app, router, token)
     responses_api.register(app, router, token)
 
-    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-                   include_in_schema=False)
+    @app.api_route(
+        "/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], include_in_schema=False
+    )
     async def not_found(path: str):
         # Anthropic-style error body (also readable by OpenAI clients): Claude Code probes a few extra endpoints and
         # treats a plain 404 as "not supported here"
-        return JSONResponse({"type": "error", "error": {"type": "not_found_error", "message": f"/{path} is not served by provenance-core"}},
-                            status_code=404)
+        return JSONResponse(
+            {
+                "type": "error",
+                "error": {"type": "not_found_error", "message": f"/{path} is not served by provenance-core"},
+            },
+            status_code=404,
+        )
 
     return app
 
@@ -168,4 +210,5 @@ def _stream(resp, m, router, t0):
             router.state.success(m, (time.time() - t0) * 1000)
         finally:
             await resp.aclose()
+
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"X-PCore-Model": m.id})

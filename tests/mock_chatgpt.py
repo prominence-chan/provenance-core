@@ -1,6 +1,7 @@
 """A local stand-in for the chatgpt.com page, for the chatgpt_web tests: a composer, a send/stop button, messages
 with the same markers the bridge reads (data-message-author-role, .markdown, pre/code), a temporary-chat mode, a
 model picker, and switchable trouble: logged out, a challenge page, a limit banner, no temporary chat."""
+
 from __future__ import annotations
 
 import html
@@ -81,8 +82,10 @@ CHALLENGE = "<!doctype html><html><head><title>Just a moment...</title></head><b
 
 def code(lang: str, text: str) -> str:
     """A code block shaped like the page's: a header with the language and a copy button, then pre > code."""
-    return (f'<pre><div class="hdr"><div>{html.escape(lang)}</div><button>Copy code</button></div>'
-            f'<div><code class="whitespace-pre! language-{html.escape(lang)}">{html.escape(text)}\n</code></div></pre>')
+    return (
+        f'<pre><div class="hdr"><div>{html.escape(lang)}</div><button>Copy code</button></div>'
+        f'<div><code class="whitespace-pre! language-{html.escape(lang)}">{html.escape(text)}\n</code></div></pre>'
+    )
 
 
 def tool_call(name: str, arguments: dict) -> str:
@@ -95,8 +98,16 @@ class Mock:
     (prompt -> html), used in order (the last one repeats); an item may be {"error": "..."}."""
 
     def __init__(self):
-        self.state = {"login": True, "temp": True, "temp_toggle": False, "challenge": False, "limit": False,
-                      "model": "Luna", "models": ["Luna", "Nimbus"], "delay": 150}
+        self.state = {
+            "login": True,
+            "temp": True,
+            "temp_toggle": False,
+            "challenge": False,
+            "limit": False,
+            "model": "Luna",
+            "models": ["Luna", "Nimbus"],
+            "delay": 150,
+        }
         self.replies: list = ["<p>ok</p>"]
         self.sent: list[dict] = []
         mock = self
@@ -129,7 +140,11 @@ class Mock:
             def do_POST(self):
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 mock.sent.append(req)
-                r = mock.replies[min(len(mock.sent), len(mock.replies)) - 1] if mock.per_page is None else mock.per_page(req)
+                r = (
+                    mock.replies[min(len(mock.sent), len(mock.replies)) - 1]
+                    if mock.per_page is None
+                    else mock.per_page(req)
+                )
                 if callable(r):
                     r = r(req["prompt"])
                 out = r if isinstance(r, dict) else {"html": r, "slug": "gpt-6-" + req["model"].lower()}

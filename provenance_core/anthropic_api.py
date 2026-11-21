@@ -12,6 +12,7 @@ Supported: system (string or text blocks), text / image (base64 or url) / tool_u
 tools, tool_choice, disable_parallel_tool_use (enforced by keeping the first call), max_tokens (capped, see
 adapters.clamp_max_tokens), temperature, top_p, stop_sequences, streaming. Ignored: thinking (and thinking blocks in
 history), cache_control, top_k, metadata, server tools (web_search etc.), PDF documents."""
+
 from __future__ import annotations
 
 import json
@@ -21,12 +22,24 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .adapters import (Target, UpstreamStream, authorized, clamp_max_tokens, clean_schema, complete, open_stream,
-                       parse_args, resolve_target, safe_id, session_key, text_of)
+from .adapters import (
+    Target,
+    UpstreamStream,
+    authorized,
+    clamp_max_tokens,
+    clean_schema,
+    complete,
+    open_stream,
+    parse_args,
+    resolve_target,
+    safe_id,
+    session_key,
+    text_of,
+)
 from .router import NoCapacity, Router
 from .settings import env
 
-FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("spark", 2)}   # (tier, position)
+FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("spark", 2)}  # (tier, position)
 
 
 def error(status: int, kind: str, message: str) -> JSONResponse:
@@ -36,7 +49,7 @@ def error(status: int, kind: str, message: str) -> JSONResponse:
 def map_model(router: Router, name: str) -> Target:
     fallback = env("ANTHROPIC_FALLBACK", "any")
     name = (name or "").strip()
-    base = name.split("[", 1)[0].strip()   # "claude-opus-4-6[1m]" -> "claude-opus-4-6"
+    base = name.split("[", 1)[0].strip()  # "claude-opus-4-6[1m]" -> "claude-opus-4-6"
     t = resolve_target(router, base, fallback) if base else None
     if t:
         return t
@@ -110,9 +123,15 @@ def to_openai(req: dict) -> dict:
         content = content or []
         if role == "assistant":
             texts = [b.get("text", "") for b in content if b.get("type") == "text"]
-            calls = [{"id": safe_id(b.get("id")), "type": "function",
-                      "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {})}}
-                     for b in content if b.get("type") == "tool_use"]
+            calls = [
+                {
+                    "id": safe_id(b.get("id")),
+                    "type": "function",
+                    "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {})},
+                }
+                for b in content
+                if b.get("type") == "tool_use"
+            ]
             out = {"role": "assistant", "content": "".join(texts) or None}
             if calls:
                 out["tool_calls"] = calls
@@ -127,8 +146,9 @@ def to_openai(req: dict) -> dict:
                 text, imgs = _blocks_text(b.get("content"))
                 if b.get("is_error"):
                     text = "[tool error] " + text
-                msgs.append({"role": "tool", "tool_call_id": safe_id(b.get("tool_use_id")),
-                             "content": text or "(no output)"})
+                msgs.append(
+                    {"role": "tool", "tool_call_id": safe_id(b.get("tool_use_id")), "content": text or "(no output)"}
+                )
                 tool_images += imgs
             elif t == "text":
                 parts.append({"type": "text", "text": b.get("text", "")})
@@ -141,8 +161,10 @@ def to_openai(req: dict) -> dict:
                 elif src.get("type") == "content":
                     parts.append({"type": "text", "text": _blocks_text(src.get("content"))[0]})
                 else:
-                    parts.append({"type": "text", "text": f"[document omitted: {b.get('title') or src.get('media_type')}]"})
-        if tool_images:   # OpenAI tool messages are text-only: images from tool results follow as a user message
+                    parts.append(
+                        {"type": "text", "text": f"[document omitted: {b.get('title') or src.get('media_type')}]"}
+                    )
+        if tool_images:  # OpenAI tool messages are text-only: images from tool results follow as a user message
             parts = [{"type": "text", "text": "(images returned by the tool calls above)"}] + tool_images + parts
         if parts:
             msgs.append({"role": "user", "content": _collapse(parts)})
@@ -153,9 +175,18 @@ def to_openai(req: dict) -> dict:
             body[k] = req[k]
     if req.get("stop_sequences"):
         body["stop"] = list(req["stop_sequences"])[:4]
-    tools = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""),
-                                               "parameters": clean_schema(t.get("input_schema") or {"type": "object"})}}
-             for t in req.get("tools") or [] if "input_schema" in t or not t.get("type") or t.get("type") == "custom"]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": clean_schema(t.get("input_schema") or {"type": "object"}),
+            },
+        }
+        for t in req.get("tools") or []
+        if "input_schema" in t or not t.get("type") or t.get("type") == "custom"
+    ]
     if tools:
         body["tools"] = tools
         tc = req.get("tool_choice") or {}
@@ -196,14 +227,30 @@ def from_openai(data: dict, model: str, single: bool = False) -> dict:
         calls = calls[:1]
     for tc in calls:
         fn = tc.get("function") or {}
-        blocks.append({"type": "tool_use", "id": safe_id(tc.get("id"), "toolu_"), "name": fn.get("name", ""),
-                       "input": parse_args(fn.get("arguments"))})
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": safe_id(tc.get("id"), "toolu_"),
+                "name": fn.get("name", ""),
+                "input": parse_args(fn.get("arguments")),
+            }
+        )
     u = data.get("usage") or {}
-    return {"id": "msg_" + secrets.token_hex(12), "type": "message", "role": "assistant", "model": model,
-            "content": blocks, "stop_reason": stop_reason(ch.get("finish_reason"), bool(calls)),
-            "stop_sequence": None,
-            "usage": {"input_tokens": int(u.get("prompt_tokens") or 0), "output_tokens": int(u.get("completion_tokens") or 0),
-                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}
+    return {
+        "id": "msg_" + secrets.token_hex(12),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": blocks,
+        "stop_reason": stop_reason(ch.get("finish_reason"), bool(calls)),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": int(u.get("prompt_tokens") or 0),
+            "output_tokens": int(u.get("completion_tokens") or 0),
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }
 
 
 def count_tokens(req: dict) -> int:
@@ -235,15 +282,19 @@ def register(app, router: Router, token: str | None):
         try:
             if req.get("stream"):
                 resp, m, t0 = await open_stream(router, body, target, session, web=router.web_ok("messages"))
-                return StreamingResponse(_stream(router, resp, m, t0, model_name, count_tokens(req), single),
-                                         media_type="text/event-stream",
-                                         headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
+                return StreamingResponse(
+                    _stream(router, resp, m, t0, model_name, count_tokens(req), single),
+                    media_type="text/event-stream",
+                    headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"},
+                )
             data, m = await complete(router, body, target, session, web=router.web_ok("messages"))
         except NoCapacity as e:
             # 529 overloaded: Claude Code retries it with backoff
             return error(529, "overloaded_error", str(e))
-        return JSONResponse(from_openai(data, model_name, single),
-                            headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
+        return JSONResponse(
+            from_openai(data, model_name, single),
+            headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)},
+        )
 
     @app.post("/v1/messages/count_tokens")
     async def count(request: Request):
@@ -255,10 +306,27 @@ def register(app, router: Router, token: str | None):
 async def _stream(router: Router, resp, m, t0: float, model: str, input_tokens: int, single: bool):
     up = UpstreamStream(resp)
     msg_id = "msg_" + secrets.token_hex(12)
-    yield sse("message_start", {"type": "message_start", "message": {
-        "id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None,
-        "stop_sequence": None, "usage": {"input_tokens": input_tokens, "output_tokens": 1,
-                                         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}})
+    yield sse(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        },
+    )
     yield sse("ping", {"type": "ping"})
     idx, text_open, last_ping = -1, False, time.time()
     try:
@@ -267,11 +335,15 @@ async def _stream(router: Router, resp, m, t0: float, model: str, input_tokens: 
                 if not text_open:
                     idx += 1
                     text_open = True
-                    yield sse("content_block_start", {"type": "content_block_start", "index": idx,
-                                                      "content_block": {"type": "text", "text": ""}})
-                yield sse("content_block_delta", {"type": "content_block_delta", "index": idx,
-                                                  "delta": {"type": "text_delta", "text": val}})
-            elif time.time() - last_ping > 5:   # reasoning is dropped; keep the client's idle timer alive
+                    yield sse(
+                        "content_block_start",
+                        {"type": "content_block_start", "index": idx, "content_block": {"type": "text", "text": ""}},
+                    )
+                yield sse(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": idx, "delta": {"type": "text_delta", "text": val}},
+                )
+            elif time.time() - last_ping > 5:  # reasoning is dropped; keep the client's idle timer alive
                 last_ping = time.time()
                 yield sse("ping", {"type": "ping"})
         if text_open:
@@ -279,16 +351,34 @@ async def _stream(router: Router, resp, m, t0: float, model: str, input_tokens: 
         calls = up.tool_calls[:1] if single else up.tool_calls
         for c in calls:
             idx += 1
-            yield sse("content_block_start", {"type": "content_block_start", "index": idx, "content_block": {
-                "type": "tool_use", "id": c["id"], "name": c["name"], "input": {}}})
-            yield sse("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": {
-                "type": "input_json_delta", "partial_json": json.dumps(parse_args(c["arguments"]))}})
+            yield sse(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": idx,
+                    "content_block": {"type": "tool_use", "id": c["id"], "name": c["name"], "input": {}},
+                },
+            )
+            yield sse(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": idx,
+                    "delta": {"type": "input_json_delta", "partial_json": json.dumps(parse_args(c["arguments"]))},
+                },
+            )
             yield sse("content_block_stop", {"type": "content_block_stop", "index": idx})
-        yield sse("message_delta", {"type": "message_delta",
-                                    "delta": {"stop_reason": stop_reason(up.finish_reason, bool(calls)),
-                                              "stop_sequence": None},
-                                    "usage": {"input_tokens": int((up.usage or {}).get("prompt_tokens") or input_tokens),
-                                              "output_tokens": up.output_tokens()}})
+        yield sse(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason(up.finish_reason, bool(calls)), "stop_sequence": None},
+                "usage": {
+                    "input_tokens": int((up.usage or {}).get("prompt_tokens") or input_tokens),
+                    "output_tokens": up.output_tokens(),
+                },
+            },
+        )
         yield sse("message_stop", {"type": "message_stop"})
         router.state.success(m, (time.time() - t0) * 1000)
     except Exception as e:  # noqa: BLE001 - upstream died mid-stream: tell the client in Anthropic's terms

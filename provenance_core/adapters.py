@@ -3,6 +3,7 @@ model name to a tier or a concrete model, sticky-session keys, auth, and reading
 
 Every adapter translates its request into an OpenAI chat body and goes through the same Router path as
 /v1/chat/completions (single request, no ensemble), then translates the answer back."""
+
 from __future__ import annotations
 
 import hashlib
@@ -12,14 +13,14 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from .settings import env
 from .router import NoCapacity, Router, estimate_tokens
+from .settings import env
 
 
 @dataclass
 class Target:
-    tier: str | None        # serve from this tier (with fallback) ...
-    concrete: str | None    # ... or from exactly this catalog model
+    tier: str | None  # serve from this tier (with fallback) ...
+    concrete: str | None  # ... or from exactly this catalog model
     fallback: str = "none"
 
     @property
@@ -44,8 +45,7 @@ def authorized(request, token: str | None) -> bool:
     """PCORE_TOKEN as a bearer token, or as x-api-key (what Anthropic SDKs send for ANTHROPIC_API_KEY)."""
     if not token:
         return True
-    return (request.headers.get("authorization") == f"Bearer {token}"
-            or request.headers.get("x-api-key") == token)
+    return request.headers.get("authorization") == f"Bearer {token}" or request.headers.get("x-api-key") == token
 
 
 def session_key(request, target: Target, messages: list[dict]) -> str:
@@ -140,7 +140,7 @@ class UpstreamStream:
         self.usage: dict | None = None
         self.text_chars = 0
         self.model: str | None = None
-        self._thought = False   # inside an inline <thought>...</thought> block (Gemini's OpenAI endpoint sends these)
+        self._thought = False  # inside an inline <thought>...</thought> block (Gemini's OpenAI endpoint sends these)
         self._pending = ""
 
     def _split_thoughts(self, c: str):
@@ -159,7 +159,7 @@ class UpstreamStream:
                 break
             if i:
                 out.append(("reasoning" if self._thought else "text", buf[:i]))
-            buf, self._thought = buf[i + len(tag):], not self._thought
+            buf, self._thought = buf[i + len(tag) :], not self._thought
         return out
 
     async def events(self):
@@ -194,9 +194,11 @@ class UpstreamStream:
                         yield kind, piece
                 for tc in d.get("tool_calls") or []:
                     idx = tc.get("index")
-                    if idx is None:   # no index: same id continues a call, anything else starts a new one
-                        idx = next((k for k, x in self.calls.items() if tc.get("id") and x["id"] == tc["id"]),
-                                   max(self.calls, default=-1) + 1)
+                    if idx is None:  # no index: same id continues a call, anything else starts a new one
+                        idx = next(
+                            (k for k, x in self.calls.items() if tc.get("id") and x["id"] == tc["id"]),
+                            max(self.calls, default=-1) + 1,
+                        )
                     cur = self.calls.setdefault(idx, {"id": None, "name": "", "arguments": ""})
                     if tc.get("id"):
                         cur["id"] = tc["id"]
@@ -212,7 +214,7 @@ class UpstreamStream:
     @property
     def tool_calls(self) -> list[dict]:
         for c in self.calls.values():
-            c["id"] = safe_id(c["id"])   # stable: assigned once (generated if the provider sent none)
+            c["id"] = safe_id(c["id"])  # stable: assigned once (generated if the provider sent none)
         return [c for _, c in sorted(self.calls.items()) if c["name"]]
 
     def output_tokens(self) -> int:

@@ -1,39 +1,59 @@
+<div align="center">
+
 # provenance-core
 
-**Free LLM capacity, pooled behind one endpoint.** provenance-core collects the free tiers of a dozen providers
-(Google, Groq, Cerebras, OpenRouter, Kilo, OVHcloud, Cloudflare, Mistral, NVIDIA, ...) and serves them as one
-OpenAI- and Anthropic-compatible API. Every model is scored and sorted into four tiers, so you ask for a strength,
-not a model:
+**Free LLM capacity, pooled behind one endpoint.**
 
-| tier | what you get |
-|---|---|
-| `nova` | the very strongest models |
-| `solstice` | frontier: solid agentic coding and reasoning |
-| `spark` | strong mid-size: edits, summaries, tool plumbing |
-| `ember` | fast and small: classification, routing, bulk work |
+Ask for a strength, not a model.
 
-A request stays inside its tier, fails over between models when one hits a limit, and keeps a conversation on one
-model.
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![API](https://img.shields.io/badge/API-OpenAI%20%C2%B7%20Anthropic%20%C2%B7%20Responses-412991)
+![Ruff](https://img.shields.io/badge/code%20style-ruff-D7FF64?logo=ruff&logoColor=black)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+</div>
+
+provenance-core takes the free tiers of a dozen providers (Google, Groq, Cerebras, OpenRouter, Kilo, Cloudflare,
+Mistral, NVIDIA, ...) and serves them as one OpenAI-, Anthropic- and Responses-compatible API. Every model gets a
+score and lands in one of four tiers:
+
+```
+ember  ─▶  spark  ─▶  solstice  ─▶  nova
+fast       strong      frontier      the very
+& small    mid-size    agentic       strongest
+```
+
+| tier       | good for                                  |
+| ---------- | ----------------------------------------- |
+| `nova`     | the hardest problems                      |
+| `solstice` | agentic coding and reasoning (default)    |
+| `spark`    | edits, summaries, tool plumbing           |
+| `ember`    | classification, routing, bulk work        |
+
+A request stays inside its tier, fails over to another model when one hits a limit, and keeps a conversation on the
+same model.
 
 ## Quick start
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m provenance_core serve        # http://127.0.0.1:4141/v1
+python -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/provenance-core serve          # http://127.0.0.1:4141/v1
 ```
-
-Kilo and OVHcloud work with no key at all, so that already answers. Add keys for more capacity (below), then:
 
 ```bash
 curl localhost:4141/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model": "solstice", "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
-`python -m provenance_core tiers` shows what you have; `python -m provenance_core calibrate` measures it.
+Kilo answers without a key. Export provider keys (`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, ... see
+`catalog.yaml`) for more capacity; providers without a key are skipped. `provenance-core tiers` shows what you have,
+`provenance-core calibrate` measures it.
 
 ## Use it with
 
-**Claude Code**
+<details>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=pcore claude
@@ -41,7 +61,10 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=pcore claude
 
 Opus maps to `nova`, Sonnet to `solstice`, Haiku to `spark`.
 
-**Codex** (`~/.codex/config.toml`)
+</details>
+
+<details>
+<summary><b>Codex</b> (<code>~/.codex/config.toml</code>)</summary>
 
 ```toml
 model = "solstice"
@@ -53,57 +76,19 @@ base_url = "http://127.0.0.1:4141/v1"
 wire_api = "responses"
 ```
 
-**Provenance** (the Codex fork) uses provenance-core out of the box at `http://127.0.0.1:4141`.
+</details>
 
-Any other OpenAI client: base URL `http://127.0.0.1:4141/v1`, model = a tier name.
+<details>
+<summary><b>Provenance</b> and any other OpenAI client</summary>
 
-## ChatGPT web as a model (optional, off by default)
+[Provenance](https://github.com/prominence-chan/provenance) (the Codex fork) uses provenance-core out of the box.
+Anything else: base URL `http://127.0.0.1:4141/v1`, model = a tier name.
 
-If your ChatGPT plan gives you a strong model in the web chat, provenance-core can use that chat as one more model:
-each request opens a **new temporary chat** in a visible Chrome window on its own profile, types the whole request
-as one message, and reads the answer back (tool calls included). Nothing is kept in your ChatGPT history, and the
-harness keeps owning context, tools and memory.
+</details>
 
-```bash
-.venv/bin/pip install playwright patchright   # uses your installed Google Chrome
-provenance-core weblogin                  # opens Chrome on the dedicated profile: sign in, then quit it (Cmd+Q)
-echo 'PCORE_CHATGPT_WEB=1' >> ~/.tierlm/keys.env    # turn it on, then restart the server
-provenance-core webstatus --probe         # on? signed in? how many requests today?
-```
+## Docs
 
-The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked in the page's model picker; a
-Free account has no picker and one model, which is used as is). It
-sits in a tier by its score like any other model; Provenance / Codex requests for that tier try it first and fall
-back to the normal pool whenever it is busy, signed out, rate limited or showing a challenge.
+Routing, sticky sessions, ensembles, the API adapters, calibration, subscription fallback and every setting live in
+**[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
 
-As of 2026-11-21 chatgpt.com answers a stock automated window with a Cloudflare check that does not clear by itself,
-so with the default driver the bridge reports itself unavailable. `PCORE_CHATGPT_WEB_DRIVER=patchright` in
-`~/.tierlm/keys.env` (or `driver: patchright` under the provider's `web:`) drives the same Chrome with
-[patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python), the approach
-[CatGPT-Gateway](https://github.com/GautamVhavle/CatGPT-Gateway) uses: the window no longer announces itself as
-automated and the check passes. That is hiding the automation from the site, which raises the stakes of the next
-paragraph; it is off unless you set it.
-
-**Know the risk:** automating the ChatGPT web app is against OpenAI's terms of use. The realistic downside is your
-ChatGPT account being limited or banned. The bridge is therefore slow on purpose (one request at a time, a pause
-between requests, a daily cap of 200) and never solves or clicks a captcha, challenge or "unusual activity"
-notice: it stops and tells you. Details: [docs/TECHNICAL.md](docs/TECHNICAL.md#chatgpt-web-provider).
-
-## Keys
-
-Put provider keys in your environment (or an env file your service sources), any subset:
-
-```bash
-GEMINI_API_KEY=...  GROQ_API_KEY=...  OPENROUTER_API_KEY=...  CEREBRAS_API_KEY=...
-CLOUDFLARE_ACCOUNT_ID=...  CLOUDFLARE_API_TOKEN=...  ZAI_API_KEY=...  SAMBANOVA_API_KEY=...
-```
-
-Providers without a key are simply skipped. The full list is in `catalog.yaml`. Use each provider within its own
-terms.
-
-## More
-
-Routing, sticky sessions, ensembles, the API adapters, calibration, subscription fallback and every setting:
-[docs/TECHNICAL.md](docs/TECHNICAL.md).
-
-MIT licensed.
+Use each provider within its own terms. MIT licensed.

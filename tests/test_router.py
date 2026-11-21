@@ -1,4 +1,5 @@
-import asyncio, json
+import asyncio
+import json
 
 import httpx
 import pytest
@@ -11,19 +12,28 @@ from provenance_core.server import create_app
 from provenance_core.state import State
 
 CAT = {
-    "tiers": [{"name": "tier-1", "min_score": 80}, {"name": "tier-2", "min_score": 60}, {"name": "tier-3", "min_score": 0}],
-    "providers": {"a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"},
-                  "b": {"base_url": "https://b.test/v1", "api_key_env": "B_KEY"},
-                  "c": {"base_url": "https://c.test/v1", "api_key_env": "C_KEY"}},
-    "models": [{"provider": "a", "model": "big", "score": 90, "limits": {"rpm": 2}},
-               {"provider": "b", "model": "big2", "score": 85},
-               {"provider": "c", "model": "mid", "score": 70},
-               {"provider": "c", "model": "small", "score": 30}],
+    "tiers": [
+        {"name": "tier-1", "min_score": 80},
+        {"name": "tier-2", "min_score": 60},
+        {"name": "tier-3", "min_score": 0},
+    ],
+    "providers": {
+        "a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"},
+        "b": {"base_url": "https://b.test/v1", "api_key_env": "B_KEY"},
+        "c": {"base_url": "https://c.test/v1", "api_key_env": "C_KEY"},
+    },
+    "models": [
+        {"provider": "a", "model": "big", "score": 90, "limits": {"rpm": 2}},
+        {"provider": "b", "model": "big2", "score": 85},
+        {"provider": "c", "model": "mid", "score": 70},
+        {"provider": "c", "model": "small", "score": 30},
+    ],
 }
 
 
 class Clock:
     t = 1000.0
+
     def __call__(self):
         return self.t
 
@@ -46,8 +56,11 @@ def setup(tmp_path, monkeypatch):
         if b == "500":
             return httpx.Response(500, text="boom")
         content = behavior.get(body["model"] + ":text", f"answer from {body['model']}")
-        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}],
-                                         "usage": {"total_tokens": 100}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"total_tokens": 100}},
+        )
+
     clock = Clock()
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     router = Router(load(p), State(clock=clock), client)
@@ -95,7 +108,7 @@ def test_rate_limit_caps_and_window(setup):
         run(router.complete({"messages": []}, "tier-1"))
     calls.clear()
     run(router.complete({"messages": []}, "tier-1"))
-    assert calls == ["big2"]   # big hit its rpm=2
+    assert calls == ["big2"]  # big hit its rpm=2
     clock.t += 61
     calls.clear()
     run(router.complete({"messages": []}, "tier-1"))
@@ -105,25 +118,29 @@ def test_rate_limit_caps_and_window(setup):
 def test_sticky_sessions(setup):
     router, calls, behavior, _ = setup
     behavior["big"] = "429"
-    run(router.complete({"messages": []}, "tier-1", session="s1"))   # served by big2
-    router.state.health.clear()                                     # big recovers
+    run(router.complete({"messages": []}, "tier-1", session="s1"))  # served by big2
+    router.state.health.clear()  # big recovers
     calls.clear()
     _, m = run(router.complete({"messages": []}, "tier-1", session="s1"))
-    assert m.model == "big2" and calls == ["big2"]                  # conversation keeps its model
+    assert m.model == "big2" and calls == ["big2"]  # conversation keeps its model
 
 
 def test_majority_ensemble(setup):
     router, calls, behavior, _ = setup
     behavior["big:text"] = "work...\n42"
     behavior["big2:text"] = "42"
-    data, members = run(router.ensemble({"messages": [{"role": "user", "content": "q"}]}, "tier-1", k=2, strategy="majority"))
+    data, members = run(
+        router.ensemble({"messages": [{"role": "user", "content": "q"}]}, "tier-1", k=2, strategy="majority")
+    )
     assert data["choices"][0]["message"]["content"].endswith("42") and data["pcore"]["votes"]["42"] == 2
 
 
 def test_judge_ensemble(setup):
     router, calls, behavior, _ = setup
-    data, members = run(router.ensemble({"messages": [{"role": "user", "content": "q"}]}, "tier-1", k=2, strategy="judge"))
-    assert len(members) == 2 and calls[-1] == "big"   # strongest member judges
+    data, members = run(
+        router.ensemble({"messages": [{"role": "user", "content": "q"}]}, "tier-1", k=2, strategy="judge")
+    )
+    assert len(members) == 2 and calls[-1] == "big"  # strongest member judges
 
 
 def test_http_api(setup):
@@ -141,5 +158,6 @@ def test_http_api(setup):
 
 def test_calibration_grading():
     from provenance_core.calibrate import grade
+
     assert grade("so the answer is\n391", r"^\s*391\s*$")
     assert grade("6/(1-3/4)", "EVAL24:1346") and not grade("4*6*1*3", "EVAL24:1346")

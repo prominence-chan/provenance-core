@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "provenance-core"
+dynamic = ["version"]
+description = "Free LLM API capacity, pooled behind one OpenAI/Anthropic/Responses-compatible endpoint and sorted into strength tiers."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "prominence-chan" }]
+keywords = ["llm", "openai", "anthropic", "router", "gateway", "fastapi", "free-tier"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Framework :: FastAPI",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+dependencies = ["fastapi", "uvicorn", "httpx", "pyyaml"]
+
+[project.optional-dependencies]
+chatgpt-web = ["playwright", "patchright"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+provenance-core = "provenance_core.__main__:main"
+
+[tool.setuptools]
+packages = ["provenance_core", "tierlm"]
+
+[tool.setuptools.dynamic]
+version = { attr = "provenance_core.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["tests/real_page_2026_11.html"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",  # long lines are left to the formatter
+  "B008",  # FastAPI-style defaults
+  "UP031", # printf-style formatting is fine for regexes
+]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,14 +1,15 @@
 """chatgpt_web provider: the text protocol (prompt out, tool calls back), the router wiring (opt-in, failover,
 cooldowns, daily cap) and the page driver against a local mock page (tests/mock_chatgpt.py) in headless Chrome."""
+
 import asyncio
 import json
-
-import httpx
 import os
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from mock_chatgpt import Mock, code, tool_call
 
 from provenance_core import chatgpt_web as cw
 from provenance_core.adapters import UpstreamStream
@@ -17,13 +18,28 @@ from provenance_core.router import NoCapacity, Router
 from provenance_core.server import create_app
 from provenance_core.state import State
 
-from mock_chatgpt import Mock, code, tool_call
-
-TOOLS = [{"type": "function", "function": {"name": "shell", "description": "Run a command.", "parameters": {
-            "type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}},
-            "required": ["command"]}}},
-         {"type": "function", "function": {"name": "apply_patch", "description": "Apply a patch.", "parameters": {
-             "type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]}}}]
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "Run a command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "array", "items": {"type": "string"}}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Apply a patch.",
+            "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]},
+        },
+    },
+]
 SCHEMAS = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
 
 
@@ -33,94 +49,174 @@ def run(c):
 
 # ---- protocol ---------------------------------------------------------------------------------------------------------
 def test_prompt_holds_the_whole_request():
-    body = {"messages": [
-        {"role": "system", "content": "You are Provenance."},
-        {"role": "user", "content": "list the files"},
-        {"role": "assistant", "content": "Looking.", "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": '{"command": ["ls"]}'}}]},
-        {"role": "tool", "tool_call_id": "c1", "content": "a.py\nb.py"},
-        {"role": "user", "content": [{"type": "text", "text": "and now?"}]}],
-        "tools": TOOLS, "_single_tool_call": True}
+    body = {
+        "messages": [
+            {"role": "system", "content": "You are Provenance."},
+            {"role": "user", "content": "list the files"},
+            {
+                "role": "assistant",
+                "content": "Looking.",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": '{"command": ["ls"]}'}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "a.py\nb.py"},
+            {"role": "user", "content": [{"type": "text", "text": "and now?"}]},
+        ],
+        "tools": TOOLS,
+        "_single_tool_call": True,
+    }
     prompt, tools, rules = cw.render_prompt(body)
     assert set(tools) == {"shell", "apply_patch"} and rules == {"single": True, "must": False, "only": None}
-    for piece in ("You are Provenance.", "type shell = (_: {\n  command: string[],\n}) => any;", "<<<user>>>\nlist the files",
-                  '```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```',
-                  "<<<tool result: shell>>>\na.py\nb.py", "<<<user>>>\nand now?", "At most one tool block",
-                  "run on OpenAI's servers", "Shorthand for `apply_patch` (body = `input`)"):
+    for piece in (
+        "You are Provenance.",
+        "type shell = (_: {\n  command: string[],\n}) => any;",
+        "<<<user>>>\nlist the files",
+        '```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```',
+        "<<<tool result: shell>>>\na.py\nb.py",
+        "<<<user>>>\nand now?",
+        "At most one tool block",
+        "run on OpenAI's servers",
+        "Shorthand for `apply_patch` (body = `input`)",
+    ):
         assert piece in prompt
-    assert prompt.rstrip().endswith("give the final answer with no block.")      # the rules again, next to the reply
+    assert prompt.rstrip().endswith("give the final answer with no block.")  # the rules again, next to the reply
     # the model's own earlier call, rendered in the protocol, parses back
-    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n"):prompt.index("<<<tool result:")], tools)
+    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n") : prompt.index("<<<tool result:")], tools)
     assert calls[0]["name"] == "shell" and json.loads(calls[0]["arguments"]) == {"command": ["ls"]}
 
 
 def test_prompt_tool_choice_and_images():
-    _, tools, rules = cw.render_prompt({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS, "tool_choice": "none"})
+    _, tools, rules = cw.render_prompt(
+        {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS, "tool_choice": "none"}
+    )
     assert tools == {}
-    p, _, rules = cw.render_prompt({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS,
-                                    "tool_choice": {"type": "function", "function": {"name": "shell"}}})
+    p, _, rules = cw.render_prompt(
+        {
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": TOOLS,
+            "tool_choice": {"type": "function", "function": {"name": "shell"}},
+        }
+    )
     assert rules["must"] and rules["only"] == "shell" and "must call the tool `shell`" in p
     with pytest.raises(cw.WebSkip):
-        cw.render_prompt({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:..."}}]}]})
+        cw.render_prompt(
+            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:..."}}]}]}
+        )
 
 
-EXEC = {"type": "function", "function": {"name": "exec_command", "description": "Runs a command in a PTY.\nReturns output.",
-        "parameters": {"type": "object", "required": ["cmd"], "properties": {
-            "cmd": {"type": "string", "description": "Shell command to execute."},
-            "workdir": {"type": "string"}, "yield_time_ms": {"type": "number"},
-            "sandbox_permissions": {"type": "string", "enum": ["use_default", "require_escalated"]},
-            "prefix_rule": {"type": "array", "items": {"type": "string"}}}}}}
-STDIN = {"type": "function", "function": {"name": "write_stdin", "description": "", "parameters": {
-         "type": "object", "required": ["session_id"], "properties": {"session_id": {"type": "number"}, "chars": {"type": "string"}}}}}
+EXEC = {
+    "type": "function",
+    "function": {
+        "name": "exec_command",
+        "description": "Runs a command in a PTY.\nReturns output.",
+        "parameters": {
+            "type": "object",
+            "required": ["cmd"],
+            "properties": {
+                "cmd": {"type": "string", "description": "Shell command to execute."},
+                "workdir": {"type": "string"},
+                "yield_time_ms": {"type": "number"},
+                "sandbox_permissions": {"type": "string", "enum": ["use_default", "require_escalated"]},
+                "prefix_rule": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+}
+STDIN = {
+    "type": "function",
+    "function": {
+        "name": "write_stdin",
+        "description": "",
+        "parameters": {
+            "type": "object",
+            "required": ["session_id"],
+            "properties": {"session_id": {"type": "number"}, "chars": {"type": "string"}},
+        },
+    },
+}
 
 
 def test_prompt_for_a_codex_request():
     """What Provenance / Codex sends: a prompt that speaks of function calls and an apply_patch tool, and exec_command."""
-    patch = "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: a.py\n@@\n-x = \"1\"\n+x = \"2\"\n*** End Patch\nEOF"
-    body = {"messages": [
-        {"role": "system", "content": "You are a coding agent. Use the `apply_patch` tool to edit files."},
-        {"role": "user", "content": "fix it"},
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "ls"})}},
-            {"id": "c2", "type": "function", "function": {"name": "exec_command", "arguments": json.dumps({"cmd": patch})}}]},
-        {"role": "tool", "tool_call_id": "c1", "content": "a.py"}, {"role": "tool", "tool_call_id": "c2", "content": "Done"}],
-        "tools": [EXEC, STDIN]}
+    patch = 'apply_patch <<\'EOF\'\n*** Begin Patch\n*** Update File: a.py\n@@\n-x = "1"\n+x = "2"\n*** End Patch\nEOF'
+    body = {
+        "messages": [
+            {"role": "system", "content": "You are a coding agent. Use the `apply_patch` tool to edit files."},
+            {"role": "user", "content": "fix it"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "ls"})},
+                    },
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": json.dumps({"cmd": patch})},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "a.py"},
+            {"role": "tool", "tool_call_id": "c2", "content": "Done"},
+        ],
+        "tools": [EXEC, STDIN],
+    }
     prompt, tools, rules = cw.render_prompt(body)
-    for piece in ("no separate apply_patch tool here: to edit a file, run `apply_patch` as a shell command through exec_command",
-                  "Shorthand for `exec_command` (body = `cmd`)",
-                  "// Runs a command in a PTY.\n// Returns output.\ntype exec_command = (_: {\n  // Shell command to execute.\n  cmd: string,\n",
-                  '  sandbox_permissions?: "use_default" | "require_escalated",\n  prefix_rule?: string[],\n}) => any;',
-                  "type write_stdin = (_: {\n  session_id: number,\n  chars?: string,\n}) => any;",
-                  '```tool_call\n{"name": "exec_command", "arguments": {"cmd": "ls"}}\n```',
-                  "```exec_command\n" + patch + "\n```",           # its earlier multi-line command, shown unescaped
-                  "or the ```exec_command shorthand for a command"):
+    for piece in (
+        "no separate apply_patch tool here: to edit a file, run `apply_patch` as a shell command through exec_command",
+        "Shorthand for `exec_command` (body = `cmd`)",
+        "// Runs a command in a PTY.\n// Returns output.\ntype exec_command = (_: {\n  // Shell command to execute.\n  cmd: string,\n",
+        '  sandbox_permissions?: "use_default" | "require_escalated",\n  prefix_rule?: string[],\n}) => any;',
+        "type write_stdin = (_: {\n  session_id: number,\n  chars?: string,\n}) => any;",
+        '```tool_call\n{"name": "exec_command", "arguments": {"cmd": "ls"}}\n```',
+        "```exec_command\n" + patch + "\n```",  # its earlier multi-line command, shown unescaped
+        "or the ```exec_command shorthand for a command",
+    ):
         assert piece in prompt
-    assert "write_stdin` (body" not in prompt                      # no free-text argument: no shorthand
+    assert "write_stdin` (body" not in prompt  # no free-text argument: no shorthand
     # both of its earlier calls parse back to what they were
-    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n"):prompt.index("<<<tool result:")], tools)
+    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n") : prompt.index("<<<tool result:")], tools)
     assert [json.loads(c["arguments"]) for c in calls] == [{"cmd": "ls"}, {"cmd": patch}]
 
 
 def test_ts_types():
     assert cw.ts_type({"type": ["string", "null"]}) == "string | null"
-    assert cw.ts_type({"anyOf": [{"type": "integer"}, {"type": "array", "items": {"enum": ["a", "b"]}}]}) == 'number | ("a" | "b")[]'
+    assert (
+        cw.ts_type({"anyOf": [{"type": "integer"}, {"type": "array", "items": {"enum": ["a", "b"]}}]})
+        == 'number | ("a" | "b")[]'
+    )
     assert cw.ts_type({"type": "object"}) == "{}" and cw.ts_type({}) == "any"
-    assert cw.ts_type({"type": "object", "properties": {"a-b": {"type": "boolean", "default": False}}}) == '{\n  // default: false\n  "a-b"?: boolean,\n}'
+    assert (
+        cw.ts_type({"type": "object", "properties": {"a-b": {"type": "boolean", "default": False}}})
+        == '{\n  // default: false\n  "a-b"?: boolean,\n}'
+    )
 
 
 def test_parse_shorthand_blocks():
     tools = {t["function"]["name"]: t["function"]["parameters"] for t in (EXEC, STDIN)}
-    md = ("Patching.\n\n```exec_command\ncat > a.txt <<'EOF'\n{\"k\": \"v\"}\n  two\nEOF\n```\n\n"
-          '```tool_call\n{"name": "write_stdin", "arguments": {"session_id": 3}}\n```\nand then it printed ok')
+    md = (
+        'Patching.\n\n```exec_command\ncat > a.txt <<\'EOF\'\n{"k": "v"}\n  two\nEOF\n```\n\n'
+        '```tool_call\n{"name": "write_stdin", "arguments": {"session_id": 3}}\n```\nand then it printed ok'
+    )
     text, calls = cw.parse_reply(md, tools)
     assert text == "Patching." and [c["name"] for c in calls] == ["exec_command", "write_stdin"]
-    assert json.loads(calls[0]["arguments"]) == {"cmd": "cat > a.txt <<'EOF'\n{\"k\": \"v\"}\n  two\nEOF"}
+    assert json.loads(calls[0]["arguments"]) == {"cmd": 'cat > a.txt <<\'EOF\'\n{"k": "v"}\n  two\nEOF'}
     # JSON inside the shorthand block is taken as arguments when it is exactly that
-    for inner in ('{"cmd": "ls", "workdir": "/tmp"}', '{"name": "exec_command", "arguments": {"cmd": "ls", "workdir": "/tmp"}}'):
-        assert json.loads(cw.parse_reply(f"```exec_command\n{inner}\n```", tools)[1][0]["arguments"]) == {"cmd": "ls", "workdir": "/tmp"}
+    for inner in (
+        '{"cmd": "ls", "workdir": "/tmp"}',
+        '{"name": "exec_command", "arguments": {"cmd": "ls", "workdir": "/tmp"}}',
+    ):
+        assert json.loads(cw.parse_reply(f"```exec_command\n{inner}\n```", tools)[1][0]["arguments"]) == {
+            "cmd": "ls",
+            "workdir": "/tmp",
+        }
     assert json.loads(cw.parse_reply('```exec_command\n{"a": 1}\n```', tools)[1][0]["arguments"]) == {"cmd": '{"a": 1}'}
-    assert cw.parse_reply("```write_stdin\n3\n```", tools) == ("```write_stdin\n3\n```", [])     # not a shorthand tool
-    assert cw.parse_reply("```bash\nls\n```", tools)[1] == []                                    # an ordinary code block
+    assert cw.parse_reply("```write_stdin\n3\n```", tools) == ("```write_stdin\n3\n```", [])  # not a shorthand tool
+    assert cw.parse_reply("```bash\nls\n```", tools)[1] == []  # an ordinary code block
     with pytest.raises(cw.Malformed, match="empty"):
         cw.parse_reply("```exec_command\n   \n```", tools)
 
@@ -132,8 +228,10 @@ def test_parse_tool_calls():
     assert json.loads(calls[0]["arguments"]) == {"command": ["ls", "-la"]}
     # two calls; an untagged / json-tagged block that is a call; a patch whose text contains code fences
     patch = "*** Begin Patch\n*** Add File: a.md\n+```py\n+x = 1\n+```\n*** End Patch"
-    md = ("```json\n" + json.dumps({"name": "shell", "arguments": {"command": ["pwd"]}}) + "\n```\n\n"
-          "```tool_call\n" + json.dumps({"name": "apply_patch", "arguments": {"input": patch}}) + "\n```")
+    md = (
+        "```json\n" + json.dumps({"name": "shell", "arguments": {"command": ["pwd"]}}) + "\n```\n\n"
+        "```tool_call\n" + json.dumps({"name": "apply_patch", "arguments": {"input": patch}}) + "\n```"
+    )
     text, calls = cw.parse_reply(md, SCHEMAS)
     assert text == "" and [c["name"] for c in calls] == ["shell", "apply_patch"]
     assert json.loads(calls[1]["arguments"])["input"] == patch
@@ -150,8 +248,10 @@ def test_parse_tool_calls():
 
 
 def test_parse_drops_what_the_model_wrote_past_its_turn():
-    md = ('Patching.\n\n```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```\n\n'
-          '<<<tool result: shell>>>\na.py\n\nDone, the file is fixed.')
+    md = (
+        'Patching.\n\n```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```\n\n'
+        "<<<tool result: shell>>>\na.py\n\nDone, the file is fixed."
+    )
     text, calls = cw.parse_reply(md, SCHEMAS)
     assert text == "Patching." and len(calls) == 1
     md = 'Note.\n\n```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```\n\nThe output will be a.py.'
@@ -165,14 +265,17 @@ def test_parse_leaves_ordinary_replies_alone():
     assert cw.parse_reply("```tool_call\nnot even json\n```", {}) == ("```tool_call\nnot even json\n```", [])
 
 
-@pytest.mark.parametrize("md,why", [
-    ('```tool_call\n{"name": "shell", "arguments": {"command": ["ls",]}}\n```', "not valid JSON"),
-    ('```tool_call\n{"name": "rm_rf", "arguments": {}}\n```', "unknown tool"),
-    ('```tool_call\n{"name": "shell", "arguments": {"cmd": "ls"}}\n```', "missing required"),
-    ('```tool_call\n{"name": "shell", "arguments": [1, 2]}\n```', "must be a JSON object"),
-    ('```tool_call\n{"command": ["ls"]}\n```', '{"name"'),
-    ('tool_call\n{"name": "shell", "arguments": {"command": [“ls”]}}', "fenced block"),
-])
+@pytest.mark.parametrize(
+    "md,why",
+    [
+        ('```tool_call\n{"name": "shell", "arguments": {"command": ["ls",]}}\n```', "not valid JSON"),
+        ('```tool_call\n{"name": "rm_rf", "arguments": {}}\n```', "unknown tool"),
+        ('```tool_call\n{"name": "shell", "arguments": {"cmd": "ls"}}\n```', "missing required"),
+        ('```tool_call\n{"name": "shell", "arguments": [1, 2]}\n```', "must be a JSON object"),
+        ('```tool_call\n{"command": ["ls"]}\n```', '{"name"'),
+        ('tool_call\n{"name": "shell", "arguments": {"command": [“ls”]}}', "fenced block"),
+    ],
+)
 def test_parse_malformed(md, why):
     with pytest.raises(cw.Malformed, match=why):
         cw.parse_reply(md, SCHEMAS)
@@ -182,8 +285,11 @@ def test_parse_required_call():
     with pytest.raises(cw.Malformed, match="must contain a tool_call"):
         cw.parse_reply("Sure, done.", SCHEMAS, {"must": True})
     with pytest.raises(cw.Malformed, match="must call the tool shell"):
-        cw.parse_reply('```tool_call\n{"name": "apply_patch", "arguments": {"input": "x"}}\n```', SCHEMAS,
-                       {"must": True, "only": "shell"})
+        cw.parse_reply(
+            '```tool_call\n{"name": "apply_patch", "arguments": {"input": "x"}}\n```',
+            SCHEMAS,
+            {"must": True, "only": "shell"},
+        )
 
 
 def test_buffered_stream_reads_like_an_upstream():
@@ -194,6 +300,7 @@ def test_buffered_stream_reads_like_an_upstream():
     async def go():
         up = UpstreamStream(cw.BufferedStream(data))
         return [e async for e in up.events()], up
+
     events, up = run(go())
     assert events == [("text", "Looking.")] and up.tool_calls == calls and up.finish_reason == "tool_calls"
 
@@ -201,11 +308,20 @@ def test_buffered_stream_reads_like_an_upstream():
 # ---- router wiring (a fake bridge, no browser) ------------------------------------------------------------------------
 CAT = {
     "tiers": [{"name": "nova", "min_score": 90}, {"name": "solstice", "min_score": 0}],
-    "providers": {"chatgpt-web": {"type": "chatgpt_web", "base_url": "https://chatgpt.test", "api_key_env": "none",
-                                  "web": {"endpoints": ["responses"]}},
-                  "a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"}},
-    "models": [{"provider": "chatgpt-web", "model": "luna", "score": 96, "context": 64000},
-               {"provider": "a", "model": "big", "score": 92}, {"provider": "a", "model": "mid", "score": 70}],
+    "providers": {
+        "chatgpt-web": {
+            "type": "chatgpt_web",
+            "base_url": "https://chatgpt.test",
+            "api_key_env": "none",
+            "web": {"endpoints": ["responses"]},
+        },
+        "a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"},
+    },
+    "models": [
+        {"provider": "chatgpt-web", "model": "luna", "score": 96, "context": 64000},
+        {"provider": "a", "model": "big", "score": 92},
+        {"provider": "a", "model": "mid", "score": 70},
+    ],
 }
 
 
@@ -219,7 +335,9 @@ class FakeBridge:
             raise self.fail
         prompt, tools, rules = cw.render_prompt(body)
         if tools:
-            text, calls = cw.parse_reply('```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```', tools, rules)
+            text, calls = cw.parse_reply(
+                '```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```', tools, rules
+            )
             return cw.chat_completion(model_id, text, calls, prompt)
         return cw.chat_completion(model_id, "from the web", [], prompt)
 
@@ -236,8 +354,14 @@ def wired(tmp_path, monkeypatch):
     def handler(req: httpx.Request):
         body = json.loads(req.content)
         seen.append(body)
-        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": f"from {body['model']}"}}],
-                                         "usage": {"total_tokens": 10}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": f"from {body['model']}"}}],
+                "usage": {"total_tokens": 10},
+            },
+        )
+
     router = Router(load(p), State(), httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     fake = FakeBridge()
     router.bridges["chatgpt-web"] = fake
@@ -261,11 +385,11 @@ def test_off_unless_enabled(wired, monkeypatch):
 def test_only_used_when_the_front_end_allows_it(wired):
     router, fake, _ = wired
     assert router.web_ok("responses") and not router.web_ok("chat") and not router.web_ok("messages")
-    assert [m.id for m in router.candidates("nova", 100)] == ["a/big"]                     # default: not offered
+    assert [m.id for m in router.candidates("nova", 100)] == ["a/big"]  # default: not offered
     assert [m.id for m in router.candidates("nova", 100, web=True)] == ["chatgpt-web/luna", "a/big"]
     _, m = run(router.complete(dict(USER), "nova"))
     assert m.id == "a/big" and not fake.calls
-    run(router.ensemble(dict(USER), "nova", k=2, strategy="first"))                        # ensembles never use it
+    run(router.ensemble(dict(USER), "nova", k=2, strategy="first"))  # ensembles never use it
     assert not fake.calls
     data, m = run(router.complete(dict(USER), "nova", web=True))
     assert m.id == "chatgpt-web/luna" and data["choices"][0]["message"]["content"] == "from the web"
@@ -276,7 +400,7 @@ def test_unavailable_fails_over_and_cools_down(wired):
     fake.fail = cw.WebUnavailable("not signed in to ChatGPT", 1800, "login")
     data, m = run(router.complete(dict(USER), "nova", web=True))
     assert m.id == "a/big" and len(fake.calls) == 1
-    run(router.complete(dict(USER), "nova", web=True))        # cooling down: the page isn't touched again
+    run(router.complete(dict(USER), "nova", web=True))  # cooling down: the page isn't touched again
     assert len(fake.calls) == 1 and not router.state.available(router.catalog.models["chatgpt-web/luna"])
     # a skipped request (busy window, too long) costs the provider nothing
     router.state.health.clear()
@@ -299,17 +423,31 @@ def test_private_hints_never_reach_http_providers(wired):
 def test_responses_api_tool_call_through_the_bridge(wired):
     router, fake, seen = wired
     c = TestClient(create_app(router=router))
-    req = {"model": "nova", "input": "list files", "parallel_tool_calls": False,
-           "tools": [{"type": "function", "name": "shell", "description": "Run", "parameters": SCHEMAS["shell"]}]}
+    req = {
+        "model": "nova",
+        "input": "list files",
+        "parallel_tool_calls": False,
+        "tools": [{"type": "function", "name": "shell", "description": "Run", "parameters": SCHEMAS["shell"]}],
+    }
     r = c.post("/v1/responses", json=req)
     assert r.status_code == 200 and r.headers["x-pcore-model"] == "chatgpt-web/luna"
     item = r.json()["output"][0]
-    assert item["type"] == "function_call" and item["name"] == "shell" and json.loads(item["arguments"]) == {"command": ["ls"]}
+    assert (
+        item["type"] == "function_call"
+        and item["name"] == "shell"
+        and json.loads(item["arguments"]) == {"command": ["ls"]}
+    )
     assert fake.calls[-1]["_single_tool_call"] is True
     # the tool result goes back in; streaming carries the same items
-    req2 = {**req, "stream": True, "input": [
-        {"role": "user", "content": "list files"}, item,
-        {"type": "function_call_output", "call_id": item["call_id"], "output": "a.py"}]}
+    req2 = {
+        **req,
+        "stream": True,
+        "input": [
+            {"role": "user", "content": "list files"},
+            item,
+            {"type": "function_call_output", "call_id": item["call_id"], "output": "a.py"},
+        ],
+    }
     with c.stream("POST", "/v1/responses", json=req2) as s:
         events = [json.loads(line[5:]) for line in s.iter_lines() if line.startswith("data:")]
     done = events[-1]
@@ -333,6 +471,7 @@ def test_status_endpoint_and_calibration_skip(wired, tmp_path):
     st = c.get("/chatgpt-web/status").json()
     assert st["enabled"] and st["signed_in"] is None and st["today"] == 0 and st["models"][0]["tier"] == "nova"
     from provenance_core.calibrate import calibrate
+
     router.bridges["chatgpt-web"] = fake
     scores = run(calibrate(router, tmp_path / "scores.yaml"))
     assert "chatgpt-web/luna" not in scores and "a/big" in scores and not fake.calls
@@ -345,10 +484,10 @@ def test_daily_cap_blocks_and_persists(tmp_path):
     with pytest.raises(cw.WebUnavailable) as e:
         run(b.complete("luna", dict(USER)))
     assert e.value.kind == "cap" and 0 < e.value.cooldown <= 86400
-    now[0] += 86400                                   # a new day: the count starts over
+    now[0] += 86400  # a new day: the count starts over
     assert b.status()["today"] == 0
     b._block(cw.WebUnavailable("not signed in", 1800, "login"))
-    b2 = cw.Bridge("https://chatgpt.test", {"notify": False}, home=tmp_path, clock=lambda: now[0])   # survives a restart
+    b2 = cw.Bridge("https://chatgpt.test", {"notify": False}, home=tmp_path, clock=lambda: now[0])  # survives a restart
     st = b2.status()
     assert st["blocked"] and st["kind"] == "login" and st["signed_in"] is False
     with pytest.raises(cw.WebUnavailable, match="not signed in"):
@@ -356,7 +495,11 @@ def test_daily_cap_blocks_and_persists(tmp_path):
     b2.reset()
     assert not b2.status()["blocked"]
     with pytest.raises(cw.WebSkip, match="over the bridge"):
-        run(cw.Bridge("https://chatgpt.test", {"max_prompt_chars": 50, "notify": False}, home=tmp_path).complete("luna", dict(USER)))
+        run(
+            cw.Bridge("https://chatgpt.test", {"max_prompt_chars": 50, "notify": False}, home=tmp_path).complete(
+                "luna", dict(USER)
+            )
+        )
 
 
 # ---- the page driver, against the mock page in headless Chrome --------------------------------------------------------
@@ -366,6 +509,7 @@ def _chrome_ok():
     except ImportError:
         return False
     import os
+
     return os.path.exists(cw.CHROME)
 
 
@@ -384,8 +528,22 @@ def bridge_for(mock, tmp_path, **opts):
 
     async def sleep(s):
         sleeps.append(s)
-    b = cw.Bridge(mock.url, {"driver": os.environ.get("PCORE_TEST_DRIVER", "playwright"), "headless": True, "notify": False, "min_gap_s": 3, "max_gap_s": 3, "challenge_wait_s": 1,
-                             "profile": str(tmp_path / "profile"), **opts}, home=tmp_path, sleep=sleep)
+
+    b = cw.Bridge(
+        mock.url,
+        {
+            "driver": os.environ.get("PCORE_TEST_DRIVER", "playwright"),
+            "headless": True,
+            "notify": False,
+            "min_gap_s": 3,
+            "max_gap_s": 3,
+            "challenge_wait_s": 1,
+            "profile": str(tmp_path / "profile"),
+            **opts,
+        },
+        home=tmp_path,
+        sleep=sleep,
+    )
     b.sleeps = sleeps
     return b
 
@@ -397,60 +555,91 @@ def scenario(mock, tmp_path, fn, **opts):
             return await fn(b)
         finally:
             await b.release()
+
     return run(go())
 
 
 @browser
 def test_page_plain_reply_and_markdown(mock, tmp_path):
-    mock.replies = ["<p>The answer is <strong>42</strong>, see <code>f(x)</code>.</p>"
-                    "<ol><li>first</li><li>second<ul><li>nested</li></ul></li></ol>"
-                    + code("python", "def f(x):\n    return x * 2  # ``` not a fence")
-                    + "<h3>Done</h3><table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"]
+    mock.replies = [
+        "<p>The answer is <strong>42</strong>, see <code>f(x)</code>.</p>"
+        "<ol><li>first</li><li>second<ul><li>nested</li></ul></li></ol>"
+        + code("python", "def f(x):\n    return x * 2  # ``` not a fence")
+        + "<h3>Done</h3><table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    ]
 
     async def go(b):
-        d1 = await b.complete("luna", {"messages": [{"role": "system", "content": "Be brief."},
-                                                     {"role": "user", "content": "line one\n\n    indented <b>&amp;\nline three"}]})
+        d1 = await b.complete(
+            "luna",
+            {
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "line one\n\n    indented <b>&amp;\nline three"},
+                ]
+            },
+        )
         d2 = await b.complete("luna", dict(USER))
         return d1, d2, b.status()
+
     d1, d2, st = scenario(mock, tmp_path, go)
     text = d1["choices"][0]["message"]["content"]
-    assert text == ("The answer is **42**, see `f(x)`.\n\n1. first\n2. second\n   - nested\n\n"
-                    "````python\ndef f(x):\n    return x * 2  # ``` not a fence\n````\n\n### Done\n\n| a | b |\n| --- | --- |\n| 1 | 2 |")
+    assert text == (
+        "The answer is **42**, see `f(x)`.\n\n1. first\n2. second\n   - nested\n\n"
+        "````python\ndef f(x):\n    return x * 2  # ``` not a fence\n````\n\n### Done\n\n| a | b |\n| --- | --- |\n| 1 | 2 |"
+    )
     assert d1["choices"][0]["finish_reason"] == "stop" and d1["pcore"]["web"]["model_slug"] == "gpt-6-luna"
     # each request: its own page load, in temporary chat, holding the whole prompt as typed
     assert len(mock.sent) == 2 and all(s["temp"] for s in mock.sent)
-    assert "Be brief." in mock.sent[0]["prompt"] and "line one\n\n    indented <b>&amp;\nline three" in mock.sent[0]["prompt"]
-    assert "line one" not in mock.sent[1]["prompt"]        # nothing carried over
+    assert (
+        "Be brief." in mock.sent[0]["prompt"]
+        and "line one\n\n    indented <b>&amp;\nline three" in mock.sent[0]["prompt"]
+    )
+    assert "line one" not in mock.sent[1]["prompt"]  # nothing carried over
     assert st["today"] == 2 and st["signed_in"] is True and st["model_seen"] == "gpt-6-luna"
 
 
 @browser
 def test_page_tool_call_and_repair(mock, tmp_path):
     good = "<p>Listing.</p>" + tool_call("shell", {"command": ["ls", "-la"]})
-    mock.replies = [good, "<p>Sorry.</p>" + code("tool_call", '{"name": "shell", "arguments": {"command": ["ls",]}}'), good]
+    mock.replies = [
+        good,
+        "<p>Sorry.</p>" + code("tool_call", '{"name": "shell", "arguments": {"command": ["ls",]}}'),
+        good,
+    ]
 
     async def go(b):
         body = {"messages": [{"role": "user", "content": "list"}], "tools": TOOLS}
         return await b.complete("luna", body), await b.complete("luna", body)
+
     d1, d2 = scenario(mock, tmp_path, go)
     for d in (d1, d2):
         msg = d["choices"][0]["message"]
         assert msg["content"] == "Listing." and d["choices"][0]["finish_reason"] == "tool_calls"
         assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"command": ["ls", "-la"]}
     assert not d1["pcore"]["web"]["repaired"] and d2["pcore"]["web"]["repaired"]
-    assert len(mock.sent) == 3 and "not valid JSON" in mock.sent[2]["prompt"] and "```tool_call" in mock.sent[0]["prompt"]
+    assert (
+        len(mock.sent) == 3 and "not valid JSON" in mock.sent[2]["prompt"] and "```tool_call" in mock.sent[0]["prompt"]
+    )
 
 
 def test_stalled_replies():
-    for t in ("I’m ready to fix it, but the local shell execution interface isn't available to me in this turn. Please retry with the tool enabled.",
-              "I don't have access to your filesystem.", "I can't run commands here, so here is what to do:",
-              "I'm unable to execute the tests directly.",
-              "`rg` isn’t installed, so I’ll use standard shell utilities to inspect the project.\n\nThe initial inspection command "
-              "hit an environment error. I haven't changed any files yet. Please retry the shell inspection so I can continue.",
-              "Next, I'll patch the config.", "Let me check the tests first."):
+    for t in (
+        "I’m ready to fix it, but the local shell execution interface isn't available to me in this turn. Please retry with the tool enabled.",
+        "I don't have access to your filesystem.",
+        "I can't run commands here, so here is what to do:",
+        "I'm unable to execute the tests directly.",
+        "`rg` isn’t installed, so I’ll use standard shell utilities to inspect the project.\n\nThe initial inspection command "
+        "hit an environment error. I haven't changed any files yet. Please retry the shell inspection so I can continue.",
+        "Next, I'll patch the config.",
+        "Let me check the tests first.",
+    ):
         assert cw.stalled(t, SCHEMAS), t
-    for t in ("Fixed: `mean()` used floor division. Tests pass.", "Which of the two configs should I keep?", "Done. Run `make deploy` when you want it live.",
-              "The endpoint is not available before v2. " + "x" * 1600):
+    for t in (
+        "Fixed: `mean()` used floor division. Tests pass.",
+        "Which of the two configs should I keep?",
+        "Done. Run `make deploy` when you want it live.",
+        "The endpoint is not available before v2. " + "x" * 1600,
+    ):
         assert not cw.stalled(t, SCHEMAS), t
     assert not cw.stalled("I can't run commands here.", {})
 
@@ -458,19 +647,33 @@ def test_stalled_replies():
 @browser
 def test_page_nudges_a_model_that_says_it_has_no_tools(mock, tmp_path):
     exec_tools = [EXEC]
-    mock.replies = ["<p>The shell interface isn't available to me in this turn.</p>",
-                    "<p>Running it.</p>" + code("exec_command", "python3 test_calc.py"),
-                    "<p>I can't run this: the sandbox is read-only.</p>", "<p>I can't run this: the sandbox is read-only.</p>"]
+    mock.replies = [
+        "<p>The shell interface isn't available to me in this turn.</p>",
+        "<p>Running it.</p>" + code("exec_command", "python3 test_calc.py"),
+        "<p>I can't run this: the sandbox is read-only.</p>",
+        "<p>I can't run this: the sandbox is read-only.</p>",
+    ]
 
     async def go(b):
         body = {"messages": [{"role": "user", "content": "fix the test"}], "tools": exec_tools}
         return await b.complete("luna", body), await b.complete("luna", body)
+
     d1, d2 = scenario(mock, tmp_path, go)
     msg = d1["choices"][0]["message"]
-    assert msg["content"] == "Running it." and json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"cmd": "python3 test_calc.py"}
-    assert d1["pcore"]["web"]["nudged"] and "just text in your reply" in mock.sent[1]["prompt"] and "```exec_command" in mock.sent[1]["prompt"]
+    assert msg["content"] == "Running it." and json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {
+        "cmd": "python3 test_calc.py"
+    }
+    assert (
+        d1["pcore"]["web"]["nudged"]
+        and "just text in your reply" in mock.sent[1]["prompt"]
+        and "```exec_command" in mock.sent[1]["prompt"]
+    )
     # a model that means it is asked once and then taken at its word
-    assert d2["pcore"]["web"]["nudged"] and d2["choices"][0]["message"]["content"].startswith("I can't run this") and len(mock.sent) == 4
+    assert (
+        d2["pcore"]["web"]["nudged"]
+        and d2["choices"][0]["message"]["content"].startswith("I can't run this")
+        and len(mock.sent) == 4
+    )
 
 
 @browser
@@ -481,22 +684,31 @@ def test_page_gives_up_after_one_repair(mock, tmp_path):
         with pytest.raises(cw.WebError, match="after one repair"):
             await b.complete("luna", {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS})
         return b.status()
+
     st = scenario(mock, tmp_path, go)
     assert len(mock.sent) == 2 and not st["blocked"]
 
 
 @browser
-@pytest.mark.parametrize("trouble,kind", [({"login": False}, "login"), ({"challenge": True}, "challenge"),
-                                          ({"temp": False}, "tempchat"), ({"limit": True}, "limit")])
+@pytest.mark.parametrize(
+    "trouble,kind",
+    [
+        ({"login": False}, "login"),
+        ({"challenge": True}, "challenge"),
+        ({"temp": False}, "tempchat"),
+        ({"limit": True}, "limit"),
+    ],
+)
 def test_page_trouble_means_unavailable_and_nothing_sent(mock, tmp_path, trouble, kind):
     mock.state.update(trouble)
 
     async def go(b):
         with pytest.raises(cw.WebUnavailable) as e:
             await b.complete("luna", dict(USER))
-        with pytest.raises(cw.WebUnavailable):      # blocked now: no second visit
+        with pytest.raises(cw.WebUnavailable):  # blocked now: no second visit
             await b.complete("luna", dict(USER))
         return e.value, b.status(), await b.check("luna")
+
     err, st, chk = scenario(mock, tmp_path, go)
     assert err.kind == kind and st["blocked"] and st["kind"] == kind and mock.sent == [] and st["today"] == 0
     assert chk["ok"] is False and chk["kind"] == kind
@@ -512,10 +724,11 @@ def test_page_temp_toggle_model_picker_and_gap(mock, tmp_path):
         with pytest.raises(cw.WebUnavailable) as e:
             await b.complete("Orion", dict(USER))
         return d, e.value, b.sleeps
+
     d, err, sleeps = scenario(mock, tmp_path, go)
     assert [s["model"] for s in mock.sent] == ["Nimbus", "Luna"] and all(s["temp"] for s in mock.sent)
     assert d["pcore"]["web"]["model_slug"] == "gpt-6-nimbus" and err.kind == "model"
-    assert len(sleeps) == 2 and all(2 < s <= 3 for s in sleeps)      # a pause before the 2nd and 3rd request
+    assert len(sleeps) == 2 and all(2 < s <= 3 for s in sleeps)  # a pause before the 2nd and 3rd request
 
 
 @browser
@@ -525,8 +738,14 @@ def test_page_without_a_model_picker(mock, tmp_path):
 
     async def go(b):
         return await b.complete("luna", dict(USER)), await b.check("luna")
+
     d, chk = scenario(mock, tmp_path, go)
-    assert d["choices"][0]["message"]["content"] == "ok" and len(mock.sent) == 1 and chk["ok"] and chk["page_model"] is None
+    assert (
+        d["choices"][0]["message"]["content"] == "ok"
+        and len(mock.sent) == 1
+        and chk["ok"]
+        and chk["page_model"] is None
+    )
 
 
 @browser
@@ -537,10 +756,11 @@ def test_page_error_reply_and_closed_window(mock, tmp_path):
         with pytest.raises(cw.WebError, match="Something went wrong"):
             await b.complete("luna", dict(USER))
         ok = await b.complete("luna", dict(USER))
-        await b._page.close()                        # the user closes the window
+        await b._page.close()  # the user closes the window
         with pytest.raises(cw.WebUnavailable) as e:
             await b.complete("luna", dict(USER))
         return ok, e.value, b.status()
+
     ok, err, st = scenario(mock, tmp_path, go)
     assert ok["choices"][0]["message"]["content"] == "fine"
     assert err.kind == "closed" and st["blocked"] and st["kind"] == "closed"
@@ -553,8 +773,17 @@ def test_page_end_to_end_through_the_responses_api(mock, tmp_path, monkeypatch):
     cat = json.loads(json.dumps(CAT))
     cat["providers"]["chatgpt-web"]["base_url"] = mock.url
     (tmp_path / "catalog.yaml").write_text(yaml.safe_dump(cat))
-    router = Router(load(tmp_path / "catalog.yaml"), State(), httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda req: httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "from the pool"}}]}))))
+    router = Router(
+        load(tmp_path / "catalog.yaml"),
+        State(),
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"role": "assistant", "content": "from the pool"}}]}
+                )
+            )
+        ),
+    )
     router.bridges["chatgpt-web"] = bridge_for(mock, tmp_path, min_gap_s=0, max_gap_s=0)
     mock.replies = [tool_call("shell", {"command": ["ls"]}), "<p>Two files: a.py and b.py.</p>"]
     tools = [{"type": "function", "name": "shell", "description": "Run", "parameters": SCHEMAS["shell"]}]
@@ -562,17 +791,24 @@ def test_page_end_to_end_through_the_responses_api(mock, tmp_path, monkeypatch):
         r = c.post("/v1/responses", json={"model": "nova", "input": "list files", "tools": tools})
         call = r.json()["output"][0]
         assert r.headers["x-pcore-model"] == "chatgpt-web/luna" and call["type"] == "function_call"
-        r = c.post("/v1/responses", json={"model": "nova", "tools": tools, "previous_response_id": r.json()["id"],
-                                          "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": "a.py\nb.py"}]})
+        r = c.post(
+            "/v1/responses",
+            json={
+                "model": "nova",
+                "tools": tools,
+                "previous_response_id": r.json()["id"],
+                "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": "a.py\nb.py"}],
+            },
+        )
         assert r.json()["output"][0]["content"][0]["text"] == "Two files: a.py and b.py."
         assert "<<<tool result: shell>>>\na.py\nb.py" in mock.sent[1]["prompt"]
         assert c.get("/chatgpt-web/status").json()["today"] == 2
-        mock.state["login"] = False                   # the login expires: the request is served by the pool
+        mock.state["login"] = False  # the login expires: the request is served by the pool
         r = c.post("/v1/responses", json={"model": "nova", "input": "hi"})
         assert r.headers["x-pcore-model"] == "a/big" and r.json()["output"][0]["content"][0]["text"] == "from the pool"
         st = c.get("/chatgpt-web/status").json()
         assert st["blocked"] and st["kind"] == "login" and st["models"][0]["available"] is False
-        mock.state["login"] = True                    # signed in again: a live check clears the block
+        mock.state["login"] = True  # signed in again: a live check clears the block
         st = c.get("/chatgpt-web/status?probe=1").json()
         assert st["ok"] and not st["blocked"] and st["models"][0]["available"]
         c.post("/chatgpt-web/release")
@@ -584,6 +820,7 @@ def test_reads_the_2026_11_markup():
     from pathlib import Path
 
     from playwright.async_api import async_playwright
+
     html = (Path(__file__).parent / "real_page_2026_11.html").read_text()
 
     async def go():
@@ -594,15 +831,18 @@ def test_reads_the_2026_11_markup():
             out = await page.evaluate(cw.PROBE_JS, False), await page.evaluate(cw.READ_JS)
             await br.close()
             return out
+
     p, r = run(go())
     assert (p["users"], p["assistants"], p["actions"], p["stop"]) == (1, 1, 1, False) and p["lastLen"] > 0
     md = r["md"]
     assert md.startswith("## **Example Formatting**")
-    assert "**bold text**, inline code `print(\"Hello\")`, and a [link to example.com](https://example.com)." in md
+    assert '**bold text**, inline code `print("Hello")`, and a [link to example.com](https://example.com).' in md
     assert "- Nested item" in md and "1. First step\n2. Second step" in md and "> This is a blockquote." in md
     assert "| Column 1 | Column 2 |\n| --- | --- |\n| A | B |\n| C | D |" in md
     assert '```python\ndef f(x):\n    # <tag> & "q"\n    return x**2\n```' in md
     assert "$x^2$" in md and "\n\n---\n\n" in md
-    text, calls = cw.parse_reply(md, {"read_file": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}})
+    text, calls = cw.parse_reply(
+        md, {"read_file": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+    )
     assert [(c["name"], json.loads(c["arguments"])) for c in calls] == [("read_file", {"path": "/etc/hosts"})]
     assert "Python\n" not in md and "Run" not in md and "tool_call" not in text

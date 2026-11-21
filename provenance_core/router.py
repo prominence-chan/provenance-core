@@ -4,6 +4,7 @@ Selection inside a tier: a session sticks to the model it last used (no mid-conv
 models are ranked by score, quota headroom and latency. Falling back to a weaker tier only happens when the request
 allows it (fallback="down1"/"any"); the default stays in the asked tier and fails loudly instead of silently
 degrading. Ensembles fan a request out to k models of the same tier and combine the answers."""
+
 # Inspired in part by tashfeenahmed/freellmapi.
 from __future__ import annotations
 
@@ -36,12 +37,17 @@ class Choice:
 
 
 class Router:
-    def __init__(self, catalog: Catalog, state: State | None = None, client: httpx.AsyncClient | None = None,
-                 timeout: float = 120.0):
+    def __init__(
+        self,
+        catalog: Catalog,
+        state: State | None = None,
+        client: httpx.AsyncClient | None = None,
+        timeout: float = 120.0,
+    ):
         self.catalog = catalog
         self.state = state or State()
         self.client = client or httpx.AsyncClient(timeout=timeout)
-        self.bridges: dict = {}   # provider name -> chatgpt_web.Bridge (made on first use)
+        self.bridges: dict = {}  # provider name -> chatgpt_web.Bridge (made on first use)
 
     # ---- selection -------------------------------------------------------------------------------------------
     def tiers_for(self, tier: str, fallback: str) -> list[str]:
@@ -50,11 +56,12 @@ class Router:
         if fallback == "any":
             return names[i:]
         if fallback == "down1":
-            return names[i:i + 2]
+            return names[i : i + 2]
         return [tier]
 
     def bridge(self, provider: str):
         from .chatgpt_web import Bridge
+
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
             self.bridges[provider] = Bridge(p.base_url, p.options)
@@ -63,11 +70,16 @@ class Router:
     def web_ok(self, endpoint: str) -> bool:
         """May tier requests arriving on this front end (responses / messages / chat) use a chatgpt_web provider?"""
         from .chatgpt_web import DEFAULTS
-        return any(endpoint in (p.options.get("endpoints") or DEFAULTS["endpoints"])
-                   for p in self.catalog.providers.values() if p.type == "chatgpt_web")
 
-    def candidates(self, tier: str, tokens: int, session: str | None = None, fallback: str = "none",
-                   web: bool = False) -> list[Model]:
+        return any(
+            endpoint in (p.options.get("endpoints") or DEFAULTS["endpoints"])
+            for p in self.catalog.providers.values()
+            if p.type == "chatgpt_web"
+        )
+
+    def candidates(
+        self, tier: str, tokens: int, session: str | None = None, fallback: str = "none", web: bool = False
+    ) -> list[Model]:
         """`web`: include chatgpt_web models. Off by default so ensembles, calibration and anything that didn't ask
         never reach the web bridge; the front ends pass it per the provider's `endpoints`."""
         out: list[Model] = []
@@ -104,8 +116,9 @@ class Router:
         resp = await self.client.send(req, stream=stream)
         if resp.status_code == 429:
             ra = resp.headers.get("retry-after")
-            self.state.failure(m, retry_after=float(ra) if ra and ra.replace(".", "").isdigit() else None,
-                               rate_limited=True)
+            self.state.failure(
+                m, retry_after=float(ra) if ra and ra.replace(".", "").isdigit() else None, rate_limited=True
+            )
             await resp.aclose()
             raise RuntimeError(f"{m.id}: rate limited")
         if resp.status_code >= 400:
@@ -125,11 +138,13 @@ class Router:
         """A chatgpt_web model: the whole reply is read from the page first, so a failure (login wall, challenge,
         closed window, bad tool call) surfaces here and the caller can still fail over."""
         from .chatgpt_web import BufferedStream, WebSkip, WebUnavailable
+
         t0 = time.time()
         size = len(json.dumps(body.get("messages", []), default=str))
 
-        def log(what: str):   # one line per attempt in the server log: the bridge is slow and worth being able to follow
+        def log(what: str):  # one line per attempt in the server log: the bridge is slow and worth being able to follow
             print(f"chatgpt-web: {m.id} {what} ({size} chars in, {time.time() - t0:.0f} s)", flush=True)
+
         try:
             data = await self.bridge(m.provider).complete(m.model, body, model_id=m.id, wait=wait)
         except WebUnavailable as e:
@@ -145,16 +160,25 @@ class Router:
             raise RuntimeError(f"{m.id}: {e}") from e
         self.state.success(m, (time.time() - t0) * 1000)
         msg = data["choices"][0]["message"]
-        log(f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
+        log(
+            f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
             + (", repaired" if data["pcore"]["web"].get("repaired") else "")
-            + (", nudged" if data["pcore"]["web"].get("nudged") else ""))
+            + (", nudged" if data["pcore"]["web"].get("nudged") else "")
+        )
         if stream:
             return BufferedStream(data), t0
         self.state.record(m, data["usage"]["total_tokens"])
         return data
 
-    async def complete(self, body: dict, tier: str, session: str | None = None, fallback: str = "none",
-                       attempts: int = 4, web: bool = False) -> tuple[dict, Model]:
+    async def complete(
+        self,
+        body: dict,
+        tier: str,
+        session: str | None = None,
+        fallback: str = "none",
+        attempts: int = 4,
+        web: bool = False,
+    ) -> tuple[dict, Model]:
         tokens = estimate_tokens(body)
         errors = []
         for m in self.candidates(tier, tokens, session, fallback, web)[:attempts]:
@@ -166,8 +190,9 @@ class Router:
                 errors.append(str(e)[:200])
         raise NoCapacity(f"no model in {tier} (fallback={fallback}) could serve this: {errors or 'none available'}")
 
-    async def stream(self, body: dict, tier: str, session: str | None = None, fallback: str = "none",
-                     web: bool = False):
+    async def stream(
+        self, body: dict, tier: str, session: str | None = None, fallback: str = "none", web: bool = False
+    ):
         tokens = estimate_tokens(body)
         errors = []
         for m in self.candidates(tier, tokens, session, fallback, web)[:4]:
@@ -212,23 +237,35 @@ class Router:
             raise NoCapacity("every ensemble member failed")
         texts = [(m, d["choices"][0]["message"].get("content") or "") for m, d in results]
         if strategy == "majority" or len(results) == 1:
+
             def norm(s):
                 last = s.strip().splitlines()[-1] if s.strip() else ""
                 return re.sub(r"[^a-z0-9.\-]", "", last.lower())
+
             votes = Counter(norm(t) for _, t in texts)
             top = votes.most_common(1)[0][0]
             # among the agreeing answers, return the strongest model's full response
-            m, d = max(((m, d) for (m, d), (_, t) in zip(results, texts) if norm(t) == top), key=lambda x: x[0].score)
+            m, d = max(
+                ((m, d) for (m, d), (_, t) in zip(results, texts, strict=False) if norm(t) == top),
+                key=lambda x: x[0].score,
+            )
             d.setdefault("pcore", {})["votes"] = dict(votes)
             return d, [m for m, _ in results]
         judge_m = max((m for m, _ in results), key=lambda m: m.score)
         question = body.get("messages", [])[-1].get("content", "") if body.get("messages") else ""
         listing = "\n\n".join(f"### Answer {i + 1}\n{t}" for i, (_, t) in enumerate(texts))
-        jbody = {"messages": [{"role": "system", "content": "You compare candidate answers to the same request and "
-                               "write the single best final answer. Fix mistakes you can verify; keep the best "
-                               "answer's form. Output only the final answer."},
-                              {"role": "user", "content": f"Request:\n{question}\n\n{listing}"}],
-                 "temperature": 0}
+        jbody = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You compare candidate answers to the same request and "
+                    "write the single best final answer. Fix mistakes you can verify; keep the best "
+                    "answer's form. Output only the final answer.",
+                },
+                {"role": "user", "content": f"Request:\n{question}\n\n{listing}"},
+            ],
+            "temperature": 0,
+        }
         try:
             judged = await self.call(judge_m, jbody)
         except Exception:  # noqa: BLE001 - judge failed: fall back to the strongest member's own answer

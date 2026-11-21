@@ -9,6 +9,7 @@ means each model's tpd is its share of one provider-wide daily allowance (Cloudf
 Tiers are the point of the project: a request asks for a tier ("nova", "solstice", "spark", "ember"; "tier-N" works too) and is only ever served by
 models of comparable strength, so answers don't swing between a frontier model and a tiny one depending on which
 free quota happens to be left."""
+
 from __future__ import annotations
 
 import os
@@ -21,11 +22,11 @@ import yaml
 
 @dataclass
 class Limits:
-    rpm: int | None = None   # requests per minute
-    rpd: int | None = None   # requests per day
-    tpm: int | None = None   # tokens per minute
-    tpd: int | None = None   # tokens per day
-    rph: int | None = None   # requests per hour
+    rpm: int | None = None  # requests per minute
+    rpd: int | None = None  # requests per day
+    tpm: int | None = None  # tokens per minute
+    tpd: int | None = None  # tokens per day
+    rph: int | None = None  # requests per hour
 
     def any(self) -> bool:
         return any(v for v in (self.rpm, self.rpd, self.tpm, self.tpd, self.rph))
@@ -37,14 +38,14 @@ _VAR = re.compile(r"\$\{(\w+)\}")
 @dataclass
 class Provider:
     name: str
-    url: str                      # base URL as written, may contain ${VAR}
-    api_key_env: str | None       # None: no key at all
+    url: str  # base URL as written, may contain ${VAR}
+    api_key_env: str | None  # None: no key at all
     headers: dict = field(default_factory=dict)
-    no_auth: bool = False         # usable without a key; a key (if api_key_env is set and present) is still sent
+    no_auth: bool = False  # usable without a key; a key (if api_key_env is set and present) is still sent
     pool: Limits = field(default_factory=Limits)
     shared_tpd: bool = False
-    type: str = "openai"          # "openai" (chat completions over HTTP) or "chatgpt_web" (see chatgpt_web.py)
-    options: dict = field(default_factory=dict)   # type-specific settings (the provider's `web:` block)
+    type: str = "openai"  # "openai" (chat completions over HTTP) or "chatgpt_web" (see chatgpt_web.py)
+    options: dict = field(default_factory=dict)  # type-specific settings (the provider's `web:` block)
 
     @property
     def base_url(self) -> str:
@@ -56,8 +57,9 @@ class Provider:
 
     @property
     def usable(self) -> bool:
-        if self.type == "chatgpt_web":   # off unless turned on (enabled: true, or PCORE_CHATGPT_WEB=1)
+        if self.type == "chatgpt_web":  # off unless turned on (enabled: true, or PCORE_CHATGPT_WEB=1)
             from .chatgpt_web import enabled
+
             return enabled(self.options)
         if any(not os.environ.get(v) for v in _VAR.findall(self.url)):
             return False
@@ -70,15 +72,15 @@ class Provider:
 
 @dataclass
 class Model:
-    id: str            # catalog id, unique (e.g. "groq/llama-3.3-70b")
+    id: str  # catalog id, unique (e.g. "groq/llama-3.3-70b")
     provider: str
-    model: str         # the provider's model name
-    score: float       # strength 0-100 (calibrated or prior)
+    model: str  # the provider's model name
+    score: float  # strength 0-100 (calibrated or prior)
     context: int = 32768
     limits: Limits = field(default_factory=Limits)
     calibrated: bool = False
     tags: list[str] = field(default_factory=list)
-    pool: Limits | None = None    # the provider's shared limits (copied at load)
+    pool: Limits | None = None  # the provider's shared limits (copied at load)
     shared_tpd: bool = False
 
 
@@ -86,8 +88,8 @@ class Model:
 class Catalog:
     providers: dict[str, Provider]
     models: dict[str, Model]
-    tiers: list[tuple[str, float]]   # (name, minimum score), strongest first
-    aliases: dict[str, str] = field(default_factory=dict)   # e.g. tier-1 -> nova, auto -> solstice
+    tiers: list[tuple[str, float]]  # (name, minimum score), strongest first
+    aliases: dict[str, str] = field(default_factory=dict)  # e.g. tier-1 -> nova, auto -> solstice
 
     def resolve_tier(self, name: str) -> str | None:
         """A tier name, or an alias of one; None if it's neither (a concrete model id, or unknown)."""
@@ -128,19 +130,32 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
         key_env = p.get("api_key_env")
         if str(key_env).lower() in ("none", "null", ""):
             key_env = None
-        providers[name] = Provider(name=name, url=p["base_url"], api_key_env=key_env, headers=p.get("headers", {}),
-                                   no_auth=key_env is None or str(p.get("auth", "")).lower() == "none",
-                                   pool=Limits(**(p.get("pool") or {})), shared_tpd=bool(p.get("shared_tpd")),
-                                   type=str(p.get("type") or "openai"),
-                                   options={**(p.get("web") or {}), **({"enabled": True} if p.get("enabled") else {})})
+        providers[name] = Provider(
+            name=name,
+            url=p["base_url"],
+            api_key_env=key_env,
+            headers=p.get("headers", {}),
+            no_auth=key_env is None or str(p.get("auth", "")).lower() == "none",
+            pool=Limits(**(p.get("pool") or {})),
+            shared_tpd=bool(p.get("shared_tpd")),
+            type=str(p.get("type") or "openai"),
+            options={**(p.get("web") or {}), **({"enabled": True} if p.get("enabled") else {})},
+        )
     models = {}
     for m in data["models"]:
         lim = Limits(**(m.get("limits") or {}))
         mid = m.get("id") or f"{m['provider']}/{m['model']}"
         if m["provider"] not in providers:
             raise ValueError(f"model {mid}: unknown provider {m['provider']}")
-        models[mid] = Model(id=mid, provider=m["provider"], model=m["model"], score=float(m.get("score", 50)),
-                            context=int(m.get("context", 32768)), limits=lim, tags=m.get("tags", []))
+        models[mid] = Model(
+            id=mid,
+            provider=m["provider"],
+            model=m["model"],
+            score=float(m.get("score", 50)),
+            context=int(m.get("context", 32768)),
+            limits=lim,
+            tags=m.get("tags", []),
+        )
         prov = providers[m["provider"]]
         models[mid].pool = prov.pool if prov.pool.any() else None
         models[mid].shared_tpd = prov.shared_tpd and bool(lim.tpd)

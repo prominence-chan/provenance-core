@@ -1,4 +1,5 @@
 """Per-model and per-provider-pool usage windows (to stay under each free-tier cap) and health (circuit breaker + rate-limit cooldowns)."""
+
 from __future__ import annotations
 
 import math
@@ -12,7 +13,7 @@ from .catalog import Model
 
 @dataclass
 class Usage:
-    minute: deque = field(default_factory=deque)   # (t, tokens, share of a shared daily allowance)
+    minute: deque = field(default_factory=deque)  # (t, tokens, share of a shared daily allowance)
     day: deque = field(default_factory=deque)
 
     def prune(self, now: float):
@@ -26,7 +27,7 @@ class Usage:
 class Health:
     failures: int = 0
     cooldown_until: float = 0.0
-    latency_ms: float | None = None   # EWMA
+    latency_ms: float | None = None  # EWMA
     ok: int = 0
     errors: int = 0
 
@@ -36,7 +37,7 @@ class State:
         self.clock = clock
         self.usage: dict[str, Usage] = {}
         self.health: dict[str, Health] = {}
-        self.sessions: dict[str, tuple[str, float]] = {}   # session -> (model id, last used)
+        self.sessions: dict[str, tuple[str, float]] = {}  # session -> (model id, last used)
         self.lock = threading.Lock()
 
     def _u(self, mid):
@@ -47,7 +48,7 @@ class State:
 
     @staticmethod
     def _pool_key(m: Model) -> str:
-        return f"@{m.provider}"   # usage shared by every model of the provider
+        return f"@{m.provider}"  # usage shared by every model of the provider
 
     def _windows(self, key: str, now: float) -> tuple[int, int, int, int, int, float]:
         """(requests/min, requests/hour, requests/day, tokens/min, tokens/day, share of the daily allowance used)."""
@@ -55,8 +56,14 @@ class State:
             u = self._u(key)
             u.prune(now)
             minute, day = list(u.minute), list(u.day)
-        return (len(minute), sum(1 for e in day if now - e[0] <= 3600), len(day), sum(e[1] for e in minute),
-                sum(e[1] for e in day), sum(e[2] for e in day))
+        return (
+            len(minute),
+            sum(1 for e in day if now - e[0] <= 3600),
+            len(day),
+            sum(e[1] for e in minute),
+            sum(e[1] for e in day),
+            sum(e[2] for e in day),
+        )
 
     def headroom(self, m: Model, tokens: int) -> float:
         """Fraction (0-1) of the tightest remaining limit after this request; 0 = would exceed a cap. Counts the
@@ -79,7 +86,7 @@ class State:
                 if used + add > cap:
                     return 0.0
                 fracs.append(1 - (used + add) / cap)
-        return max(min(fracs), 1e-3) if fracs else 1.0   # exactly reaching a cap is still allowed
+        return max(min(fracs), 1e-3) if fracs else 1.0  # exactly reaching a cap is still allowed
 
     def available(self, m: Model) -> bool:
         return self._h(m.id).cooldown_until <= self.clock()

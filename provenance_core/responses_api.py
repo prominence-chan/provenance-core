@@ -14,6 +14,7 @@ string argument `input` whose calls come back as custom_tool_call items; web_sea
 use / image generation are dropped. parallel_tool_calls=false is enforced by keeping the first call.
 store (default true) keeps the request history + output in a small in-memory LRU, so previous_response_id works
 (instructions are not carried over, as in the real API)."""
+
 from __future__ import annotations
 
 import json
@@ -24,15 +25,34 @@ from collections import OrderedDict
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .adapters import (Target, UpstreamStream, authorized, clamp_max_tokens, clean_schema, complete, now, open_stream,
-                       parse_args, resolve_target, safe_id, session_key, text_of)
+from .adapters import (
+    Target,
+    UpstreamStream,
+    authorized,
+    clamp_max_tokens,
+    clean_schema,
+    complete,
+    now,
+    open_stream,
+    parse_args,
+    resolve_target,
+    safe_id,
+    session_key,
+    text_of,
+)
 from .router import NoCapacity, Router
 from .settings import env
 
 STORE_MAX = 256
-LOCAL_SHELL_SCHEMA = {"type": "object", "properties": {
-    "command": {"type": "array", "items": {"type": "string"}, "description": "argv of the command to run"},
-    "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}}, "required": ["command"]}
+LOCAL_SHELL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "command": {"type": "array", "items": {"type": "string"}, "description": "argv of the command to run"},
+        "working_directory": {"type": "string"},
+        "timeout_ms": {"type": "integer"},
+    },
+    "required": ["command"],
+}
 
 
 def error(status: int, message: str, kind: str = "invalid_request_error", code: str | None = None) -> JSONResponse:
@@ -64,7 +84,15 @@ def _parts(content) -> list[dict]:
             url = p.get("image_url")
             url = url.get("url") if isinstance(url, dict) else url
             if url:
-                out.append({"type": "image_url", "image_url": {"url": url, **({"detail": p["detail"]} if p.get("detail") in ("low", "high") else {})}})
+                out.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": url,
+                            **({"detail": p["detail"]} if p.get("detail") in ("low", "high") else {}),
+                        },
+                    }
+                )
         elif t == "input_file":
             out.append({"type": "text", "text": f"[file omitted: {p.get('filename') or p.get('file_id') or 'file'}]"})
     return out
@@ -116,19 +144,39 @@ def items_to_messages(items) -> tuple[list[str], list[dict]]:
             elif parts:
                 msgs.append({"role": "user", "content": _collapse(parts)})
         elif t == "function_call":
-            add_call({"id": safe_id(it.get("call_id") or it.get("id")), "type": "function",
-                      "function": {"name": it.get("name", ""), "arguments": it.get("arguments") or "{}"}})
+            add_call(
+                {
+                    "id": safe_id(it.get("call_id") or it.get("id")),
+                    "type": "function",
+                    "function": {"name": it.get("name", ""), "arguments": it.get("arguments") or "{}"},
+                }
+            )
         elif t == "local_shell_call":
             a = it.get("action") or {}
             args = {k: a[k] for k in ("command", "working_directory", "timeout_ms") if a.get(k) is not None}
-            add_call({"id": safe_id(it.get("call_id") or it.get("id")), "type": "function",
-                      "function": {"name": "local_shell", "arguments": json.dumps(args)}})
+            add_call(
+                {
+                    "id": safe_id(it.get("call_id") or it.get("id")),
+                    "type": "function",
+                    "function": {"name": "local_shell", "arguments": json.dumps(args)},
+                }
+            )
         elif t == "custom_tool_call":
-            add_call({"id": safe_id(it.get("call_id") or it.get("id")), "type": "function",
-                      "function": {"name": it.get("name", ""), "arguments": json.dumps({"input": it.get("input", "")})}})
+            add_call(
+                {
+                    "id": safe_id(it.get("call_id") or it.get("id")),
+                    "type": "function",
+                    "function": {"name": it.get("name", ""), "arguments": json.dumps({"input": it.get("input", "")})},
+                }
+            )
         elif t in ("function_call_output", "local_shell_call_output", "custom_tool_call_output"):
-            msgs.append({"role": "tool", "tool_call_id": safe_id(it.get("call_id") or it.get("id")),
-                         "content": _output_text(it.get("output")) or "(no output)"})
+            msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": safe_id(it.get("call_id") or it.get("id")),
+                    "content": _output_text(it.get("output")) or "(no output)",
+                }
+            )
         # reasoning, web_search_call, item_reference, compaction, ...: nothing the upstream can use
     return system, msgs
 
@@ -137,27 +185,53 @@ def tools_to_openai(tools) -> tuple[list[dict], set[str], bool]:
     """-> (OpenAI tools, names of custom/freeform tools, whether local_shell is offered)"""
     out, custom, shell = [], set(), False
     flat = []
-    for t in tools or []:   # namespace tools (e.g. a multi-agent tool group) carry their function tools nested
+    for t in tools or []:  # namespace tools (e.g. a multi-agent tool group) carry their function tools nested
         flat += (t.get("tools") or []) if t.get("type") == "namespace" else [t]
     for t in flat:
         kind = t.get("type")
         if kind == "function":
-            out.append({"type": "function", "function": {"name": t["name"], "description": t.get("description") or "",
-                                                         "parameters": clean_schema(t.get("parameters") or {"type": "object", "properties": {}})}})
+            out.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description") or "",
+                        "parameters": clean_schema(t.get("parameters") or {"type": "object", "properties": {}}),
+                    },
+                }
+            )
         elif kind == "local_shell":
             shell = True
-            out.append({"type": "function", "function": {"name": "local_shell", "description":
-                        "Run a command on the user's machine (argv list) and return its output.",
-                        "parameters": LOCAL_SHELL_SCHEMA}})
+            out.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "local_shell",
+                        "description": "Run a command on the user's machine (argv list) and return its output.",
+                        "parameters": LOCAL_SHELL_SCHEMA,
+                    },
+                }
+            )
         elif kind == "custom":
             custom.add(t["name"])
             fmt = t.get("format") or {}
             desc = t.get("description") or ""
             if fmt.get("type") == "grammar" and fmt.get("definition"):
                 desc += f"\n\nThe input must match this {fmt.get('syntax', '')} grammar:\n{fmt['definition']}"
-            out.append({"type": "function", "function": {"name": t["name"], "description": desc, "parameters": {
-                "type": "object", "properties": {"input": {"type": "string", "description": "the raw tool input"}},
-                "required": ["input"]}}})
+            out.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": desc,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"input": {"type": "string", "description": "the raw tool input"}},
+                            "required": ["input"],
+                        },
+                    },
+                }
+            )
         # web_search, file_search, mcp, computer_use_preview, image_generation, code_interpreter: dropped
     return out, custom, shell
 
@@ -168,8 +242,11 @@ def to_openai(req: dict, history: list[dict]) -> tuple[dict, list[dict], set[str
     if req.get("instructions"):
         system.insert(0, req["instructions"])
     convo = history + msgs
-    body: dict = {"messages": ([{"role": "system", "content": "\n\n".join(s for s in system if s)}] if any(system) else []) + convo,
-                  "max_tokens": clamp_max_tokens(req.get("max_output_tokens"))}
+    body: dict = {
+        "messages": ([{"role": "system", "content": "\n\n".join(s for s in system if s)}] if any(system) else [])
+        + convo,
+        "max_tokens": clamp_max_tokens(req.get("max_output_tokens")),
+    }
     for k in ("temperature", "top_p"):
         if req.get(k) is not None:
             body[k] = req[k]
@@ -181,10 +258,16 @@ def to_openai(req: dict, history: list[dict]) -> tuple[dict, list[dict], set[str
             body["tool_choice"] = tc
         elif isinstance(tc, dict) and tc.get("type") == "function" and tc.get("name"):
             body["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
-    fmt = ((req.get("text") or {}).get("format") or {})
+    fmt = (req.get("text") or {}).get("format") or {}
     if fmt.get("type") == "json_schema":
-        body["response_format"] = {"type": "json_schema", "json_schema": {
-            "name": fmt.get("name", "output"), "schema": fmt.get("schema", {}), "strict": bool(fmt.get("strict"))}}
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": fmt.get("name", "output"),
+                "schema": fmt.get("schema", {}),
+                "strict": bool(fmt.get("strict")),
+            },
+        }
     elif fmt.get("type") == "json_object":
         body["response_format"] = {"type": "json_object"}
     return body, convo, custom, shell
@@ -196,40 +279,88 @@ def call_item(c: dict, custom: set[str], shell: bool) -> dict:
     name, args = c["name"], c["arguments"] or "{}"
     if name in custom:
         a = parse_args(args)
-        return {"type": "custom_tool_call", "id": "ctc_" + secrets.token_hex(12), "call_id": c["id"], "name": name,
-                "input": a.get("input", a.get("raw_arguments", args)), "status": "completed"}
+        return {
+            "type": "custom_tool_call",
+            "id": "ctc_" + secrets.token_hex(12),
+            "call_id": c["id"],
+            "name": name,
+            "input": a.get("input", a.get("raw_arguments", args)),
+            "status": "completed",
+        }
     if shell and name == "local_shell":
         a = parse_args(args)
         cmd = a.get("command") or []
-        return {"type": "local_shell_call", "id": "lsh_" + secrets.token_hex(12), "call_id": c["id"],
-                "status": "completed", "action": {"type": "exec", "command": cmd if isinstance(cmd, list) else [str(cmd)],
-                                                  "working_directory": a.get("working_directory"),
-                                                  "timeout_ms": a.get("timeout_ms"), "env": {}, "user": None}}
-    return {"type": "function_call", "id": "fc_" + secrets.token_hex(12), "call_id": c["id"], "name": name,
-            "arguments": json.dumps(parse_args(args)), "status": "completed"}
+        return {
+            "type": "local_shell_call",
+            "id": "lsh_" + secrets.token_hex(12),
+            "call_id": c["id"],
+            "status": "completed",
+            "action": {
+                "type": "exec",
+                "command": cmd if isinstance(cmd, list) else [str(cmd)],
+                "working_directory": a.get("working_directory"),
+                "timeout_ms": a.get("timeout_ms"),
+                "env": {},
+                "user": None,
+            },
+        }
+    return {
+        "type": "function_call",
+        "id": "fc_" + secrets.token_hex(12),
+        "call_id": c["id"],
+        "name": name,
+        "arguments": json.dumps(parse_args(args)),
+        "status": "completed",
+    }
 
 
 def message_item(text: str, item_id: str | None = None) -> dict:
-    return {"type": "message", "id": item_id or "msg_" + secrets.token_hex(12), "status": "completed",
-            "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}]}
+    return {
+        "type": "message",
+        "id": item_id or "msg_" + secrets.token_hex(12),
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}],
+    }
 
 
 def usage(inp: int, out: int) -> dict:
-    return {"input_tokens": inp, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": out,
-            "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": inp + out}
+    return {
+        "input_tokens": inp,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": out,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": inp + out,
+    }
 
 
-def response_obj(rid: str, req: dict, model: str, status: str, output: list, use: dict | None,
-                 incomplete: str | None = None) -> dict:
-    return {"id": rid, "object": "response", "created_at": now(), "status": status, "error": None,
-            "incomplete_details": {"reason": incomplete} if incomplete else None,
-            "instructions": req.get("instructions"), "max_output_tokens": req.get("max_output_tokens"),
-            "model": model, "output": output, "parallel_tool_calls": req.get("parallel_tool_calls", True),
-            "previous_response_id": req.get("previous_response_id"), "reasoning": {"effort": None, "summary": None},
-            "store": req.get("store", True), "temperature": req.get("temperature"), "text": req.get("text") or
-            {"format": {"type": "text"}}, "tool_choice": req.get("tool_choice", "auto"), "tools": req.get("tools") or [],
-            "top_p": req.get("top_p"), "truncation": req.get("truncation", "disabled"), "usage": use,
-            "metadata": req.get("metadata") or {}}
+def response_obj(
+    rid: str, req: dict, model: str, status: str, output: list, use: dict | None, incomplete: str | None = None
+) -> dict:
+    return {
+        "id": rid,
+        "object": "response",
+        "created_at": now(),
+        "status": status,
+        "error": None,
+        "incomplete_details": {"reason": incomplete} if incomplete else None,
+        "instructions": req.get("instructions"),
+        "max_output_tokens": req.get("max_output_tokens"),
+        "model": model,
+        "output": output,
+        "parallel_tool_calls": req.get("parallel_tool_calls", True),
+        "previous_response_id": req.get("previous_response_id"),
+        "reasoning": {"effort": None, "summary": None},
+        "store": req.get("store", True),
+        "temperature": req.get("temperature"),
+        "text": req.get("text") or {"format": {"type": "text"}},
+        "tool_choice": req.get("tool_choice", "auto"),
+        "tools": req.get("tools") or [],
+        "top_p": req.get("top_p"),
+        "truncation": req.get("truncation", "disabled"),
+        "usage": use,
+        "metadata": req.get("metadata") or {},
+    }
 
 
 def items_from_chat(data: dict, custom: set[str], shell: bool, single: bool) -> tuple[list, str | None]:
@@ -239,8 +370,14 @@ def items_from_chat(data: dict, custom: set[str], shell: bool, single: bool) -> 
     text = text_of(msg.get("content"))
     if text:
         output.append(message_item(text))
-    calls = [{"id": safe_id(tc.get("id")), "name": (tc.get("function") or {}).get("name", ""),
-              "arguments": (tc.get("function") or {}).get("arguments") or "{}"} for tc in msg.get("tool_calls") or []]
+    calls = [
+        {
+            "id": safe_id(tc.get("id")),
+            "name": (tc.get("function") or {}).get("name", ""),
+            "arguments": (tc.get("function") or {}).get("arguments") or "{}",
+        }
+        for tc in msg.get("tool_calls") or []
+    ]
     for c in calls[:1] if single else calls:
         output.append(call_item(c, custom, shell))
     return output, ch.get("finish_reason")
@@ -282,8 +419,11 @@ def register(app, router: Router, token: str | None):
         if req.get("previous_response_id"):
             prev = store.get(req["previous_response_id"])
             if prev is None:
-                return error(400, f"Previous response with id '{req['previous_response_id']}' not found.",
-                             code="previous_response_not_found")
+                return error(
+                    400,
+                    f"Previous response with id '{req['previous_response_id']}' not found.",
+                    code="previous_response_not_found",
+                )
             history = prev["messages"]
         model_name = req.get("model") or ""
         target = map_model(router, model_name)
@@ -291,23 +431,30 @@ def register(app, router: Router, token: str | None):
         session = session_key(request, target, convo)
         single = req.get("parallel_tool_calls") is False
         if single:
-            body["_single_tool_call"] = True   # a hint for the chatgpt_web prompt; dropped before any HTTP provider
+            body["_single_tool_call"] = True  # a hint for the chatgpt_web prompt; dropped before any HTTP provider
         rid = "resp_" + secrets.token_hex(16)
         try:
             if req.get("stream"):
                 resp, m, t0 = await open_stream(router, body, target, session, web=router.web_ok("responses"))
                 gen = _stream(router, store, resp, m, t0, rid, req, model_name, body, convo, custom, shell, single)
-                return StreamingResponse(gen, media_type="text/event-stream",
-                                         headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
+                return StreamingResponse(
+                    gen, media_type="text/event-stream", headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"}
+                )
             data, m = await complete(router, body, target, session, web=router.web_ok("responses"))
         except NoCapacity as e:
             return error(503, str(e), "server_error", "no_capacity")
         output, finish = items_from_chat(data, custom, shell, single)
         u = data.get("usage") or {}
         incomplete = "max_output_tokens" if finish == "length" else None
-        out = response_obj(rid, req, model_name, "incomplete" if incomplete else "completed", output,
-                           usage(int(u.get("prompt_tokens") or estimate_input(body)), int(u.get("completion_tokens") or 0)),
-                           incomplete)
+        out = response_obj(
+            rid,
+            req,
+            model_name,
+            "incomplete" if incomplete else "completed",
+            output,
+            usage(int(u.get("prompt_tokens") or estimate_input(body)), int(u.get("completion_tokens") or 0)),
+            incomplete,
+        )
         if req.get("store", True) is not False:
             store.put(rid, convo, out)
         return JSONResponse(out, headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
@@ -342,19 +489,44 @@ async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, cust
                 continue
             if msg_id is None:
                 msg_id = "msg_" + secrets.token_hex(12)
-                yield ev("response.output_item.added", output_index=len(output), item={
-                    "type": "message", "id": msg_id, "status": "in_progress", "role": "assistant", "content": []})
-                yield ev("response.content_part.added", item_id=msg_id, output_index=len(output), content_index=0,
-                         part={"type": "output_text", "text": "", "annotations": [], "logprobs": []})
+                yield ev(
+                    "response.output_item.added",
+                    output_index=len(output),
+                    item={"type": "message", "id": msg_id, "status": "in_progress", "role": "assistant", "content": []},
+                )
+                yield ev(
+                    "response.content_part.added",
+                    item_id=msg_id,
+                    output_index=len(output),
+                    content_index=0,
+                    part={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                )
             text += val
-            yield ev("response.output_text.delta", item_id=msg_id, output_index=len(output), content_index=0,
-                     delta=val, logprobs=[])
+            yield ev(
+                "response.output_text.delta",
+                item_id=msg_id,
+                output_index=len(output),
+                content_index=0,
+                delta=val,
+                logprobs=[],
+            )
         if msg_id is not None:
             item = message_item(text, msg_id)
-            yield ev("response.output_text.done", item_id=msg_id, output_index=len(output), content_index=0,
-                     text=text, logprobs=[])
-            yield ev("response.content_part.done", item_id=msg_id, output_index=len(output), content_index=0,
-                     part=item["content"][0])
+            yield ev(
+                "response.output_text.done",
+                item_id=msg_id,
+                output_index=len(output),
+                content_index=0,
+                text=text,
+                logprobs=[],
+            )
+            yield ev(
+                "response.content_part.done",
+                item_id=msg_id,
+                output_index=len(output),
+                content_index=0,
+                part=item["content"][0],
+            )
             yield ev("response.output_item.done", output_index=len(output), item=item)
             output.append(item)
         calls = up.tool_calls[:1] if single else up.tool_calls
@@ -362,22 +534,49 @@ async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, cust
             item = call_item(c, custom, shell)
             i = len(output)
             if item["type"] == "function_call":
-                yield ev("response.output_item.added", output_index=i, item={**item, "arguments": "", "status": "in_progress"})
-                yield ev("response.function_call_arguments.delta", item_id=item["id"], output_index=i, delta=item["arguments"])
-                yield ev("response.function_call_arguments.done", item_id=item["id"], output_index=i,
-                         name=item["name"], arguments=item["arguments"])
+                yield ev(
+                    "response.output_item.added",
+                    output_index=i,
+                    item={**item, "arguments": "", "status": "in_progress"},
+                )
+                yield ev(
+                    "response.function_call_arguments.delta",
+                    item_id=item["id"],
+                    output_index=i,
+                    delta=item["arguments"],
+                )
+                yield ev(
+                    "response.function_call_arguments.done",
+                    item_id=item["id"],
+                    output_index=i,
+                    name=item["name"],
+                    arguments=item["arguments"],
+                )
             elif item["type"] == "custom_tool_call":
-                yield ev("response.output_item.added", output_index=i, item={**item, "input": "", "status": "in_progress"})
-                yield ev("response.custom_tool_call_input.delta", item_id=item["id"], output_index=i, delta=item["input"])
-                yield ev("response.custom_tool_call_input.done", item_id=item["id"], output_index=i, input=item["input"])
+                yield ev(
+                    "response.output_item.added", output_index=i, item={**item, "input": "", "status": "in_progress"}
+                )
+                yield ev(
+                    "response.custom_tool_call_input.delta", item_id=item["id"], output_index=i, delta=item["input"]
+                )
+                yield ev(
+                    "response.custom_tool_call_input.done", item_id=item["id"], output_index=i, input=item["input"]
+                )
             else:
                 yield ev("response.output_item.added", output_index=i, item={**item, "status": "in_progress"})
             yield ev("response.output_item.done", output_index=i, item=item)
             output.append(item)
         inp = int((up.usage or {}).get("prompt_tokens") or estimate_input(body))
         incomplete = "max_output_tokens" if up.finish_reason == "length" else None
-        final = response_obj(rid, req, model, "incomplete" if incomplete else "completed", output,
-                             usage(inp, up.output_tokens()), incomplete)
+        final = response_obj(
+            rid,
+            req,
+            model,
+            "incomplete" if incomplete else "completed",
+            output,
+            usage(inp, up.output_tokens()),
+            incomplete,
+        )
         if req.get("store", True) is not False:
             store.put(rid, convo, final)
         router.state.success(m, (time.time() - t0) * 1000)
