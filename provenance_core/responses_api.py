@@ -2,8 +2,8 @@
 
 The request is translated to OpenAI chat and served through the Router like /v1/chat/completions (one model, no
 ensemble). model = a tier name / alias or a catalog id (optionally "tier:none|down1|any"); an unknown name (e.g. a
-client default like "gpt-5-codex") goes to TIERLM_MAP_DEFAULT, else the strongest tier. Default fallback:
-TIERLM_RESPONSES_FALLBACK ("down1").
+client default like "gpt-5-codex") goes to PCORE_MAP_DEFAULT, else the strongest tier. Default fallback:
+PCORE_RESPONSES_FALLBACK ("down1").
 
 Input: a string or items: message (input_text / output_text / input_image; developer/system roles fold into the
 system prompt with `instructions`), function_call, function_call_output, local_shell_call(_output),
@@ -17,7 +17,6 @@ store (default true) keeps the request history + output in a small in-memory LRU
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import time
 from collections import OrderedDict
@@ -28,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .adapters import (Target, UpstreamStream, authorized, clamp_max_tokens, clean_schema, complete, now, open_stream,
                        parse_args, resolve_target, safe_id, session_key, text_of)
 from .router import NoCapacity, Router
+from .settings import env
 
 STORE_MAX = 256
 LOCAL_SHELL_SCHEMA = {"type": "object", "properties": {
@@ -40,12 +40,12 @@ def error(status: int, message: str, kind: str = "invalid_request_error", code: 
 
 
 def map_model(router: Router, name: str) -> Target:
-    fallback = os.environ.get("TIERLM_RESPONSES_FALLBACK", "down1")
+    fallback = env("RESPONSES_FALLBACK", "down1")
     t = resolve_target(router, name, fallback) if name else None
     if t:
         return t
-    env = os.environ.get("TIERLM_MAP_DEFAULT")
-    t = resolve_target(router, env, fallback) if env else None
+    mapped = env("MAP_DEFAULT")
+    t = resolve_target(router, mapped, fallback) if mapped else None
     return t or Target(router.catalog.tiers[0][0], None, fallback)
 
 
@@ -296,7 +296,7 @@ def register(app, router: Router, token: str | None):
                 resp, m, t0 = await open_stream(router, body, target, session)
                 gen = _stream(router, store, resp, m, t0, rid, req, model_name, body, convo, custom, shell, single)
                 return StreamingResponse(gen, media_type="text/event-stream",
-                                         headers={"X-Tierlm-Model": m.id, "Cache-Control": "no-cache"})
+                                         headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
             data, m = await complete(router, body, target, session)
         except NoCapacity as e:
             return error(503, str(e), "server_error", "no_capacity")
@@ -308,7 +308,7 @@ def register(app, router: Router, token: str | None):
                            incomplete)
         if req.get("store", True) is not False:
             store.put(rid, convo, out)
-        return JSONResponse(out, headers={"X-Tierlm-Model": m.id, "X-Tierlm-Tier": router.catalog.tier_of(m)})
+        return JSONResponse(out, headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
 
     @app.get("/v1/responses/{rid}")
     async def get_response(rid: str, request: Request):

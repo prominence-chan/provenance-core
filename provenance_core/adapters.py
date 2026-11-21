@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
 from dataclasses import dataclass
 
+from .settings import env
 from .router import NoCapacity, Router, estimate_tokens
 
 
@@ -41,7 +41,7 @@ def resolve_target(router: Router, name: str, fallback: str) -> Target | None:
 
 
 def authorized(request, token: str | None) -> bool:
-    """TIERLM_TOKEN as a bearer token, or as x-api-key (what Anthropic SDKs send for ANTHROPIC_API_KEY)."""
+    """PCORE_TOKEN as a bearer token, or as x-api-key (what Anthropic SDKs send for ANTHROPIC_API_KEY)."""
     if not token:
         return True
     return (request.headers.get("authorization") == f"Bearer {token}"
@@ -49,10 +49,10 @@ def authorized(request, token: str | None) -> bool:
 
 
 def session_key(request, target: Target, messages: list[dict]) -> str:
-    """X-Tierlm-Session if the client sends it, else a hash of the conversation's first user message, so an agent
+    """X-PCore-Session (or the older X-Tierlm-Session) if the client sends it, else a hash of the conversation's first user message, so an agent
     conversation stays on one model. Scoped per tier: a client mixing tiers in one conversation (Claude Code's
     haiku side calls) keeps one sticky model per tier instead of overwriting the session each call."""
-    base = request.headers.get("x-tierlm-session")
+    base = request.headers.get("x-pcore-session") or request.headers.get("x-tierlm-session")
     if not base:
         first = next((m.get("content") for m in messages if m.get("role") == "user"), None)
         base = "h:" + hashlib.sha256(json.dumps(first, sort_keys=True, default=str).encode()).hexdigest()[:24]
@@ -61,8 +61,8 @@ def session_key(request, target: Target, messages: list[dict]) -> str:
 
 def clamp_max_tokens(n) -> int:
     """Agent CLIs ask for 32k-64k output tokens; most free tiers cap output lower and count max_tokens against
-    their tokens-per-minute budget, so a huge max_tokens would exclude every model. TIERLM_ADAPTER_MAX_TOKENS caps it."""
-    cap = int(os.environ.get("TIERLM_ADAPTER_MAX_TOKENS", "16384"))
+    their tokens-per-minute budget, so a huge max_tokens would exclude every model. PCORE_ADAPTER_MAX_TOKENS caps it."""
+    cap = int(env("ADAPTER_MAX_TOKENS", "16384"))
     try:
         n = int(n)
     except (TypeError, ValueError):

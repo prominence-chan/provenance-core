@@ -5,10 +5,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from tierlm.catalog import load
-from tierlm.router import NoCapacity, Router
-from tierlm.server import create_app
-from tierlm.state import State
+from provenance_core.catalog import load
+from provenance_core.router import NoCapacity, Router
+from provenance_core.server import create_app
+from provenance_core.state import State
 
 CAT = {
     "tiers": [{"name": "tier-1", "min_score": 80}, {"name": "tier-2", "min_score": 60}, {"name": "tier-3", "min_score": 0}],
@@ -117,7 +117,7 @@ def test_majority_ensemble(setup):
     behavior["big:text"] = "work...\n42"
     behavior["big2:text"] = "42"
     data, members = run(router.ensemble({"messages": [{"role": "user", "content": "q"}]}, "tier-1", k=2, strategy="majority"))
-    assert data["choices"][0]["message"]["content"].endswith("42") and data["tierlm"]["votes"]["42"] == 2
+    assert data["choices"][0]["message"]["content"].endswith("42") and data["pcore"]["votes"]["42"] == 2
 
 
 def test_judge_ensemble(setup):
@@ -133,13 +133,13 @@ def test_http_api(setup):
     ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
     assert "tier-1" in ids and "c/small" in ids
     r = c.post("/v1/chat/completions", json={"model": "tier-2", "messages": [{"role": "user", "content": "hi"}]})
-    assert r.status_code == 200 and r.headers["x-tierlm-model"] == "c/mid"
+    assert r.status_code == 200 and r.headers["x-pcore-model"] == "c/mid"
     r = c.post("/v1/chat/completions", json={"model": "nope", "messages": []})
     assert r.status_code == 404
     assert "tier-1" in c.get("/status").json()
 
 
 def test_calibration_grading():
-    from tierlm.calibrate import grade
+    from provenance_core.calibrate import grade
     assert grade("so the answer is\n391", r"^\s*391\s*$")
     assert grade("6/(1-3/4)", "EVAL24:1346") and not grade("4*6*1*3", "EVAL24:1346")

@@ -4,6 +4,7 @@ Selection inside a tier: a session sticks to the model it last used (no mid-conv
 models are ranked by score, quota headroom and latency. Falling back to a weaker tier only happens when the request
 allows it (fallback="down1"/"any"); the default stays in the asked tier and fails loudly instead of silently
 degrading. Ensembles fan a request out to k models of the same tier and combine the answers."""
+# Inspired in part by tashfeenahmed/freellmapi.
 from __future__ import annotations
 
 import asyncio
@@ -76,7 +77,7 @@ class Router:
     async def call(self, m: Model, body: dict, stream: bool = False):
         p = self.catalog.providers[m.provider]
         payload = {**body, "model": m.model, "stream": stream}
-        headers = {"Authorization": f"Bearer {p.api_key}", "Content-Type": "application/json", **p.headers}
+        headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
         t0 = time.time()
         req = self.client.build_request("POST", f"{p.base_url}/chat/completions", json=payload, headers=headers)
         resp = await self.client.send(req, stream=stream)
@@ -164,7 +165,7 @@ class Router:
             top = votes.most_common(1)[0][0]
             # among the agreeing answers, return the strongest model's full response
             m, d = max(((m, d) for (m, d), (_, t) in zip(results, texts) if norm(t) == top), key=lambda x: x[0].score)
-            d.setdefault("tierlm", {})["votes"] = dict(votes)
+            d.setdefault("pcore", {})["votes"] = dict(votes)
             return d, [m for m, _ in results]
         judge_m = max((m for m, _ in results), key=lambda m: m.score)
         question = body.get("messages", [])[-1].get("content", "") if body.get("messages") else ""
@@ -178,5 +179,5 @@ class Router:
             judged = await self.call(judge_m, jbody)
         except Exception:  # noqa: BLE001 - judge failed: fall back to the strongest member's own answer
             return max(results, key=lambda r: r[0].score)[1], [m for m, _ in results]
-        judged.setdefault("tierlm", {})["members"] = [m.id for m, _ in results]
+        judged.setdefault("pcore", {})["members"] = [m.id for m, _ in results]
         return judged, [m for m, _ in results]

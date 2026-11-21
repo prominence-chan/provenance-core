@@ -118,7 +118,7 @@ async def calibrate(router: Router, out_path: str | Path, only: list[str] | None
     for m in router.catalog.models.values():
         if only and m.id not in only:
             continue
-        if not router.catalog.providers[m.provider].api_key:
+        if not router.catalog.providers[m.provider].usable:
             continue
         s, n = await score_model(router, m)
         if s >= 0:

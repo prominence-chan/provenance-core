@@ -1,15 +1,16 @@
-"""Subscription headroom for Claude Code and Codex, and the env that points them at tierlm when they run low.
+"""Subscription headroom for Claude Code and Codex, and the env that points them at provenance-core when they
+run low.
 
 Where the numbers come from (all local, nothing is fetched):
 - Codex writes its rate limits into every session rollout (~/.codex/sessions/**/rollout-*.jsonl, "rate_limits":
   primary/secondary windows with used_percent and resets_at).
 - Claude Code passes rate_limits (five_hour / seven_day used_percentage + resets_at) to the status-line command;
-  `tierlm statusline-tee <original command>` records them and passes stdin through. `claude -p --output-format
+  `provenance_core statusline-tee <original command>` records them and passes stdin through. `claude -p --output-format
   stream-json` also emits rate_limit_event lines, which a caller can hand to record_claude_event. And when the CLI
   prints its usage-limit notice, record_claude_blocked marks it out until the reset.
 
-A tool counts as low when any window is at or above the threshold (TIERLM_LOW_PCT, default 95) and hasn't reset yet.
-Fallback is only offered when tierlm is actually up and has a usable model, so a dead proxy never makes things worse."""
+A tool counts as low when any window is at or above the threshold (PCORE_LOW_PCT, default 95) and hasn't reset yet.
+Fallback is only offered when provenance-core is actually up and has a usable model, so a dead proxy never makes things worse."""
 from __future__ import annotations
 
 import glob
@@ -20,10 +21,12 @@ import time
 import urllib.request
 from pathlib import Path
 
-HOME = Path(os.environ.get("TIERLM_HOME", Path.home() / ".tierlm"))
+from .settings import env
+
+HOME = Path(env("HOME") or Path.home() / ".tierlm")   # state dir; keeps the pre-rename location
 CLAUDE_FILE = HOME / "claude_limits.json"
-BASE = os.environ.get("TIERLM_BASE_URL", "http://127.0.0.1:4141").rstrip("/").removesuffix("/v1")
-LOW_PCT = float(os.environ.get("TIERLM_LOW_PCT", 95))
+BASE = env("BASE_URL", "http://127.0.0.1:4141").rstrip("/").removesuffix("/v1")
+LOW_PCT = float(env("LOW_PCT", 95))
 
 
 def _save(d: dict):
@@ -142,9 +145,9 @@ def codex_status(root: str | None = None) -> dict:
     return {"pct": 0.0, "resets_at": None, "low": False, "seen": None}
 
 
-def tierlm_up(timeout: float = 2.0) -> bool:
+def pcore_up(timeout: float = 2.0) -> bool:
     req = urllib.request.Request(f"{BASE}/v1/models")
-    tok = os.environ.get("TIERLM_TOKEN")
+    tok = env("TOKEN")
     if tok:
         req.add_header("Authorization", f"Bearer {tok}")
     try:
@@ -156,16 +159,21 @@ def tierlm_up(timeout: float = 2.0) -> bool:
 
 
 def status() -> dict:
-    return {"claude": claude_status(), "codex": codex_status(), "tierlm_up": tierlm_up()}
+    return {"claude": claude_status(), "codex": codex_status(), "pcore_up": pcore_up()}
+
+
+tierlm_up = pcore_up   # pre-rename name
 
 
 def fallback_env(tool: str, force: bool = False) -> dict | None:
-    """Env vars that send `tool` ("claude" or "codex") to tierlm, or None if it isn't low (or tierlm is down)."""
+    """Env vars that send `tool` ("claude" or "codex") to provenance-core, or None if it isn't low (or the
+    proxy is down)."""
     st = claude_status() if tool == "claude" else codex_status()
-    if not (force or st["low"]) or not tierlm_up():
+    if not (force or st["low"]) or not pcore_up():
         return None
-    tok = os.environ.get("TIERLM_TOKEN", "tierlm")
+    tok = env("TOKEN") or "pcore"
     if tool == "claude":
         return {"ANTHROPIC_BASE_URL": BASE, "ANTHROPIC_AUTH_TOKEN": tok, "ANTHROPIC_API_KEY": "",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
-    return {"TIERLM_BASE_URL": f"{BASE}/v1", "TIERLM_TOKEN": tok}
+    # Provenance (the codex fork) still reads the TIERLM_ names
+    return {"PCORE_BASE_URL": f"{BASE}/v1", "PCORE_TOKEN": tok, "TIERLM_BASE_URL": f"{BASE}/v1", "TIERLM_TOKEN": tok}

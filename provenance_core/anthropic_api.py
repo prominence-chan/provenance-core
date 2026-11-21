@@ -1,12 +1,12 @@
-"""Anthropic Messages API front end (POST /v1/messages, /v1/messages/count_tokens), so Claude Code can run on tierlm:
+"""Anthropic Messages API front end (POST /v1/messages, /v1/messages/count_tokens), so Claude Code can run on provenance-core:
 
-  ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=<TIERLM_TOKEN or anything> claude
+  ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=<PCORE_TOKEN or anything> claude
 
 Requests are translated to OpenAI chat and served through the Router like /v1/chat/completions (one model, no
-ensemble). Claude model ids map to tiers by family: opus -> TIERLM_MAP_OPUS (default the strongest tier, "nova"),
-sonnet -> TIERLM_MAP_SONNET ("solstice"), haiku -> TIERLM_MAP_HAIKU ("spark"), anything else -> TIERLM_MAP_DEFAULT
+ensemble). Claude model ids map to tiers by family: opus -> PCORE_MAP_OPUS (default the strongest tier, "nova"),
+sonnet -> PCORE_MAP_SONNET ("solstice"), haiku -> PCORE_MAP_HAIKU ("spark"), anything else -> PCORE_MAP_DEFAULT
 (the sonnet mapping). A tier name, alias or catalog id passes through. Values may end in ":none|down1|any" to set the
-fallback; the adapter default is TIERLM_ANTHROPIC_FALLBACK ("any": step down rather than fail a coding agent).
+fallback; the adapter default is PCORE_ANTHROPIC_FALLBACK ("any": step down rather than fail a coding agent).
 
 Supported: system (string or text blocks), text / image (base64 or url) / tool_use / tool_result / text documents,
 tools, tool_choice, disable_parallel_tool_use (enforced by keeping the first call), max_tokens (capped, see
@@ -15,7 +15,6 @@ history), cache_control, top_k, metadata, server tools (web_search etc.), PDF do
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import time
 
@@ -25,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .adapters import (Target, UpstreamStream, authorized, clamp_max_tokens, clean_schema, complete, open_stream,
                        parse_args, resolve_target, safe_id, session_key, text_of)
 from .router import NoCapacity, Router
+from .settings import env
 
 FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("spark", 2)}   # (tier, position)
 
@@ -34,7 +34,7 @@ def error(status: int, kind: str, message: str) -> JSONResponse:
 
 
 def map_model(router: Router, name: str) -> Target:
-    fallback = os.environ.get("TIERLM_ANTHROPIC_FALLBACK", "any")
+    fallback = env("ANTHROPIC_FALLBACK", "any")
     name = (name or "").strip()
     base = name.split("[", 1)[0].strip()   # "claude-opus-4-6[1m]" -> "claude-opus-4-6"
     t = resolve_target(router, base, fallback) if base else None
@@ -43,11 +43,11 @@ def map_model(router: Router, name: str) -> Target:
     low = base.lower()
     family = next((f for f in FAMILY_DEFAULTS if f in low), None)
     if family:
-        env = os.environ.get(f"TIERLM_MAP_{family.upper()}")
+        mapped = env(f"MAP_{family.upper()}")
     else:
-        env = os.environ.get("TIERLM_MAP_DEFAULT") or os.environ.get("TIERLM_MAP_SONNET")
+        mapped = env("MAP_DEFAULT") or env("MAP_SONNET")
         family = "sonnet"
-    t = resolve_target(router, env, fallback) if env else None
+    t = resolve_target(router, mapped, fallback) if mapped else None
     if t:
         return t
     # default mapping; if the catalog doesn't have that tier name, use the tier at the family's position
@@ -237,13 +237,13 @@ def register(app, router: Router, token: str | None):
                 resp, m, t0 = await open_stream(router, body, target, session)
                 return StreamingResponse(_stream(router, resp, m, t0, model_name, count_tokens(req), single),
                                          media_type="text/event-stream",
-                                         headers={"X-Tierlm-Model": m.id, "Cache-Control": "no-cache"})
+                                         headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
             data, m = await complete(router, body, target, session)
         except NoCapacity as e:
             # 529 overloaded: Claude Code retries it with backoff
             return error(529, "overloaded_error", str(e))
         return JSONResponse(from_openai(data, model_name, single),
-                            headers={"X-Tierlm-Model": m.id, "X-Tierlm-Tier": router.catalog.tier_of(m)})
+                            headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
 
     @app.post("/v1/messages/count_tokens")
     async def count(request: Request):

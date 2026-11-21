@@ -6,10 +6,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from tierlm.catalog import load
-from tierlm.router import Router
-from tierlm.server import create_app
-from tierlm.state import State
+from provenance_core.catalog import load
+from provenance_core.router import Router
+from provenance_core.server import create_app
+from provenance_core.state import State
 
 CAT = {
     "tiers": [{"name": "nova", "min_score": 94}, {"name": "solstice", "min_score": 82},
@@ -60,8 +60,9 @@ class Upstream:
 def env(tmp_path, monkeypatch):
     for k in ("A_KEY", "B_KEY"):
         monkeypatch.setenv(k, "x")
-    for k in ("TIERLM_TOKEN", "TIERLM_MAP_OPUS", "TIERLM_MAP_SONNET", "TIERLM_MAP_HAIKU", "TIERLM_MAP_DEFAULT"):
-        monkeypatch.delenv(k, raising=False)
+    for k in ("TOKEN", "MAP_OPUS", "MAP_SONNET", "MAP_HAIKU", "MAP_DEFAULT"):
+        for prefix in ("PCORE_", "TIERLM_"):
+            monkeypatch.delenv(prefix + k, raising=False)
     p = tmp_path / "catalog.yaml"
     p.write_text(yaml.safe_dump(CAT))
     up = Upstream()
@@ -106,7 +107,7 @@ def test_messages_text_round_trip(env):
         "thinking": {"type": "enabled", "budget_tokens": 2000},
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
     assert r.status_code == 200, r.text
-    assert r.headers["x-tierlm-tier"] == "solstice" and r.headers["x-tierlm-model"] == "a/front"
+    assert r.headers["x-pcore-tier"] == "solstice" and r.headers["x-pcore-model"] == "a/front"
     j = r.json()
     assert j["type"] == "message" and j["role"] == "assistant" and j["model"] == "claude-sonnet-4-5-20250929"
     assert j["content"] == [{"type": "text", "text": "answer from front"}]
@@ -183,14 +184,14 @@ def test_messages_model_mapping(env, monkeypatch):
     def tier(model):
         r = c.post("/v1/messages", json={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": model}]})
         assert r.status_code == 200, r.text
-        return r.headers["x-tierlm-tier"]
+        return r.headers["x-pcore-tier"]
     assert tier("claude-opus-4-6[1m]") == "nova"
     assert tier("claude-sonnet-4-5-20250929") == "solstice"
     assert tier("claude-3-5-haiku-20241022") == "spark"
     assert tier("solstice") == "solstice" and tier("tier-4") == "ember"
     r = c.post("/v1/messages", json={"model": "b/tiny", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]})
-    assert r.headers["x-tierlm-model"] == "b/tiny"
-    monkeypatch.setenv("TIERLM_MAP_OPUS", "spark")
+    assert r.headers["x-pcore-model"] == "b/tiny"
+    monkeypatch.setenv("PCORE_MAP_OPUS", "spark")
     assert tier("claude-opus-4-1") == "spark"
 
 
@@ -199,7 +200,7 @@ def test_messages_falls_back_down(env):
     up.script["top"] = [500]
     r = c.post("/v1/messages", json={"model": "claude-opus-4-5", "max_tokens": 10,
                                      "messages": [{"role": "user", "content": "x"}]})
-    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "solstice"   # nova failed, fallback "any"
+    assert r.status_code == 200 and r.headers["x-pcore-tier"] == "solstice"   # nova failed, fallback "any"
 
 
 def test_messages_no_capacity_is_overloaded(env):
@@ -256,7 +257,7 @@ def test_messages_streaming_text_only_and_parallel_disabled(env):
 
 def test_messages_auth_count_tokens_and_unknown_endpoints(env, monkeypatch):
     _, up, router = env
-    monkeypatch.setenv("TIERLM_TOKEN", "sekrit")
+    monkeypatch.setenv("PCORE_TOKEN", "sekrit")
     c = TestClient(create_app(router=router))
     body = {"model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [{"role": "user", "content": "hello there"}]}
     assert c.post("/v1/messages", json=body).status_code == 401
@@ -278,17 +279,17 @@ def test_messages_sticky_session_from_first_user_message(env):
     up.script["front"] = [500, {"content": "ok"}]
     first = {"role": "user", "content": "build me a thing"}
     r = c.post("/v1/messages", json={"model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [first]})
-    assert r.headers["x-tierlm-model"] == "b/front2"   # front failed once
+    assert r.headers["x-pcore-model"] == "b/front2"   # front failed once
     router.state.health.clear()                        # front is healthy again
     r = c.post("/v1/messages", json={"model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [
         first, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "more"}]})
-    assert r.headers["x-tierlm-model"] == "b/front2"   # same conversation stays put
+    assert r.headers["x-pcore-model"] == "b/front2"   # same conversation stays put
     r = c.post("/v1/messages", json={"model": "claude-sonnet-4-5", "max_tokens": 10,
                                      "messages": [{"role": "user", "content": "another conversation"}]})
-    assert r.headers["x-tierlm-model"] == "a/front"
+    assert r.headers["x-pcore-model"] == "a/front"
     r = c.post("/v1/messages", headers={"x-tierlm-session": "s1"}, json={
         "model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [first]})
-    assert r.headers["x-tierlm-model"] == "a/front"   # an explicit session header wins over the hash
+    assert r.headers["x-pcore-model"] == "a/front"   # an explicit session header wins over the hash
 
 
 # ---- OpenAI Responses ------------------------------------------------------------------------------------------------
@@ -409,4 +410,4 @@ def test_responses_stream_upstream_error_and_unknown_model(env):
     evs = parse_sse(c.post("/v1/responses", json={"model": "solstice:none", "stream": True, "input": "x"}).text)
     assert evs[-1][0] == "response.failed" and "boom" in evs[-1][1]["response"]["error"]["message"]
     r = c.post("/v1/responses", json={"model": "gpt-5-codex", "input": "x"})
-    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "nova"   # unknown -> strongest tier
+    assert r.status_code == 200 and r.headers["x-pcore-tier"] == "nova"   # unknown -> strongest tier

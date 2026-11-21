@@ -1,6 +1,9 @@
-# Providers: OpenAI-compatible chat endpoints with a free tier. One API key per provider, from your own account.
-# Models: `score` is a prior (0-100) until `python -m tierlm calibrate` measures it; limits are the free-tier caps
-# as published by each provider (check and adjust: they change often). Use `python -m tierlm discover <provider>`
+# Providers: OpenAI-compatible chat endpoints with a free tier. One API key per provider, from your own account;
+# `api_key_env: none` = anonymous access (no Authorization header). `${VAR}` in base_url comes from the environment.
+# `pool` = limits shared by all of a provider's models; `shared_tpd: true` = each model's tpd is its share of one
+# provider-wide daily allowance.
+# Models: `score` is a prior (0-100) until `python -m provenance_core calibrate` measures it; limits are the free-tier caps
+# as published by each provider (check and adjust: they change often). Use `python -m provenance_core discover <provider>`
 # to see current model names. Several providers reshuffled their free tiers in late 2026 (Cerebras moved to a trial
 # credit, Groq trimmed chat models), so treat the non-OpenRouter entries as a starting point and re-run discover.
 # Tiers are named from a spark up to a nova, hottest first. Clients use the tier name as the
@@ -21,6 +24,17 @@ providers:
   openrouter: {base_url: "https://openrouter.ai/api/v1", api_key_env: OPENROUTER_API_KEY}
   mistral:    {base_url: "https://api.mistral.ai/v1", api_key_env: MISTRAL_API_KEY}
   nvidia:     {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}
+  # Workers AI: 10k neurons/day per account across all models; each model's tpd below is its token-equivalent share
+  cloudflare: {base_url: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1", api_key_env: CLOUDFLARE_API_TOKEN, shared_tpd: true}
+  kilo:       {base_url: "https://ai-gateway.kilo.ai/api/v1", api_key_env: none, pool: {rph: 200}}   # anonymous: 200 req/hour per IP
+  # OVHcloud AI Endpoints: anonymous works without any auth header, but on 2026-11-21 the anonymous quota measured
+  # 1 request per model per IP per calendar year (x-ratelimit-limit-year: 1; 429 retry-after until Jan 1), not the
+  # published 2 rpm. An access token in OVH_AI_ENDPOINTS_ACCESS_TOKEN is sent if set.
+  ovh:        {base_url: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", auth: none, api_key_env: OVH_AI_ENDPOINTS_ACCESS_TOKEN}
+  zai:        {base_url: "https://api.z.ai/api/paas/v4", api_key_env: ZAI_API_KEY}
+  sambanova:  {base_url: "https://api.sambanova.ai/v1", api_key_env: SAMBANOVA_API_KEY}
+  cohere:     {base_url: "https://api.cohere.ai/compatibility/v1", api_key_env: COHERE_API_KEY}
+  inception:  {base_url: "https://api.inceptionlabs.ai/v1", api_key_env: INCEPTION_API_KEY}
 
 models:
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
@@ -51,3 +65,24 @@ models:
   - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}
   - {provider: nvidia, model: deepseek-ai/deepseek-v3.1, score: 78, context: 131072, limits: {rpm: 40}}
   - {provider: nvidia, model: meta/llama-3.3-70b-instruct, score: 62, context: 131072, limits: {rpm: 40}}
+  # Kilo AI gateway, anonymous (2026-11): the :free models, 200 requests/hour per IP across all of them
+  - {provider: kilo, model: "nvidia/nemotron-3-ultra-550b-a55b:free", score: 84, context: 1000000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "nvidia/nemotron-3.5-super-vl:free", score: 76, context: 1000000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "nvidia/nemotron-3.5-lightning:free", score: 66, context: 1000000, limits: {rpm: 10, rpd: 1500}}
+  # OVHcloud AI Endpoints (2026-11): published as 2 requests/minute per IP per model anonymously (see the provider note)
+  - {provider: ovh, model: DeepSeek-V4.1-Flash-1017, score: 84, context: 1048576, limits: {rpm: 2}}
+  - {provider: ovh, model: Qwen3.5-397B-A17B, score: 82, context: 262144, limits: {rpm: 2}}
+  - {provider: ovh, model: gpt-oss-120b, score: 82, context: 131072, limits: {rpm: 2}}
+  - {provider: ovh, model: Qwen3.8-27B, score: 78, context: 262144, limits: {rpm: 2}}
+  - {provider: ovh, model: qwen3.6-35b-a3b, score: 68, context: 262144, limits: {rpm: 2}}
+  - {provider: ovh, model: gemma-4-26b-a4b, score: 64, context: 262144, limits: {rpm: 2}}
+  # Cloudflare Workers AI (needs CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)
+  - {provider: cloudflare, model: "@cf/openai/gpt-oss-120b", score: 82, context: 131072, limits: {rpm: 300, tpd: 140000}}
+  - {provider: cloudflare, model: "@cf/qwen/qwen3.8-27b", score: 78, context: 131072, limits: {rpm: 300, tpd: 34000}}
+  - {provider: cloudflare, model: "@cf/nvidia/nemotron-3-120b-a12b", score: 74, context: 131072, limits: {rpm: 300, tpd: 70000}}
+  - {provider: cloudflare, model: "@cf/zai-org/glm-4.7-flash", score: 70, context: 131072, limits: {rpm: 300, tpd: 270000}}
+  - {provider: zai, model: glm-4.7-flash, score: 70, context: 200000, limits: {rpm: 10}}
+  - {provider: sambanova, model: gpt-oss-120b, score: 82, context: 131072, limits: {rpm: 20, rpd: 20, tpd: 200000}}
+  - {provider: sambanova, model: gemma-4-31B-it, score: 66, context: 131072, limits: {rpm: 20, rpd: 20, tpd: 200000}}
+  - {provider: cohere, model: command-a-plus-05-2026, score: 74, context: 128000, limits: {rpm: 20, rpd: 33}}
+  - {provider: inception, model: mercury-3, score: 70, context: 1000000, limits: {rpm: 1000}}
