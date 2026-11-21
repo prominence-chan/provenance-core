@@ -3,16 +3,16 @@
 # as published by each provider (check and adjust: they change often). Use `python -m tierlm discover <provider>`
 # to see current model names. Several providers reshuffled their free tiers in late 2026 (Cerebras moved to a trial
 # credit, Groq trimmed chat models), so treat the non-OpenRouter entries as a starting point and re-run discover.
-# Tiers are named after the layers a solar prominence climbs through, hottest first. Clients use the tier name as the
-# model: "corona" is a pooled hyperfrontier model, "flare" a pooled frontier one, and so on. Floors are calibrated
-# scores (the probe set's hard half is what separates corona from flare).
+# Tiers are named for how hot they burn, hottest first. Clients use the tier name as the
+# model: "supernova" is a pooled hyperfrontier model, "blaze" a pooled frontier one, and so on. Floors are calibrated
+# scores (the probe set's hard half is what separates supernova from blaze).
 tiers:
-  - {name: corona, min_score: 94}   # hyperfrontier: only the very strongest models
-  - {name: flare,  min_score: 82}   # frontier: solid agentic coding / reasoning
+  - {name: supernova, min_score: 94}   # hyperfrontier: only the very strongest models
+  - {name: blaze,  min_score: 82}   # frontier: solid agentic coding / reasoning
   - {name: ember,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
   - {name: cinder, min_score: 0}    # fast / small: classification, routing, cheap bulk work
 
-aliases: {tier-1: corona, tier-2: flare, tier-3: ember, tier-4: cinder, auto: flare, default: flare}
+aliases: {corona: supernova, flare: blaze, tier-1: supernova, tier-2: blaze, tier-3: ember, tier-4: cinder, auto: blaze, default: blaze}
 
 providers:
   google:     {base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: GEMINI_API_KEY}

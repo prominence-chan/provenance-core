@@ -1,7 +1,7 @@
 """Model catalog: providers (OpenAI-compatible endpoints + one API key each), models with a strength score
 (0-100, from `tierlm calibrate` or a prior), free-tier limits, and the tier each score falls into.
 
-Tiers are the point of the project: a request asks for a tier ("corona", "flare", "ember", "cinder"; "tier-N" works too) and is only ever served by
+Tiers are the point of the project: a request asks for a tier ("supernova", "blaze", "ember", "cinder"; "tier-N" works too) and is only ever served by
 models of comparable strength, so answers don't swing between a frontier model and a tiny one depending on which
 free quota happens to be left."""
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Catalog:
     providers: dict[str, Provider]
     models: dict[str, Model]
     tiers: list[tuple[str, float]]   # (name, minimum score), strongest first
-    aliases: dict[str, str] = field(default_factory=dict)   # e.g. tier-1 -> corona, auto -> flare
+    aliases: dict[str, str] = field(default_factory=dict)   # e.g. tier-1 -> supernova, auto -> blaze
 
     def resolve_tier(self, name: str) -> str | None:
         """A tier name, or an alias of one; None if it's neither (a concrete model id, or unknown)."""
