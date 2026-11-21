@@ -32,17 +32,20 @@ models:
   - {provider: google, model: gemini-3.5-flash-lite, score: 70, context: 1000000, limits: {rpm: 15, rpd: 1000}}
   - {provider: google, model: gemini-3.1-flash-lite, score: 64, context: 1000000, limits: {rpm: 15, rpd: 1000}}
   - {provider: google, model: gemma-4-31b-it, score: 66, context: 262144, limits: {rpm: 30, rpd: 14400}}
-  - {provider: groq, model: openai/gpt-oss-120b, score: 82, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000}}
-  - {provider: groq, model: llama-3.3-70b-versatile, score: 62, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 12000}}
-  - {provider: groq, model: llama-3.1-8b-instant, score: 35, context: 131072, limits: {rpm: 30, rpd: 14400, tpm: 6000}}
   - {provider: cerebras, model: gpt-oss-120b, score: 82, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
   - {provider: cerebras, model: qwen-3-235b-a22b-instruct-2507, score: 80, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
+  # Groq free plan (2026-11): ~30 rpm, 1000 rpd per model, small daily token caps on the big ones
+  - {provider: groq, model: openai/gpt-oss-120b, score: 80, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000}}
+  - {provider: groq, model: qwen/qwen3.8-27b, score: 76, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 6000}}
+  - {provider: groq, model: openai/gpt-oss-20b, score: 66, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000}}
   # OpenRouter free models (checked against its public /models list, 2026-11): 50 requests/day across all :free
   # models without credits, 1000/day after a one-time $10 top-up
   - {provider: openrouter, model: "nvidia/nemotron-3-ultra-550b-a55b:free", score: 84, context: 1000000, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free", score: 76, context: 1000000, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "baidu/ernie-5.5-flash-preview:free", score: 72, context: 1024000, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "google/gemma-4-31b-it:free", score: 68, context: 262144, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "nvidia/nemotron-3.5-lightning:free", score: 64, context: 1000000, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "google/gemma-4-26b-a4b-it:free", score: 62, context: 262144, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free", score: 60, context: 1048576, limits: {rpm: 20, rpd: 50}}
   - {provider: mistral, model: mistral-large-latest, score: 72, context: 131072, limits: {rpm: 60}}
   - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}

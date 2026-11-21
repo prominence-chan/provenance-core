@@ -100,7 +100,7 @@ async def score_model(router: Router, m, concurrency: int = 3) -> tuple[float, i
         async with sem:
             try:
                 d = await router.call(m, {"messages": [{"role": "user", "content": prompt}], "temperature": 0,
-                                          "max_tokens": 2048})
+                                          "max_tokens": 8192})
                 return w if grade(d["choices"][0]["message"].get("content") or "", pattern) else 0.0
             except Exception:  # noqa: BLE001
                 return None
