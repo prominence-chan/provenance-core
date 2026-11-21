@@ -57,6 +57,29 @@ wire_api = "responses"
 
 Any other OpenAI client: base URL `http://127.0.0.1:4141/v1`, model = a tier name.
 
+## ChatGPT web as a model (optional, off by default)
+
+If your ChatGPT plan gives you a strong model in the web chat, provenance-core can use that chat as one more model:
+each request opens a **new temporary chat** in a visible Chrome window on its own profile, types the whole request
+as one message, and reads the answer back (tool calls included). Nothing is kept in your ChatGPT history, and the
+harness keeps owning context, tools and memory.
+
+```bash
+.venv/bin/pip install playwright          # uses your installed Google Chrome
+provenance-core weblogin                  # opens Chrome on the dedicated profile: sign in, then quit it (Cmd+Q)
+echo 'PCORE_CHATGPT_WEB=1' >> ~/.tierlm/keys.env    # turn it on, then restart the server
+provenance-core webstatus --probe         # on? signed in? how many requests today?
+```
+
+The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked in the page's model picker). It
+sits in a tier by its score like any other model; Provenance / Codex requests for that tier try it first and fall
+back to the normal pool whenever it is busy, signed out, rate limited or showing a challenge.
+
+**Know the risk:** automating the ChatGPT web app is against OpenAI's terms of use. The realistic downside is your
+ChatGPT account being limited or banned. The bridge is therefore slow on purpose (one request at a time, a pause
+between requests, a daily cap of 200) and never tries to get around a captcha, challenge or "unusual activity"
+notice: it stops and tells you. Details: [docs/TECHNICAL.md](docs/TECHNICAL.md#chatgpt-web-provider).
+
 ## Keys
 
 Put provider keys in your environment (or an env file your service sources), any subset:

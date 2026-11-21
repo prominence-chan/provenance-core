@@ -99,6 +99,112 @@ with one `input` string, answered with `custom_tool_call` items), and keeps a sm
 `previous_response_id` and `GET /v1/responses/{id}` work. Not translated: extended thinking requests, prompt caching,
 server-side tools (web search, file search, MCP, computer use), PDF documents.
 
+## ChatGPT web provider
+
+`type: chatgpt_web` in `catalog.yaml` (`provenance_core/chatgpt_web.py`): your own signed-in chatgpt.com chat as a
+stateless completion engine.
+
+**Risk first.** Driving the web app with a program is against OpenAI's terms of use for ChatGPT; the account can be
+rate limited, flagged or banned. Everything below is built to stay small and visible rather than to hide: it is
+opt-in, serial, paced, capped, and stops at the first sign that the site wants a human.
+
+**What it does per request**
+
+1. Renders the whole chat request (system prompt, tool definitions, every message, earlier tool calls and their
+   results) into one message.
+2. Opens `https://chatgpt.com/?temporary-chat=true` in its Chrome window and checks what a user would see: signed
+   in, no challenge or limit notice, temporary chat actually on (a "Temporary Chat" heading or a "Turn off temporary
+   chat" control; if the URL flag didn't take, the page's own toggle is tried once), and the wanted model selected
+   in the model picker.
+3. Types the message, presses send, waits until the reply has finished, and turns the rendered reply back into
+   markdown (code blocks verbatim).
+4. Parses tool calls out of the reply and returns an ordinary chat completion (`finish_reason: tool_calls`), which
+   the Responses / Anthropic / chat front ends translate as for any provider.
+
+Nothing carries over between requests: every request is a new temporary chat, so ChatGPT's memory and history are
+not involved and nothing is saved in the account. If temporary chat can't be confirmed, nothing is sent and the
+provider goes unavailable.
+
+**What it never does:** read cookies or tokens from any browser profile, handle your password, use stealth /
+anti-detection flags or fingerprint changes (it is a stock Playwright-driven Chrome and says so:
+`navigator.webdriver` is true), forge sentinel / proof-of-work / Turnstile tokens, solve or click through captchas
+or challenges, or call ChatGPT's private backend API.
+
+**Tool-call protocol.** The prompt tells the model to call a tool with a fenced block:
+
+````
+```tool_call
+{"name": "shell", "arguments": {"command": ["ls", "-la"]}}
+```
+````
+
+One block per call (one call per turn when the client sent `parallel_tool_calls: false`). The parser also accepts
+an untagged or `json` block that is exactly a call to a known tool, arguments given as a JSON string, raw newlines
+inside JSON strings, and a call written without its fence. A call that is there but unusable (invalid JSON, unknown
+tool, missing required argument, or no call when `tool_choice` required one) gets **one repair round**: the error
+is sent as a second message in the same temporary chat and the corrected reply is parsed; a second failure fails
+the request (the router moves on to the next model). Freeform tools such as `apply_patch` are a function with one
+`input` string, as for every other provider. Images are not passed through: such requests skip the bridge.
+
+**Streaming.** The reply is read whole before anything is sent to the client (tool calls must be parsed and maybe
+repaired first, and a failure can still fail over), then replayed as a normal stream. Clients see no tokens until
+the reply is complete.
+
+**Sign-in.** `provenance-core weblogin` opens an ordinary Chrome window (not driven by anything) on the dedicated
+profile `~/.tierlm/chatgpt-web-profile`; you sign in by hand and quit that Chrome, then the profile is checked once
+through the bridge. The server says at start whether the login is there (from the last check), `provenance-ui` runs
+`provenance-core webstatus --boot` when it starts (a live check if the last one is older than 12 h; silent when
+all is well), and a macOS notification appears when the login turns out to be missing or expired.
+
+**When it is used.** Off unless `PCORE_CHATGPT_WEB=1` (or `enabled: true` on the provider; `PCORE_CHATGPT_WEB=0`
+forces it off). When on, its model competes inside its tier like any other (the score is a prior until
+`calibrate --only chatgpt-web/<model>` measures it; calibration never touches it unless named), but only for:
+
+- tier requests on the front ends listed in `web.endpoints` (default `[responses]`: Provenance and Codex; add
+  `messages` for Claude Code or `chat` for `/v1/chat/completions`), and
+- requests that name it (`model: "chatgpt-web/luna"`), on any endpoint.
+
+Ensembles never include it.
+
+**When it steps aside.** Each of these makes the model unavailable for a while, with the reason in
+`webstatus` / `GET /chatgpt-web/status`, and requests fail over inside the tier (and down a tier if the request's
+`fallback` allows):
+
+| what the page shows | unavailable for |
+|---|---|
+| login wall / signed out | 30 min, or until `weblogin` |
+| captcha, challenge, "unusual activity", block page (after 20 s for an automatic check to pass by itself) | 6 h |
+| usage-limit notice | 1 h |
+| temporary chat not available | 6 h |
+| the model isn't in the picker | 1 h |
+| you closed the window | 10 min |
+| daily cap reached | until local midnight |
+
+A request that finds the window busy for more than `queue_wait_s`, or whose prompt is over `max_prompt_chars`, goes
+to the normal pool without any penalty. `provenance-core webstatus --probe` (or `weblogin`) clears a block when the
+page is fine again.
+
+**Settings** (the provider's `web:` block in `catalog.yaml`):
+
+| key | default | |
+|---|---|---|
+| `daily_cap` | 200 | requests per local day (repair messages count) |
+| `min_gap_s`, `max_gap_s` | 4, 9 | pause between requests, a random time in that range |
+| `queue_wait_s` | 45 | how long a request waits for the one in flight |
+| `reply_timeout_s` | 600 | longest wait for one reply |
+| `idle_close_s` | 900 | close the window after this long without a request |
+| `max_prompt_chars` | 120000 | larger requests skip the bridge |
+| `strict_model` | true | fail rather than answer with a different model than the one named |
+| `endpoints` | `[responses]` | front ends whose tier requests may use it |
+
+A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice). The page
+markers the bridge reads live in `PROBE_JS` / `READ_JS`; when chatgpt.com changes its markup, that is the place to
+update.
+
+**Commands and endpoints:** `weblogin`, `webstatus [--probe] [--boot]`; `GET /chatgpt-web/status[?probe=1]`,
+`POST /chatgpt-web/release[?reset=1]` (close the window; `reset` also forgets a block). State (today's count, last
+check, block reason) is in `~/.tierlm/chatgpt_web.json`.
+
 ## Subscription fallback
 
 `python -m provenance_core usage` reads Claude Code's and Codex's own rate-limit data (Codex session rollouts;
@@ -134,6 +240,7 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_HOME` | `~/.tierlm` | subscription-fallback state |
 | `PCORE_BASE_URL` | `http://127.0.0.1:4141` | where `usage` / `env` look for the proxy |
 | `PCORE_LOW_PCT` | `95` | subscription usage that counts as low |
+| `PCORE_CHATGPT_WEB` | unset | `1` turns the chatgpt-web provider on, `0` forces it off |
 
 Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLARE_API_TOKEN`, ...; see
 `catalog.yaml`).
@@ -147,4 +254,5 @@ Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLA
 
 ## Tests
 
-`.venv/bin/python -m pytest -q` (upstreams are mocked).
+`.venv/bin/python -m pytest -q` (upstreams are mocked). The chatgpt-web page driver is tested against a local mock
+page (`tests/mock_chatgpt.py`) in headless Chrome; those tests are skipped without Playwright and Google Chrome.

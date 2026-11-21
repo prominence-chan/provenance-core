@@ -43,6 +43,7 @@ def main():
     if a.cmd == "serve":
         import uvicorn
         from .server import create_app
+        _web_boot(cat)
         uvicorn.run(create_app(router=Router(cat)), host=a.host, port=a.port)
     elif a.cmd == "calibrate":
         from .calibrate import calibrate
@@ -62,6 +63,23 @@ def main():
         r = httpx.get(f"{p.base_url}/models", headers={**p.auth_headers(), **p.headers}, timeout=30)
         for m in r.json().get("data", []):
             print(m.get("id"))
+
+
+def _web_boot(cat):
+    """Server start: say where the chatgpt-web provider stands (from the last check; the page isn't opened)."""
+    from .chatgpt_web import LOGIN_HINT, Bridge, notify
+    for name, p in cat.providers.items():
+        if p.type != "chatgpt_web" or not p.usable:
+            continue
+        st = Bridge(p.base_url, p.options).status()
+        if st["signed_in"] and not st["blocked"]:
+            print(f"chatgpt-web: on, signed in, {st['today']} of {st['daily_cap']} requests used today", flush=True)
+        elif st["signed_in"] is False or st["kind"] == "login" or st["signed_in"] is None:
+            print(f"chatgpt-web: on but the ChatGPT login is missing or expired; {LOGIN_HINT}. Requests use the "
+                  "normal pool until then.", flush=True)
+            notify("ChatGPT web login is missing or expired: run `provenance-core weblogin`")
+        else:
+            print(f"chatgpt-web: on but unavailable for {st['blocked_for_s'] // 60} more min: {st['reason']}", flush=True)
 
 
 def _web_cmd(a, cat):
