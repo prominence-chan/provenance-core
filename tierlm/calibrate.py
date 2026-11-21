@@ -52,6 +52,19 @@ PROBES: list[tuple[str, str, float]] = [
     ("Using each of 1, 3, 4, 6 exactly once with + - * / and parentheses, make 24. Answer with the expression only.",
      "EVAL24:1346", 6),
     ("What is the sum of the digits of 2^50? Answer with the number only.", r"^\s*76\s*$", 6),
+    # harder ones: these separate the hyperfrontier tier from plain frontier models
+    ("How many spanning trees does the 4x4 grid graph (16 vertices, 24 edges) have? Answer with the number only.",
+     r"^\s*100,?352\s*$", 6),
+    ("In how many ways can a 4x8 rectangle be tiled with 1x2 dominoes? Answer with the number only.",
+     r"^\s*2,?245\s*$", 5),
+    ("How many squarefree integers are there from 1 to 10000 inclusive? Answer with the number only.",
+     r"^\s*6,?083\s*$", 6),
+    ("How many integer points (x, y) satisfy x^2 + y^2 <= 100? Answer with the number only.", r"^\s*317\s*$", 5),
+    ("What is printed?\nfs = [lambda: i for i in range(3)]\ndef d(x, acc=[]):\n    acc.append(x)\n    return len(acc)\n"
+     "print(sum(f() for f in fs) * 10 + d(1) + d(2) + d(3))\nAnswer with the output only.", r"^\s*66\s*$", 5),
+    ("How many binary strings of length 20 contain no three consecutive 1s? Answer with the number only.",
+     r"^\s*223,?317\s*$", 6),
+    ("How many integer partitions does 50 have? Answer with the number only.", r"^\s*204,?226\s*$", 5),
 ]
 
 

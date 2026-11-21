@@ -1,12 +1,13 @@
 """Model catalog: providers (OpenAI-compatible endpoints + one API key each), models with a strength score
 (0-100, from `tierlm calibrate` or a prior), free-tier limits, and the tier each score falls into.
 
-Tiers are the point of the project: a request asks for a tier ("tier-1", "tier-2", ...) and is only ever served by
+Tiers are the point of the project: a request asks for a tier ("corona", "flare", "ember", "cinder"; "tier-N" works too) and is only ever served by
 models of comparable strength, so answers don't swing between a frontier model and a tiny one depending on which
 free quota happens to be left."""
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +51,20 @@ class Catalog:
     providers: dict[str, Provider]
     models: dict[str, Model]
     tiers: list[tuple[str, float]]   # (name, minimum score), strongest first
+    aliases: dict[str, str] = field(default_factory=dict)   # e.g. tier-1 -> corona, auto -> flare
+
+    def resolve_tier(self, name: str) -> str | None:
+        """A tier name, or an alias of one; None if it's neither (a concrete model id, or unknown)."""
+        names = [t for t, _ in self.tiers]
+        name = self.aliases.get(name, name)
+        if name in names:
+            return name
+        if name in ("auto", "default"):
+            return names[min(1, len(names) - 1)]
+        m = re.fullmatch(r"tier-(\d+)", name)
+        if m and 1 <= int(m.group(1)) <= len(names):
+            return names[int(m.group(1)) - 1]
+        return None
 
     def tier_of(self, model: Model) -> str:
         for name, floor in self.tiers:
@@ -87,4 +102,4 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
                 models[mid].score = float(s["score"] if isinstance(s, dict) else s)
                 models[mid].calibrated = True
     tiers = sorted(((t["name"], float(t["min_score"])) for t in data["tiers"]), key=lambda t: -t[1])
-    return Catalog(providers=providers, models=models, tiers=tiers)
+    return Catalog(providers=providers, models=models, tiers=tiers, aliases=dict(data.get("aliases") or {}))

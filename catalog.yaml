@@ -1,11 +1,18 @@
 # Providers: OpenAI-compatible chat endpoints with a free tier. One API key per provider, from your own account.
 # Models: `score` is a prior (0-100) until `python -m tierlm calibrate` measures it; limits are the free-tier caps
 # as published by each provider (check and adjust: they change often). Use `python -m tierlm discover <provider>`
-# to see current model names.
+# to see current model names. Several providers reshuffled their free tiers in late 2026 (Cerebras moved to a trial
+# credit, Groq trimmed chat models), so treat the non-OpenRouter entries as a starting point and re-run discover.
+# Tiers are named after the layers a solar prominence climbs through, hottest first. Clients use the tier name as the
+# model: "corona" is a pooled hyperfrontier model, "flare" a pooled frontier one, and so on. Floors are calibrated
+# scores (the probe set's hard half is what separates corona from flare).
 tiers:
-  - {name: tier-1, min_score: 80}   # frontier-ish
-  - {name: tier-2, min_score: 60}   # strong mid
-  - {name: tier-3, min_score: 0}    # fast / small
+  - {name: corona, min_score: 94}   # hyperfrontier: only the very strongest models
+  - {name: flare,  min_score: 82}   # frontier: solid agentic coding / reasoning
+  - {name: ember,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
+  - {name: cinder, min_score: 0}    # fast / small: classification, routing, cheap bulk work
+
+aliases: {tier-1: corona, tier-2: flare, tier-3: ember, tier-4: cinder, auto: flare, default: flare}
 
 providers:
   google:     {base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: GEMINI_API_KEY}
@@ -25,9 +32,13 @@ models:
   - {provider: groq, model: llama-3.1-8b-instant, score: 35, context: 131072, limits: {rpm: 30, rpd: 14400, tpm: 6000}}
   - {provider: cerebras, model: gpt-oss-120b, score: 82, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
   - {provider: cerebras, model: qwen-3-235b-a22b-instruct-2507, score: 80, context: 65536, limits: {rpm: 30, tpm: 60000, tpd: 1000000}}
-  - {provider: openrouter, model: "deepseek/deepseek-r1:free", score: 84, context: 65536, limits: {rpm: 20, rpd: 50}}
-  - {provider: openrouter, model: "deepseek/deepseek-chat-v3.1:free", score: 78, context: 65536, limits: {rpm: 20, rpd: 50}}
-  - {provider: openrouter, model: "qwen/qwen3-coder:free", score: 74, context: 65536, limits: {rpm: 20, rpd: 50}}
+  # OpenRouter free models (checked against its public /models list, 2026-11): 50 requests/day across all :free
+  # models without credits, 1000/day after a one-time $10 top-up
+  - {provider: openrouter, model: "nvidia/nemotron-3-ultra-550b-a55b:free", score: 84, context: 1000000, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "nvidia/nemotron-3.5-super-vl:free", score: 76, context: 1000000, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "baidu/ernie-5.5-flash-preview:free", score: 72, context: 1024000, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "google/gemma-4-31b-it:free", score: 68, context: 262144, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free", score: 60, context: 1048576, limits: {rpm: 20, rpd: 50}}
   - {provider: mistral, model: mistral-large-latest, score: 72, context: 131072, limits: {rpm: 60}}
   - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}
   - {provider: github, model: openai/gpt-4.1, score: 76, context: 128000, limits: {rpm: 10, rpd: 50}}

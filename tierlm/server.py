@@ -1,11 +1,13 @@
 """OpenAI-compatible HTTP API.
 
-  POST /v1/chat/completions   model = "tier-1" | "tier-2" | ... | "auto" | a concrete catalog id
+  POST /v1/chat/completions   model = a tier name or alias (see catalog.yaml) | "auto" | a concrete catalog id
                               optional body fields: "tierlm": {"fallback": "none|down1|any",
                                                                "ensemble": {"k": 3, "strategy": "judge|majority|first"}}
                               optional header X-Tierlm-Session: sticky model per conversation
   GET  /v1/models             the tier aliases plus every usable concrete model
-  GET  /status                tiers, models, scores, headroom, health"""
+  GET  /status                tiers, models, scores, headroom, health
+  POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_api.py
+  POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py"""
 from __future__ import annotations
 
 import os
@@ -14,6 +16,7 @@ import time
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import anthropic_api, responses_api
 from .catalog import load
 from .router import NoCapacity, Router, estimate_tokens
 
@@ -32,23 +35,28 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
 
     def resolve(name: str) -> tuple[str | None, str | None]:
         """(tier, concrete model id)"""
-        tiers = [t for t, _ in router.catalog.tiers]
-        if name in tiers:
-            return name, None
-        if name in ("auto", "default"):
-            return tiers[0], None
+        tier = router.catalog.resolve_tier(name)
+        if tier:
+            return tier, None
         if name in router.catalog.models:
             return None, name
+        tiers = [t for t, _ in router.catalog.tiers]
         raise HTTPException(404, f"unknown model {name}; use one of {tiers} or a catalog id")
 
     @app.get("/v1/models")
     async def models(authorization: str | None = Header(None)):
         check(authorization)
         now = int(time.time())
+        iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        # OpenAI list shape plus the Anthropic one (type/display_name/created_at, has_more/first_id/last_id), so
+        # both SDKs' models.list() parse it
         data = [{"id": t, "object": "model", "created": now, "owned_by": "tierlm"} for t, _ in router.catalog.tiers]
         data += [{"id": m.id, "object": "model", "created": now, "owned_by": m.provider}
                  for m in router.catalog.models.values() if router.catalog.providers[m.provider].api_key]
-        return {"object": "list", "data": data}
+        for d in data:
+            d.update(type="model", display_name=d["id"], created_at=iso)
+        return {"object": "list", "data": data, "has_more": False,
+                "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
 
     @app.get("/status")
     async def status(authorization: str | None = Header(None)):
@@ -91,6 +99,17 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
             return JSONResponse(data, headers={"X-Tierlm-Model": m.id, "X-Tierlm-Tier": router.catalog.tier_of(m)})
         except NoCapacity as e:
             raise HTTPException(503, str(e)) from e
+
+    anthropic_api.register(app, router, token)
+    responses_api.register(app, router, token)
+
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                   include_in_schema=False)
+    async def not_found(path: str):
+        # Anthropic-style error body (also readable by OpenAI clients): Claude Code probes a few extra endpoints and
+        # treats a plain 404 as "not supported here"
+        return JSONResponse({"type": "error", "error": {"type": "not_found_error", "message": f"/{path} is not served by tierlm"}},
+                            status_code=404)
 
     return app
 
