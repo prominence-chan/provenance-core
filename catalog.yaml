@@ -20,13 +20,18 @@ providers:
   cerebras:   {base_url: "https://api.cerebras.ai/v1", api_key_env: CEREBRAS_API_KEY}
   openrouter: {base_url: "https://openrouter.ai/api/v1", api_key_env: OPENROUTER_API_KEY}
   mistral:    {base_url: "https://api.mistral.ai/v1", api_key_env: MISTRAL_API_KEY}
-  github:     {base_url: "https://models.github.ai/inference", api_key_env: GITHUB_TOKEN}
   nvidia:     {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}
 
 models:
-  - {provider: google, model: gemini-2.5-pro, score: 88, context: 1000000, limits: {rpm: 5, rpd: 100}}
-  - {provider: google, model: gemini-2.5-flash, score: 78, context: 1000000, limits: {rpm: 10, rpd: 250}}
-  - {provider: google, model: gemini-2.5-flash-lite, score: 62, context: 1000000, limits: {rpm: 15, rpd: 1000}}
+  # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
+  # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
+  - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}
+  - {provider: google, model: gemini-3.7-flash, score: 84, context: 1000000, limits: {rpm: 10, rpd: 250}}
+  - {provider: google, model: gemini-3.5-flash, score: 82, context: 1000000, limits: {rpm: 10, rpd: 250}}
+  - {provider: google, model: gemini-4-hydrogen, score: 84, context: 1000000, limits: {rpm: 5, rpd: 100}}
+  - {provider: google, model: gemini-3.5-flash-lite, score: 70, context: 1000000, limits: {rpm: 15, rpd: 1000}}
+  - {provider: google, model: gemini-3.1-flash-lite, score: 64, context: 1000000, limits: {rpm: 15, rpd: 1000}}
+  - {provider: google, model: gemma-4-31b-it, score: 66, context: 262144, limits: {rpm: 30, rpd: 14400}}
   - {provider: groq, model: openai/gpt-oss-120b, score: 82, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000}}
   - {provider: groq, model: llama-3.3-70b-versatile, score: 62, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 12000}}
   - {provider: groq, model: llama-3.1-8b-instant, score: 35, context: 131072, limits: {rpm: 30, rpd: 14400, tpm: 6000}}
@@ -41,7 +46,5 @@ models:
   - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free", score: 60, context: 1048576, limits: {rpm: 20, rpd: 50}}
   - {provider: mistral, model: mistral-large-latest, score: 72, context: 131072, limits: {rpm: 60}}
   - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}
-  - {provider: github, model: openai/gpt-4.1, score: 76, context: 128000, limits: {rpm: 10, rpd: 50}}
-  - {provider: github, model: openai/gpt-4.1-mini, score: 64, context: 128000, limits: {rpm: 15, rpd: 150}}
   - {provider: nvidia, model: deepseek-ai/deepseek-v3.1, score: 78, context: 131072, limits: {rpm: 40}}
   - {provider: nvidia, model: meta/llama-3.3-70b-instruct, score: 62, context: 131072, limits: {rpm: 40}}
