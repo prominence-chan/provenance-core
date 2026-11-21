@@ -6,6 +6,7 @@
 
 Ask for a strength, not a model.
 
+[![CI](https://github.com/prominence-chan/provenance-core/actions/workflows/ci.yml/badge.svg)](https://github.com/prominence-chan/provenance-core/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![API](https://img.shields.io/badge/API-OpenAI%20%C2%B7%20Anthropic%20%C2%B7%20Responses-412991)
