@@ -61,6 +61,9 @@ models:
   - {provider: openrouter, model: "nvidia/nemotron-3.5-lightning:free", score: 64, context: 1000000, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "google/gemma-4-26b-a4b-it:free", score: 62, context: 262144, limits: {rpm: 20, rpd: 50}}
   - {provider: openrouter, model: "inclusionai/ling-3.2-flash:free", score: 60, context: 1048576, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "recursive/flint-v1.0:free", score: 68, context: 262144, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "particle-ai/particle-1:free", score: 68, context: 1048576, limits: {rpm: 20, rpd: 50}}
+  - {provider: openrouter, model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", score: 62, context: 256000, limits: {rpm: 20, rpd: 50}}
   - {provider: mistral, model: mistral-large-latest, score: 72, context: 131072, limits: {rpm: 60}}
   - {provider: mistral, model: mistral-small-latest, score: 55, context: 131072, limits: {rpm: 60}}
   - {provider: nvidia, model: deepseek-ai/deepseek-v3.1, score: 78, context: 131072, limits: {rpm: 40}}
@@ -69,6 +72,13 @@ models:
   - {provider: kilo, model: "nvidia/nemotron-3-ultra-550b-a55b:free", score: 84, context: 1000000, limits: {rpm: 10, rpd: 1500}}
   - {provider: kilo, model: "nvidia/nemotron-3.5-super-vl:free", score: 76, context: 1000000, limits: {rpm: 10, rpd: 1500}}
   - {provider: kilo, model: "nvidia/nemotron-3.5-lightning:free", score: 66, context: 1000000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "reflection/beam-free", score: 70, context: 1048576, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "stealth/glyph-cluster", score: 70, context: 256000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "recursive/flint-v1.0:free", score: 68, context: 262144, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "particle-ai/particle-1:free", score: 68, context: 1048576, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "baidu/ernie-5.5-flash-preview:free", score: 72, context: 1024000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", score: 62, context: 256000, limits: {rpm: 10, rpd: 1500}}
+  - {provider: kilo, model: "inclusionai/ling-3.2-flash:free", score: 60, context: 1048576, limits: {rpm: 10, rpd: 1500}}
   # OVHcloud AI Endpoints (2026-11): published as 2 requests/minute per IP per model anonymously (see the provider note)
   - {provider: ovh, model: DeepSeek-V4.1-Flash-1017, score: 84, context: 1048576, limits: {rpm: 2}}
   - {provider: ovh, model: Qwen3.5-397B-A17B, score: 82, context: 262144, limits: {rpm: 2}}
