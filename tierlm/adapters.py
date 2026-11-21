@@ -140,6 +140,27 @@ class UpstreamStream:
         self.usage: dict | None = None
         self.text_chars = 0
         self.model: str | None = None
+        self._thought = False   # inside an inline <thought>...</thought> block (Gemini's OpenAI endpoint sends these)
+        self._pending = ""
+
+    def _split_thoughts(self, c: str):
+        """Inline <thought> blocks become reasoning, the rest stays text; tags split across chunks are handled."""
+        buf, out = self._pending + c, []
+        self._pending = ""
+        while buf:
+            tag = "</thought>" if self._thought else "<thought>"
+            i = buf.find(tag)
+            if i < 0:
+                keep = next((k for k in range(min(len(tag) - 1, len(buf)), 0, -1) if tag.startswith(buf[-k:])), 0)
+                if keep:
+                    self._pending, buf = buf[-keep:], buf[:-keep]
+                if buf:
+                    out.append(("reasoning" if self._thought else "text", buf))
+                break
+            if i:
+                out.append(("reasoning" if self._thought else "text", buf[:i]))
+            buf, self._thought = buf[i + len(tag):], not self._thought
+        return out
 
     async def events(self):
         async for line in self.resp.aiter_lines():
@@ -167,8 +188,10 @@ class UpstreamStream:
                 if isinstance(c, list):
                     c = text_of(c)
                 if c:
-                    self.text_chars += len(c)
-                    yield "text", c
+                    for kind, piece in self._split_thoughts(c):
+                        if kind == "text":
+                            self.text_chars += len(piece)
+                        yield kind, piece
                 for tc in d.get("tool_calls") or []:
                     idx = tc.get("index")
                     if idx is None:   # no index: same id continues a call, anything else starts a new one
