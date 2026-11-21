@@ -3,16 +3,16 @@
 # as published by each provider (check and adjust: they change often). Use `python -m tierlm discover <provider>`
 # to see current model names. Several providers reshuffled their free tiers in late 2026 (Cerebras moved to a trial
 # credit, Groq trimmed chat models), so treat the non-OpenRouter entries as a starting point and re-run discover.
-# Tiers are named for how hot they burn, hottest first. Clients use the tier name as the
-# model: "supernova" is a pooled hyperfrontier model, "blaze" a pooled frontier one, and so on. Floors are calibrated
-# scores (the probe set's hard half is what separates supernova from blaze).
+# Tiers are named from a spark up to a nova, hottest first. Clients use the tier name as the
+# model: "nova" is a pooled hyperfrontier model, "solstice" a pooled frontier one, and so on. Floors are calibrated
+# scores (the probe set's hard half is what separates nova from solstice).
 tiers:
-  - {name: supernova, min_score: 94}   # hyperfrontier: only the very strongest models
-  - {name: blaze,  min_score: 82}   # frontier: solid agentic coding / reasoning
-  - {name: ember,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
-  - {name: cinder, min_score: 0}    # fast / small: classification, routing, cheap bulk work
+  - {name: nova, min_score: 94}   # hyperfrontier: only the very strongest models
+  - {name: solstice,  min_score: 82}   # frontier: solid agentic coding / reasoning
+  - {name: spark,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
+  - {name: ember, min_score: 0}    # fast / small: classification, routing, cheap bulk work
 
-aliases: {corona: supernova, flare: blaze, tier-1: supernova, tier-2: blaze, tier-3: ember, tier-4: cinder, auto: blaze, default: blaze}
+aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: ember, tier-1: nova, tier-2: solstice, tier-3: spark, tier-4: ember, auto: solstice, default: solstice}
 
 providers:
   google:     {base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: GEMINI_API_KEY}

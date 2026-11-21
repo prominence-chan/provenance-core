@@ -12,8 +12,8 @@ from tierlm.server import create_app
 from tierlm.state import State
 
 CAT = {
-    "tiers": [{"name": "supernova", "min_score": 94}, {"name": "blaze", "min_score": 82},
-              {"name": "ember", "min_score": 62}, {"name": "cinder", "min_score": 0}],
+    "tiers": [{"name": "nova", "min_score": 94}, {"name": "solstice", "min_score": 82},
+              {"name": "spark", "min_score": 62}, {"name": "ember", "min_score": 0}],
     "providers": {"a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"},
                   "b": {"base_url": "https://b.test/v1", "api_key_env": "B_KEY"}},
     "models": [{"provider": "a", "model": "top", "score": 96},
@@ -106,7 +106,7 @@ def test_messages_text_round_trip(env):
         "thinking": {"type": "enabled", "budget_tokens": 2000},
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
     assert r.status_code == 200, r.text
-    assert r.headers["x-tierlm-tier"] == "blaze" and r.headers["x-tierlm-model"] == "a/front"
+    assert r.headers["x-tierlm-tier"] == "solstice" and r.headers["x-tierlm-model"] == "a/front"
     j = r.json()
     assert j["type"] == "message" and j["role"] == "assistant" and j["model"] == "claude-sonnet-4-5-20250929"
     assert j["content"] == [{"type": "text", "text": "answer from front"}]
@@ -184,14 +184,14 @@ def test_messages_model_mapping(env, monkeypatch):
         r = c.post("/v1/messages", json={"model": model, "max_tokens": 10, "messages": [{"role": "user", "content": model}]})
         assert r.status_code == 200, r.text
         return r.headers["x-tierlm-tier"]
-    assert tier("claude-opus-4-6[1m]") == "supernova"
-    assert tier("claude-sonnet-4-5-20250929") == "blaze"
-    assert tier("claude-3-5-haiku-20241022") == "ember"
-    assert tier("blaze") == "blaze" and tier("tier-4") == "cinder"
+    assert tier("claude-opus-4-6[1m]") == "nova"
+    assert tier("claude-sonnet-4-5-20250929") == "solstice"
+    assert tier("claude-3-5-haiku-20241022") == "spark"
+    assert tier("solstice") == "solstice" and tier("tier-4") == "ember"
     r = c.post("/v1/messages", json={"model": "b/tiny", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]})
     assert r.headers["x-tierlm-model"] == "b/tiny"
-    monkeypatch.setenv("TIERLM_MAP_OPUS", "ember")
-    assert tier("claude-opus-4-1") == "ember"
+    monkeypatch.setenv("TIERLM_MAP_OPUS", "spark")
+    assert tier("claude-opus-4-1") == "spark"
 
 
 def test_messages_falls_back_down(env):
@@ -199,7 +199,7 @@ def test_messages_falls_back_down(env):
     up.script["top"] = [500]
     r = c.post("/v1/messages", json={"model": "claude-opus-4-5", "max_tokens": 10,
                                      "messages": [{"role": "user", "content": "x"}]})
-    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "blaze"   # supernova failed, fallback "any"
+    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "solstice"   # nova failed, fallback "any"
 
 
 def test_messages_no_capacity_is_overloaded(env):
@@ -270,7 +270,7 @@ def test_messages_auth_count_tokens_and_unknown_endpoints(env, monkeypatch):
     m = c.get("/v1/models", headers={"x-api-key": "sekrit"})
     assert m.status_code == 401   # /v1/models keeps the bearer-only check
     m = c.get("/v1/models", headers={"authorization": "Bearer sekrit"}).json()
-    assert m["has_more"] is False and m["data"][0]["type"] == "model" and m["first_id"] == "supernova"
+    assert m["has_more"] is False and m["data"][0]["type"] == "model" and m["first_id"] == "nova"
 
 
 def test_messages_sticky_session_from_first_user_message(env):
@@ -294,7 +294,7 @@ def test_messages_sticky_session_from_first_user_message(env):
 # ---- OpenAI Responses ------------------------------------------------------------------------------------------------
 def test_responses_text_round_trip_and_previous_response_id(env):
     c, up, _ = env
-    r = c.post("/v1/responses", json={"model": "blaze", "instructions": "Be brief.", "input": "hi",
+    r = c.post("/v1/responses", json={"model": "solstice", "instructions": "Be brief.", "input": "hi",
                                       "max_output_tokens": 500})
     assert r.status_code == 200, r.text
     j = r.json()
@@ -304,13 +304,13 @@ def test_responses_text_round_trip_and_previous_response_id(env):
     assert j["usage"]["input_tokens"] == 11 and j["usage"]["output_tokens"] == 7 and j["usage"]["total_tokens"] == 18
     assert up.last["messages"] == [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}]
     assert up.last["max_tokens"] == 500
-    r2 = c.post("/v1/responses", json={"model": "blaze", "previous_response_id": j["id"], "input": [
+    r2 = c.post("/v1/responses", json={"model": "solstice", "previous_response_id": j["id"], "input": [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "again"}]}]})
     assert r2.status_code == 200
     assert up.last["messages"] == [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "answer from front"},
                                    {"role": "user", "content": "again"}]
     assert c.get(f"/v1/responses/{j['id']}").json()["id"] == j["id"]
-    r3 = c.post("/v1/responses", json={"model": "blaze", "previous_response_id": "resp_nope", "input": "x"})
+    r3 = c.post("/v1/responses", json={"model": "solstice", "previous_response_id": "resp_nope", "input": "x"})
     assert r3.status_code == 400 and r3.json()["error"]["code"] == "previous_response_not_found"
 
 
@@ -319,7 +319,7 @@ def test_responses_tool_round_trip(env):
     up.script["top"] = [{"content": None, "tool_calls": [
         {"id": "call_7", "type": "function", "function": {"name": "shell", "arguments": "{\"command\": [\"ls\"]}"}}]}]
     r = c.post("/v1/responses", json={
-        "model": "supernova", "tool_choice": "auto", "parallel_tool_calls": False,
+        "model": "nova", "tool_choice": "auto", "parallel_tool_calls": False,
         "tools": [{"type": "function", "name": "shell", "description": "run", "strict": False,
                    "parameters": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}}},
                   {"type": "web_search"}],
@@ -349,7 +349,7 @@ def test_responses_custom_and_local_shell_tools(env):
     up.script["front"] = [{"content": None, "tool_calls": [
         {"id": "c1", "type": "function", "function": {"name": "apply_patch", "arguments": "{\"input\": \"*** Begin Patch\"}"}},
         {"id": "c2", "type": "function", "function": {"name": "local_shell", "arguments": "{\"command\": [\"ls\", \"-la\"]}"}}]}]
-    r = c.post("/v1/responses", json={"model": "blaze", "input": "patch it", "tools": [
+    r = c.post("/v1/responses", json={"model": "solstice", "input": "patch it", "tools": [
         {"type": "custom", "name": "apply_patch", "description": "patch",
          "format": {"type": "grammar", "syntax": "lark", "definition": "start: x"}},
         {"type": "local_shell"}]})
@@ -358,7 +358,7 @@ def test_responses_custom_and_local_shell_tools(env):
     assert out[1]["type"] == "local_shell_call" and out[1]["action"]["command"] == ["ls", "-la"]
     assert "start: x" in up.last["tools"][0]["function"]["description"]
     # and they translate back as history
-    r = c.post("/v1/responses", json={"model": "blaze", "input": [
+    r = c.post("/v1/responses", json={"model": "solstice", "input": [
         {"type": "message", "role": "user", "content": "patch it"}, *out,
         {"type": "custom_tool_call_output", "call_id": "c1", "output": "Done!"},
         {"type": "local_shell_call_output", "call_id": "c2", "output": "total 0"}]})
@@ -370,7 +370,7 @@ def test_responses_custom_and_local_shell_tools(env):
 def test_responses_streaming_event_sequence(env):
     c, up, _ = env
     up.script["front"] = [TOOL_CHUNKS]
-    r = c.post("/v1/responses", json={"model": "blaze", "stream": True, "input": "go", "store": False,
+    r = c.post("/v1/responses", json={"model": "solstice", "stream": True, "input": "go", "store": False,
                                       "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}},
                                                 {"type": "function", "name": "ls", "parameters": {"type": "object"}}]})
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
@@ -406,7 +406,7 @@ def test_responses_streaming_event_sequence(env):
 def test_responses_stream_upstream_error_and_unknown_model(env):
     c, up, _ = env
     up.script["front"] = [[{"choices": [{"index": 0, "delta": {"content": "par"}}]}, {"error": {"message": "boom"}}]]
-    evs = parse_sse(c.post("/v1/responses", json={"model": "blaze:none", "stream": True, "input": "x"}).text)
+    evs = parse_sse(c.post("/v1/responses", json={"model": "solstice:none", "stream": True, "input": "x"}).text)
     assert evs[-1][0] == "response.failed" and "boom" in evs[-1][1]["response"]["error"]["message"]
     r = c.post("/v1/responses", json={"model": "gpt-5-codex", "input": "x"})
-    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "supernova"   # unknown -> strongest tier
+    assert r.status_code == 200 and r.headers["x-tierlm-tier"] == "nova"   # unknown -> strongest tier

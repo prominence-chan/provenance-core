@@ -8,8 +8,8 @@ behind one endpoint. tierlm focuses on stability instead of maximum aggregate to
 
 - **Tiers by measured strength.** Every model gets a 0-100 score from `tierlm calibrate`, an auto-graded probe set
   (arithmetic, combinatorics, code tracing, constrained reasoning; difficulty-weighted). Tiers are score bands
-  named for how hot they burn: `supernova` (hyperfrontier, >= 94), `blaze` (frontier, >= 82),
-  `ember` (strong mid, >= 62) and `cinder` (fast/small); configurable, `tier-1`..`tier-4` work as aliases. A request asks
+  named from an ember up to a nova: `nova` (hyperfrontier, >= 94), `solstice` (frontier, >= 82),
+  `spark` (strong mid, >= 62) and `ember` (fast/small); configurable, `tier-1`..`tier-4` work as aliases. A request asks
   for a tier, not a model, and gets a single model's answer unless it explicitly asks for an ensemble.
 - **No silent downgrades.** By default a request is only served inside its tier; it fails over between same-tier
   models (rate limits, errors) and returns 503 rather than quietly answering with a weaker model.
@@ -35,13 +35,13 @@ export GROQ_API_KEY=... CEREBRAS_API_KEY=... GEMINI_API_KEY=... OPENROUTER_API_K
 
 ```bash
 curl localhost:4141/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "blaze",
+  "model": "solstice",
   "messages": [{"role": "user", "content": "How many trailing zeros does 100! have?"}],
   "tierlm": {"ensemble": {"k": 3, "strategy": "majority"}}
 }'
 ```
 
-Any OpenAI client works: base URL `http://127.0.0.1:4141/v1`, model `supernova` / `blaze` / `ember` / `cinder` / `auto` or a
+Any OpenAI client works: base URL `http://127.0.0.1:4141/v1`, model `nova` / `solstice` / `spark` / `ember` / `auto` or a
 concrete catalog id. Set `TIERLM_TOKEN` to require a bearer token on the proxy.
 
 ## Use with Claude Code / Codex
@@ -59,19 +59,19 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN="${TIERLM_TOKEN:-t
 ```
 
 Claude model ids map to tiers by family (dates and suffixes like `[1m]` are ignored); a tier name, alias or catalog
-id (`ANTHROPIC_MODEL=blaze`, `/model ember`) passes straight through.
+id (`ANTHROPIC_MODEL=solstice`, `/model spark`) passes straight through.
 
 | env var | default | |
 |---|---|---|
-| `TIERLM_MAP_OPUS` | `supernova` | opus-family requests |
-| `TIERLM_MAP_SONNET` | `blaze` | sonnet-family requests |
-| `TIERLM_MAP_HAIKU` | `ember` | haiku-family requests (Claude Code's side calls) |
+| `TIERLM_MAP_OPUS` | `nova` | opus-family requests |
+| `TIERLM_MAP_SONNET` | `solstice` | sonnet-family requests |
+| `TIERLM_MAP_HAIKU` | `spark` | haiku-family requests (Claude Code's side calls) |
 | `TIERLM_MAP_DEFAULT` | sonnet mapping | any other model name (also unknown models on `/v1/responses`, where the default is the strongest tier) |
 | `TIERLM_ANTHROPIC_FALLBACK` | `any` | step down through weaker tiers rather than fail |
 | `TIERLM_RESPONSES_FALLBACK` | `down1` | fallback for `/v1/responses` |
 | `TIERLM_ADAPTER_MAX_TOKENS` | `16384` | cap on the agents' max_tokens (they ask for 32k-64k, which free tiers reject or count against tokens/minute) |
 
-A mapping value may end in `:none`, `:down1` or `:any` to set that mapping's fallback (`TIERLM_MAP_OPUS=supernova:none`).
+A mapping value may end in `:none`, `:down1` or `:any` to set that mapping's fallback (`TIERLM_MAP_OPUS=nova:none`).
 If a default tier name isn't in your catalog, the tier at the same position (1st/2nd/3rd) is used.
 `/v1/messages/count_tokens` returns an estimate. With `TIERLM_TOKEN` set, the proxy accepts it as a bearer token
 (`ANTHROPIC_AUTH_TOKEN`) or as `x-api-key` (`ANTHROPIC_API_KEY`). When no model in reach has capacity, the answer is
@@ -80,7 +80,7 @@ If a default tier name isn't in your catalog, the tier at the same position (1st
 **Codex** (`~/.codex/config.toml`, or a profile)
 
 ```toml
-model = "blaze"                 # a tier name, alias or catalog id
+model = "solstice"                 # a tier name, alias or catalog id
 model_provider = "tierlm"
 
 [model_providers.tierlm]
@@ -90,7 +90,7 @@ wire_api = "responses"
 env_key = "TIERLM_TOKEN"        # any non-empty value works if the proxy has no TIERLM_TOKEN
 ```
 
-As a fallback profile instead: put the provider table as above, add `[profiles.free]` with `model = "blaze"` and
+As a fallback profile instead: put the provider table as above, add `[profiles.free]` with `model = "solstice"` and
 `model_provider = "tierlm"`, and run `codex --profile free`. Codex warns that it has no metadata for the model name;
 that is harmless.
 

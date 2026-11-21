@@ -29,7 +29,7 @@ class Target:
 
 def resolve_target(router: Router, name: str, fallback: str) -> Target | None:
     """A tier name / alias (via the catalog) or a concrete catalog id; None if neither. `name` may carry a
-    ":fallback" suffix (e.g. "blaze:none") to override the adapter's default fallback."""
+    ":fallback" suffix (e.g. "solstice:none") to override the adapter's default fallback."""
     if ":" in name and name.rsplit(":", 1)[1] in ("none", "down1", "any"):
         name, fallback = name.rsplit(":", 1)
     tier = router.catalog.resolve_tier(name)

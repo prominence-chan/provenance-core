@@ -3,8 +3,8 @@
   ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=<TIERLM_TOKEN or anything> claude
 
 Requests are translated to OpenAI chat and served through the Router like /v1/chat/completions (one model, no
-ensemble). Claude model ids map to tiers by family: opus -> TIERLM_MAP_OPUS (default the strongest tier, "supernova"),
-sonnet -> TIERLM_MAP_SONNET ("blaze"), haiku -> TIERLM_MAP_HAIKU ("ember"), anything else -> TIERLM_MAP_DEFAULT
+ensemble). Claude model ids map to tiers by family: opus -> TIERLM_MAP_OPUS (default the strongest tier, "nova"),
+sonnet -> TIERLM_MAP_SONNET ("solstice"), haiku -> TIERLM_MAP_HAIKU ("spark"), anything else -> TIERLM_MAP_DEFAULT
 (the sonnet mapping). A tier name, alias or catalog id passes through. Values may end in ":none|down1|any" to set the
 fallback; the adapter default is TIERLM_ANTHROPIC_FALLBACK ("any": step down rather than fail a coding agent).
 
@@ -26,7 +26,7 @@ from .adapters import (Target, UpstreamStream, authorized, clamp_max_tokens, cle
                        parse_args, resolve_target, safe_id, session_key, text_of)
 from .router import NoCapacity, Router
 
-FAMILY_DEFAULTS = {"opus": ("supernova", 0), "sonnet": ("blaze", 1), "haiku": ("ember", 2)}   # (tier, position)
+FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("spark", 2)}   # (tier, position)
 
 
 def error(status: int, kind: str, message: str) -> JSONResponse:
