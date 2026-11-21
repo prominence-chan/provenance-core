@@ -106,17 +106,17 @@ def text_of(content) -> str:
     return "".join(p.get("text", "") for p in content if isinstance(p, dict))
 
 
-async def complete(router: Router, body: dict, target: Target, session: str):
+async def complete(router: Router, body: dict, target: Target, session: str, web: bool = False):
     if target.concrete:
         m = router.catalog.models[target.concrete]
         try:
             return await router.call(m, body), m
         except Exception as e:  # noqa: BLE001
             raise NoCapacity(str(e)) from e
-    return await router.complete(body, target.tier, session, target.fallback)
+    return await router.complete(body, target.tier, session, target.fallback, web=web)
 
 
-async def open_stream(router: Router, body: dict, target: Target, session: str):
+async def open_stream(router: Router, body: dict, target: Target, session: str, web: bool = False):
     if target.concrete:
         m = router.catalog.models[target.concrete]
         try:
@@ -125,7 +125,7 @@ async def open_stream(router: Router, body: dict, target: Target, session: str):
             raise NoCapacity(str(e)) from e
         router.state.record(m, estimate_tokens(body))
         return resp, m, t0
-    return await router.stream(body, target.tier, session, target.fallback)
+    return await router.stream(body, target.tier, session, target.fallback, web=web)
 
 
 class UpstreamStream:

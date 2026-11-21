@@ -43,6 +43,8 @@ class Provider:
     no_auth: bool = False         # usable without a key; a key (if api_key_env is set and present) is still sent
     pool: Limits = field(default_factory=Limits)
     shared_tpd: bool = False
+    type: str = "openai"          # "openai" (chat completions over HTTP) or "chatgpt_web" (see chatgpt_web.py)
+    options: dict = field(default_factory=dict)   # type-specific settings (the provider's `web:` block)
 
     @property
     def base_url(self) -> str:
@@ -54,6 +56,9 @@ class Provider:
 
     @property
     def usable(self) -> bool:
+        if self.type == "chatgpt_web":   # off unless turned on (enabled: true, or PCORE_CHATGPT_WEB=1)
+            from .chatgpt_web import enabled
+            return enabled(self.options)
         if any(not os.environ.get(v) for v in _VAR.findall(self.url)):
             return False
         return self.no_auth or bool(self.api_key)
@@ -106,6 +111,9 @@ class Catalog:
     def tier_index(self, name: str) -> int:
         return [t for t, _ in self.tiers].index(name)
 
+    def is_web(self, m: Model) -> bool:
+        return self.providers[m.provider].type == "chatgpt_web"
+
     def models_in(self, tier: str, usable_only: bool = True) -> list[Model]:
         out = [m for m in self.models.values() if self.tier_of(m) == tier]
         if usable_only:
@@ -122,7 +130,9 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
             key_env = None
         providers[name] = Provider(name=name, url=p["base_url"], api_key_env=key_env, headers=p.get("headers", {}),
                                    no_auth=key_env is None or str(p.get("auth", "")).lower() == "none",
-                                   pool=Limits(**(p.get("pool") or {})), shared_tpd=bool(p.get("shared_tpd")))
+                                   pool=Limits(**(p.get("pool") or {})), shared_tpd=bool(p.get("shared_tpd")),
+                                   type=str(p.get("type") or "openai"),
+                                   options={**(p.get("web") or {}), **({"enabled": True} if p.get("enabled") else {})})
     models = {}
     for m in data["models"]:
         lim = Limits(**(m.get("limits") or {}))

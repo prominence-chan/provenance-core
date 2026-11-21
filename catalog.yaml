@@ -35,8 +35,18 @@ providers:
   sambanova:  {base_url: "https://api.sambanova.ai/v1", api_key_env: SAMBANOVA_API_KEY}
   cohere:     {base_url: "https://api.cohere.ai/compatibility/v1", api_key_env: COHERE_API_KEY}
   inception:  {base_url: "https://api.inceptionlabs.ai/v1", api_key_env: INCEPTION_API_KEY}
+  # ChatGPT web: your own signed-in chatgpt.com as a stateless completion engine, one new temporary chat per request,
+  # driven through a visible Chrome window on its own profile. OFF unless PCORE_CHATGPT_WEB=1 (or `enabled: true`
+  # here). Sign in once with `provenance-core weblogin`. Against OpenAI's terms for the web app: the account can be
+  # limited or banned, so it is slow on purpose (one request at a time, a pause between requests, a daily cap).
+  # Only /v1/responses tier requests (Provenance, Codex) and requests naming the model use it; see docs/TECHNICAL.md.
+  chatgpt-web: {type: chatgpt_web, base_url: "https://chatgpt.com", api_key_env: none,
+                web: {daily_cap: 200, min_gap_s: 4, max_gap_s: 9, endpoints: [responses]}}
 
 models:
+  # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
+  # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
+  - {provider: chatgpt-web, model: luna, score: 95, context: 64000}
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}

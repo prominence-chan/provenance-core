@@ -290,14 +290,16 @@ def register(app, router: Router, token: str | None):
         body, convo, custom, shell = to_openai(req, history)
         session = session_key(request, target, convo)
         single = req.get("parallel_tool_calls") is False
+        if single:
+            body["_single_tool_call"] = True   # a hint for the chatgpt_web prompt; dropped before any HTTP provider
         rid = "resp_" + secrets.token_hex(16)
         try:
             if req.get("stream"):
-                resp, m, t0 = await open_stream(router, body, target, session)
+                resp, m, t0 = await open_stream(router, body, target, session, web=router.web_ok("responses"))
                 gen = _stream(router, store, resp, m, t0, rid, req, model_name, body, convo, custom, shell, single)
                 return StreamingResponse(gen, media_type="text/event-stream",
                                          headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
-            data, m = await complete(router, body, target, session)
+            data, m = await complete(router, body, target, session, web=router.web_ok("responses"))
         except NoCapacity as e:
             return error(503, str(e), "server_error", "no_capacity")
         output, finish = items_from_chat(data, custom, shell, single)

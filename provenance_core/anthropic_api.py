@@ -234,11 +234,11 @@ def register(app, router: Router, token: str | None):
         single = single_call(req)
         try:
             if req.get("stream"):
-                resp, m, t0 = await open_stream(router, body, target, session)
+                resp, m, t0 = await open_stream(router, body, target, session, web=router.web_ok("messages"))
                 return StreamingResponse(_stream(router, resp, m, t0, model_name, count_tokens(req), single),
                                          media_type="text/event-stream",
                                          headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"})
-            data, m = await complete(router, body, target, session)
+            data, m = await complete(router, body, target, session, web=router.web_ok("messages"))
         except NoCapacity as e:
             # 529 overloaded: Claude Code retries it with backoff
             return error(529, "overloaded_error", str(e))

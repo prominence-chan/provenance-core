@@ -97,14 +97,54 @@ def create_app(catalog_path: str | None = None, scores_path: str | None = None, 
                 data, members = await router.ensemble(body, tier, int(ens.get("k", 3)), ens.get("strategy", "judge"))
                 return JSONResponse(data, headers={"X-PCore-Model": ",".join(m.id for m in members)})
             if body.get("stream"):
-                resp, m, t0 = await router.stream(body, tier, session, fallback)
+                resp, m, t0 = await router.stream(body, tier, session, fallback, web=router.web_ok("chat"))
                 return _stream(resp, m, router, t0)
-            data, m = await router.complete(body, tier, session, fallback)
+            data, m = await router.complete(body, tier, session, fallback, web=router.web_ok("chat"))
             return JSONResponse(data, headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
         except NoCapacity as e:
             raise HTTPException(503, str(e)) from e
         except (RuntimeError, httpx.HTTPError) as e:   # a concrete model failed: report it instead of a bare 500
             raise HTTPException(429 if "rate limited" in str(e) else 502, str(e)[:300]) from e
+
+    # ---- chatgpt_web provider: status, live check, freeing the profile for `weblogin` ----------------------------
+    def web_provider() -> str | None:
+        return next((n for n, p in router.catalog.providers.items() if p.type == "chatgpt_web"), None)
+
+    def web_models(name: str):
+        return [m for m in router.catalog.models.values() if m.provider == name]
+
+    @app.get("/chatgpt-web/status")
+    async def web_status(probe: int = 0, authorization: str | None = Header(None)):
+        check(authorization)
+        name = web_provider()
+        if not name:
+            raise HTTPException(404, "no chatgpt_web provider in the catalog")
+        on = router.catalog.providers[name].usable
+        b = router.bridge(name)
+        if probe and on:   # opens a fresh temporary chat, sends nothing
+            st = await b.check(next((m.model for m in web_models(name)), "auto"))
+            if st["ok"]:
+                for m in web_models(name):
+                    router.state.health.pop(m.id, None)
+        else:
+            st = b.status()
+        return {"enabled": on, **st, "models": [
+            {"id": m.id, "tier": router.catalog.tier_of(m), "score": m.score, "calibrated": m.calibrated,
+             "available": router.state.available(m)} for m in web_models(name)]}
+
+    @app.post("/chatgpt-web/release")
+    async def web_release(reset: int = 0, authorization: str | None = Header(None)):
+        check(authorization)
+        name = web_provider()
+        if not name:
+            raise HTTPException(404, "no chatgpt_web provider in the catalog")
+        b = router.bridge(name)
+        await b.release()
+        if reset:   # after a fresh sign-in: forget the block and the router's cooldown
+            b.reset()
+            for m in web_models(name):
+                router.state.health.pop(m.id, None)
+        return {"released": True, **b.status()}
 
     anthropic_api.register(app, router, token)
     responses_api.register(app, router, token)

@@ -41,6 +41,7 @@ class Router:
         self.catalog = catalog
         self.state = state or State()
         self.client = client or httpx.AsyncClient(timeout=timeout)
+        self.bridges: dict = {}   # provider name -> chatgpt_web.Bridge (made on first use)
 
     # ---- selection -------------------------------------------------------------------------------------------
     def tiers_for(self, tier: str, fallback: str) -> list[str]:
@@ -52,13 +53,31 @@ class Router:
             return names[i:i + 2]
         return [tier]
 
-    def candidates(self, tier: str, tokens: int, session: str | None = None, fallback: str = "none") -> list[Model]:
+    def bridge(self, provider: str):
+        from .chatgpt_web import Bridge
+        if provider not in self.bridges:
+            p = self.catalog.providers[provider]
+            self.bridges[provider] = Bridge(p.base_url, p.options)
+        return self.bridges[provider]
+
+    def web_ok(self, endpoint: str) -> bool:
+        """May tier requests arriving on this front end (responses / messages / chat) use a chatgpt_web provider?"""
+        from .chatgpt_web import DEFAULTS
+        return any(endpoint in (p.options.get("endpoints") or DEFAULTS["endpoints"])
+                   for p in self.catalog.providers.values() if p.type == "chatgpt_web")
+
+    def candidates(self, tier: str, tokens: int, session: str | None = None, fallback: str = "none",
+                   web: bool = False) -> list[Model]:
+        """`web`: include chatgpt_web models. Off by default so ensembles, calibration and anything that didn't ask
+        never reach the web bridge; the front ends pass it per the provider's `endpoints`."""
         out: list[Model] = []
         sticky = self.state.sticky(session)
         for t in self.tiers_for(tier, fallback):
             ranked: list[Choice] = []
             for m in self.catalog.models_in(t):
                 if not self.state.available(m) or m.context < tokens:
+                    continue
+                if not web and self.catalog.is_web(m):
                     continue
                 head = self.state.headroom(m, tokens)
                 if head <= 0:
@@ -76,7 +95,9 @@ class Router:
     # ---- calling ---------------------------------------------------------------------------------------------
     async def call(self, m: Model, body: dict, stream: bool = False):
         p = self.catalog.providers[m.provider]
-        payload = {**body, "model": m.model, "stream": stream}
+        if p.type == "chatgpt_web":
+            return await self._web_call(m, body, stream)
+        payload = {**{k: v for k, v in body.items() if not k.startswith("_")}, "model": m.model, "stream": stream}
         headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
         t0 = time.time()
         req = self.client.build_request("POST", f"{p.base_url}/chat/completions", json=payload, headers=headers)
@@ -100,11 +121,32 @@ class Router:
         self.state.record(m, used)
         return data
 
+    async def _web_call(self, m: Model, body: dict, stream: bool, wait: float | None = None):
+        """A chatgpt_web model: the whole reply is read from the page first, so a failure (login wall, challenge,
+        closed window, bad tool call) surfaces here and the caller can still fail over."""
+        from .chatgpt_web import BufferedStream, WebSkip, WebUnavailable
+        t0 = time.time()
+        try:
+            data = await self.bridge(m.provider).complete(m.model, body, model_id=m.id, wait=wait)
+        except WebUnavailable as e:
+            self.state.failure(m, retry_after=max(1.0, e.cooldown), rate_limited=True)
+            raise RuntimeError(f"{m.id}: unavailable: {e.reason}") from e
+        except WebSkip as e:
+            raise RuntimeError(f"{m.id}: skipped: {e}") from e
+        except Exception as e:  # noqa: BLE001
+            self.state.failure(m)
+            raise RuntimeError(f"{m.id}: {e}") from e
+        self.state.success(m, (time.time() - t0) * 1000)
+        if stream:
+            return BufferedStream(data), t0
+        self.state.record(m, data["usage"]["total_tokens"])
+        return data
+
     async def complete(self, body: dict, tier: str, session: str | None = None, fallback: str = "none",
-                       attempts: int = 4) -> tuple[dict, Model]:
+                       attempts: int = 4, web: bool = False) -> tuple[dict, Model]:
         tokens = estimate_tokens(body)
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback)[:attempts]:
+        for m in self.candidates(tier, tokens, session, fallback, web)[:attempts]:
             try:
                 data = await self.call(m, body)
                 self.state.remember(session, m.id)
@@ -113,10 +155,11 @@ class Router:
                 errors.append(str(e)[:200])
         raise NoCapacity(f"no model in {tier} (fallback={fallback}) could serve this: {errors or 'none available'}")
 
-    async def stream(self, body: dict, tier: str, session: str | None = None, fallback: str = "none"):
+    async def stream(self, body: dict, tier: str, session: str | None = None, fallback: str = "none",
+                     web: bool = False):
         tokens = estimate_tokens(body)
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback)[:4]:
+        for m in self.candidates(tier, tokens, session, fallback, web)[:4]:
             try:
                 resp, t0 = await self.call(m, body, stream=True)
             except Exception as e:  # noqa: BLE001

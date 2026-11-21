@@ -93,14 +93,15 @@ def grade(text: str, pattern: str) -> bool:
 
 
 async def score_model(router: Router, m, concurrency: int = 3) -> tuple[float, int]:
-    sem = asyncio.Semaphore(concurrency)
+    web = router.catalog.is_web(m)   # one at a time through the page, each probe waiting its turn
+    sem = asyncio.Semaphore(1 if web else concurrency)
     total = sum(w for _, _, w in PROBES)
 
     async def one(prompt, pattern, w):
         async with sem:
             try:
-                d = await router.call(m, {"messages": [{"role": "user", "content": prompt}], "temperature": 0,
-                                          "max_tokens": 8192})
+                body = {"messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 8192}
+                d = await (router._web_call(m, body, False, wait=3600) if web else router.call(m, body))
                 return w if grade(d["choices"][0]["message"].get("content") or "", pattern) else 0.0
             except Exception:  # noqa: BLE001
                 return None
@@ -120,6 +121,8 @@ async def calibrate(router: Router, out_path: str | Path, only: list[str] | None
             continue
         if not router.catalog.providers[m.provider].usable:
             continue
+        if router.catalog.is_web(m) and not (only and m.id in only):
+            continue   # the web bridge is only calibrated when named: calibrate --only chatgpt-web/<model>
         s, n = await score_model(router, m)
         if s >= 0:
             existing[m.id] = {"score": s, "probes": n}

@@ -3,3 +3,4 @@ uvicorn
 httpx
 pyyaml
 pytest
+playwright   # only for the chatgpt-web provider (drives your installed Google Chrome; no browser download needed)
