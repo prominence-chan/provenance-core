@@ -136,7 +136,10 @@ def items_to_messages(items) -> tuple[list[str], list[dict]]:
 def tools_to_openai(tools) -> tuple[list[dict], set[str], bool]:
     """-> (OpenAI tools, names of custom/freeform tools, whether local_shell is offered)"""
     out, custom, shell = [], set(), False
-    for t in tools or []:
+    flat = []
+    for t in tools or []:   # namespace tools (e.g. a multi-agent tool group) carry their function tools nested
+        flat += (t.get("tools") or []) if t.get("type") == "namespace" else [t]
+    for t in flat:
         kind = t.get("type")
         if kind == "function":
             out.append({"type": "function", "function": {"name": t["name"], "description": t.get("description") or "",
