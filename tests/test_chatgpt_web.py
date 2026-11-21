@@ -43,12 +43,14 @@ def test_prompt_holds_the_whole_request():
         "tools": TOOLS, "_single_tool_call": True}
     prompt, tools, rules = cw.render_prompt(body)
     assert set(tools) == {"shell", "apply_patch"} and rules == {"single": True, "must": False, "only": None}
-    for piece in ("You are Provenance.", "## shell", '"required":["command"]', "<<<user>>>\nlist the files",
+    for piece in ("You are Provenance.", "type shell = (_: {\n  command: string[],\n}) => any;", "<<<user>>>\nlist the files",
                   '```tool_call\n{"name": "shell", "arguments": {"command": ["ls"]}}\n```',
-                  "<<<tool result: shell>>>\na.py\nb.py", "<<<user>>>\nand now?", "At most one tool_call block"):
+                  "<<<tool result: shell>>>\na.py\nb.py", "<<<user>>>\nand now?", "At most one tool block",
+                  "run on OpenAI's servers", "Shorthand for `apply_patch` (body = `input`)"):
         assert piece in prompt
+    assert prompt.rstrip().endswith("give the final answer with no block.")      # the rules again, next to the reply
     # the model's own earlier call, rendered in the protocol, parses back
-    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>"):prompt.index("<<<tool result")], tools)
+    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n"):prompt.index("<<<tool result:")], tools)
     assert calls[0]["name"] == "shell" and json.loads(calls[0]["arguments"]) == {"command": ["ls"]}
 
 
@@ -60,6 +62,67 @@ def test_prompt_tool_choice_and_images():
     assert rules["must"] and rules["only"] == "shell" and "must call the tool `shell`" in p
     with pytest.raises(cw.WebSkip):
         cw.render_prompt({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:..."}}]}]})
+
+
+EXEC = {"type": "function", "function": {"name": "exec_command", "description": "Runs a command in a PTY.\nReturns output.",
+        "parameters": {"type": "object", "required": ["cmd"], "properties": {
+            "cmd": {"type": "string", "description": "Shell command to execute."},
+            "workdir": {"type": "string"}, "yield_time_ms": {"type": "number"},
+            "sandbox_permissions": {"type": "string", "enum": ["use_default", "require_escalated"]},
+            "prefix_rule": {"type": "array", "items": {"type": "string"}}}}}}
+STDIN = {"type": "function", "function": {"name": "write_stdin", "description": "", "parameters": {
+         "type": "object", "required": ["session_id"], "properties": {"session_id": {"type": "number"}, "chars": {"type": "string"}}}}}
+
+
+def test_prompt_for_a_codex_request():
+    """What Provenance / Codex sends: a prompt that speaks of function calls and an apply_patch tool, and exec_command."""
+    patch = "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: a.py\n@@\n-x = \"1\"\n+x = \"2\"\n*** End Patch\nEOF"
+    body = {"messages": [
+        {"role": "system", "content": "You are a coding agent. Use the `apply_patch` tool to edit files."},
+        {"role": "user", "content": "fix it"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "exec_command", "arguments": json.dumps({"cmd": "ls"})}},
+            {"id": "c2", "type": "function", "function": {"name": "exec_command", "arguments": json.dumps({"cmd": patch})}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "a.py"}, {"role": "tool", "tool_call_id": "c2", "content": "Done"}],
+        "tools": [EXEC, STDIN]}
+    prompt, tools, rules = cw.render_prompt(body)
+    for piece in ("no separate apply_patch tool here: to edit a file, run `apply_patch` as a shell command through exec_command",
+                  "Shorthand for `exec_command` (body = `cmd`)",
+                  "// Runs a command in a PTY.\n// Returns output.\ntype exec_command = (_: {\n  // Shell command to execute.\n  cmd: string,\n",
+                  '  sandbox_permissions?: "use_default" | "require_escalated",\n  prefix_rule?: string[],\n}) => any;',
+                  "type write_stdin = (_: {\n  session_id: number,\n  chars?: string,\n}) => any;",
+                  '```tool_call\n{"name": "exec_command", "arguments": {"cmd": "ls"}}\n```',
+                  "```exec_command\n" + patch + "\n```",           # its earlier multi-line command, shown unescaped
+                  "or the ```exec_command shorthand for a command"):
+        assert piece in prompt
+    assert "write_stdin` (body" not in prompt                      # no free-text argument: no shorthand
+    # both of its earlier calls parse back to what they were
+    text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n"):prompt.index("<<<tool result:")], tools)
+    assert [json.loads(c["arguments"]) for c in calls] == [{"cmd": "ls"}, {"cmd": patch}]
+
+
+def test_ts_types():
+    assert cw.ts_type({"type": ["string", "null"]}) == "string | null"
+    assert cw.ts_type({"anyOf": [{"type": "integer"}, {"type": "array", "items": {"enum": ["a", "b"]}}]}) == 'number | ("a" | "b")[]'
+    assert cw.ts_type({"type": "object"}) == "{}" and cw.ts_type({}) == "any"
+    assert cw.ts_type({"type": "object", "properties": {"a-b": {"type": "boolean", "default": False}}}) == '{\n  // default: false\n  "a-b"?: boolean,\n}'
+
+
+def test_parse_shorthand_blocks():
+    tools = {t["function"]["name"]: t["function"]["parameters"] for t in (EXEC, STDIN)}
+    md = ("Patching.\n\n```exec_command\ncat > a.txt <<'EOF'\n{\"k\": \"v\"}\n  two\nEOF\n```\n\n"
+          '```tool_call\n{"name": "write_stdin", "arguments": {"session_id": 3}}\n```\nand then it printed ok')
+    text, calls = cw.parse_reply(md, tools)
+    assert text == "Patching." and [c["name"] for c in calls] == ["exec_command", "write_stdin"]
+    assert json.loads(calls[0]["arguments"]) == {"cmd": "cat > a.txt <<'EOF'\n{\"k\": \"v\"}\n  two\nEOF"}
+    # JSON inside the shorthand block is taken as arguments when it is exactly that
+    for inner in ('{"cmd": "ls", "workdir": "/tmp"}', '{"name": "exec_command", "arguments": {"cmd": "ls", "workdir": "/tmp"}}'):
+        assert json.loads(cw.parse_reply(f"```exec_command\n{inner}\n```", tools)[1][0]["arguments"]) == {"cmd": "ls", "workdir": "/tmp"}
+    assert json.loads(cw.parse_reply('```exec_command\n{"a": 1}\n```', tools)[1][0]["arguments"]) == {"cmd": '{"a": 1}'}
+    assert cw.parse_reply("```write_stdin\n3\n```", tools) == ("```write_stdin\n3\n```", [])     # not a shorthand tool
+    assert cw.parse_reply("```bash\nls\n```", tools)[1] == []                                    # an ordinary code block
+    with pytest.raises(cw.Malformed, match="empty"):
+        cw.parse_reply("```exec_command\n   \n```", tools)
 
 
 def test_parse_tool_calls():
@@ -378,6 +441,38 @@ def test_page_tool_call_and_repair(mock, tmp_path):
     assert len(mock.sent) == 3 and "not valid JSON" in mock.sent[2]["prompt"] and "```tool_call" in mock.sent[0]["prompt"]
 
 
+def test_stalled_replies():
+    for t in ("I’m ready to fix it, but the local shell execution interface isn't available to me in this turn. Please retry with the tool enabled.",
+              "I don't have access to your filesystem.", "I can't run commands here, so here is what to do:",
+              "I'm unable to execute the tests directly.",
+              "`rg` isn’t installed, so I’ll use standard shell utilities to inspect the project.\n\nThe initial inspection command "
+              "hit an environment error. I haven't changed any files yet. Please retry the shell inspection so I can continue.",
+              "Next, I'll patch the config.", "Let me check the tests first."):
+        assert cw.stalled(t, SCHEMAS), t
+    for t in ("Fixed: `mean()` used floor division. Tests pass.", "Which of the two configs should I keep?", "Done. Run `make deploy` when you want it live.",
+              "The endpoint is not available before v2. " + "x" * 1600):
+        assert not cw.stalled(t, SCHEMAS), t
+    assert not cw.stalled("I can't run commands here.", {})
+
+
+@browser
+def test_page_nudges_a_model_that_says_it_has_no_tools(mock, tmp_path):
+    exec_tools = [EXEC]
+    mock.replies = ["<p>The shell interface isn't available to me in this turn.</p>",
+                    "<p>Running it.</p>" + code("exec_command", "python3 test_calc.py"),
+                    "<p>I can't run this: the sandbox is read-only.</p>", "<p>I can't run this: the sandbox is read-only.</p>"]
+
+    async def go(b):
+        body = {"messages": [{"role": "user", "content": "fix the test"}], "tools": exec_tools}
+        return await b.complete("luna", body), await b.complete("luna", body)
+    d1, d2 = scenario(mock, tmp_path, go)
+    msg = d1["choices"][0]["message"]
+    assert msg["content"] == "Running it." and json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"cmd": "python3 test_calc.py"}
+    assert d1["pcore"]["web"]["nudged"] and "just text in your reply" in mock.sent[1]["prompt"] and "```exec_command" in mock.sent[1]["prompt"]
+    # a model that means it is asked once and then taken at its word
+    assert d2["pcore"]["web"]["nudged"] and d2["choices"][0]["message"]["content"].startswith("I can't run this") and len(mock.sent) == 4
+
+
 @browser
 def test_page_gives_up_after_one_repair(mock, tmp_path):
     mock.replies = [code("tool_call", '{"name": "nope", "arguments": {}}')]
@@ -421,6 +516,17 @@ def test_page_temp_toggle_model_picker_and_gap(mock, tmp_path):
     assert [s["model"] for s in mock.sent] == ["Nimbus", "Luna"] and all(s["temp"] for s in mock.sent)
     assert d["pcore"]["web"]["model_slug"] == "gpt-6-nimbus" and err.kind == "model"
     assert len(sleeps) == 2 and all(2 < s <= 3 for s in sleeps)      # a pause before the 2nd and 3rd request
+
+
+@browser
+def test_page_without_a_model_picker(mock, tmp_path):
+    """The Free plan has one model and no picker: a named model is whatever the account answers with."""
+    mock.state.update(picker=False)
+
+    async def go(b):
+        return await b.complete("luna", dict(USER)), await b.check("luna")
+    d, chk = scenario(mock, tmp_path, go)
+    assert d["choices"][0]["message"]["content"] == "ok" and len(mock.sent) == 1 and chk["ok"] and chk["page_model"] is None
 
 
 @browser

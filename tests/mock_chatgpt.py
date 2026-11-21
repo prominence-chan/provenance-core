@@ -33,6 +33,7 @@ let model = S.model;
 const $ = id => document.getElementById(id);
 function chrome() {
   $('sw').textContent = 'ChatGPT ' + model;
+  if (S.picker === false) $('sw').style.display = 'none';   // the Free plan: one model, no picker
   $('acct').innerHTML = S.login ? '<button data-testid="accounts-profile-button" aria-label="Open profile menu">YW</button>'
                                 : '<button data-testid="login-button">Log in</button>';
   $('temphead').textContent = temp ? 'Temporary Chat' : 'What can I help with?';
@@ -90,7 +91,7 @@ def tool_call(name: str, arguments: dict) -> str:
 
 class Mock:
     """state: login, temp (temporary chat works via the url), temp_toggle (a toggle button exists), challenge,
-    limit, model / models (the picker), delay (ms before the reply lands). replies: html strings or callables
+    limit, model / models (the picker; picker=False hides it), delay (ms before the reply lands). replies: html strings or callables
     (prompt -> html), used in order (the last one repeats); an item may be {"error": "..."}."""
 
     def __init__(self):

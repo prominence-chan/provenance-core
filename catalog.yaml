@@ -48,7 +48,7 @@ providers:
 models:
   # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
   # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
-  - {provider: chatgpt-web, model: luna, score: 95, context: 64000}
+  - {provider: chatgpt-web, model: luna, score: 93, context: 64000}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}

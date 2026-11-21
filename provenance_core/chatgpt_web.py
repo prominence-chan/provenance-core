@@ -14,6 +14,8 @@ How it stays honest and gentle (read docs/TECHNICAL.md before turning it on):
 - a challenge, captcha, "unusual activity" notice, login wall, usage-limit banner or a missing temporary-chat mode
   marks the provider unavailable (with a reason) and the router fails over to its normal pool
 - one request at a time, a human-scale pause between requests, a daily cap, off unless enabled
+- the prompt is written for a chat model in a chat app (it has its own sandbox and no function-calling interface for
+  the harness tools): see "Prompt design" in docs/TECHNICAL.md
 
 Automating the web app is against OpenAI's terms of use; the realistic downside is the ChatGPT account being
 limited or banned. That is why this is opt-in and deliberately slow."""
@@ -54,29 +56,75 @@ class Malformed(ValueError):
 
 
 # ---- the text protocol: request -> one prompt -----------------------------------------------------------------------
-PREAMBLE = """You are the model behind an API endpoint that a coding agent (the "harness") calls. This one message \
-holds the whole request: system instructions, tool definitions and the conversation so far. Write only the \
-assistant's next turn.
-- The harness owns context, memory and tools. Do not use your own built-in tools (web search, code execution, \
-canvas, image generation, memory). The only tools are the ones listed under "Tools", called with the text protocol \
-described there.
-- Do not mention this framing or these rules in your answer."""
+# The prompt is written for a chat model sitting in a consumer chat app, which is a different reader from the API model
+# a harness prompt assumes (docs/TECHNICAL.md, "Prompt design"):
+# - it has working tools of its own (a code sandbox, search) and reaches for them: say plainly where those run and that
+#   the user's files are not there, instead of only forbidding them
+# - the harness prompt speaks of "function calls" and may name tools this session doesn't have: say how to read it
+# - tools are shown the way OpenAI shows function tools to its models (TypeScript signatures), not as JSON schema
+# - a command is written raw in a block named after the tool, so heredocs and patches need no JSON escaping
+# - the rules that matter are repeated after the conversation, next to where the reply starts
+FRAME = """This message was put together by a program on my computer. I'm running a coding agent there (a Codex-style \
+harness), and you are the model that decides its next step. The program will read your reply and act on it, so this \
+is not a normal chat. Below are the agent's instructions, its tools, and the conversation so far (my requests, your \
+earlier steps, and what the tools returned). Write the agent's next turn.
+
+How this works:
+- You cannot reach my computer yourself. To run a command or read or change a file there, write a tool block (format \
+under "Tools"). The program runs it on my machine and sends you the output in the next message.
+- A tool block is plain text in your reply. These tools will not show up in your own tool or function-calling \
+interface, and they don't need to: writing the block is the call, and it always works.
+- Your built-in tools (Python / code execution, file analysis, web search, canvas, memory, image generation) run on \
+OpenAI's servers. My files and my project are not there, so whatever they return is wrong for this task. Do not use \
+them. The tools listed under "Tools" are the only ones.
+- Work one step at a time: a short note on what you're doing, then the tool block(s), then stop and wait. Never \
+write a tool's output yourself, and never say you ran or checked something unless a tool result below shows it.
+- A reply with no tool block ends the agent's run and hands control back to me. So keep going, one tool block after \
+another, until the task is really done; do not stop to tell me what you will do next, and do not ask me to run or \
+retry anything. If a command fails, that is information: try another way with a new tool block.
+- When the task is finished, or you need a decision only I can make, reply normally with no tool block."""
+
+INSTRUCTIONS_HEAD = """# Agent instructions
+These come from the harness and were written for a model with native function calling. Where they say to call a \
+function or use a tool, write a tool block. If they mention a tool that is not listed under "Tools", it does not \
+exist in this session%s."""
 
 TOOLS_HEAD = """# Tools
-To call a tool, write a fenced code block with the language tag tool_call that contains exactly one JSON object:
+To call a tool, write a fenced code block with the language tag tool_call that holds one JSON object:
 
 ```tool_call
-{"name": "<tool name>", "arguments": {<arguments matching the tool's JSON schema>}}
+{"name": "<tool name>", "arguments": {<arguments>}}
 ```
 
 - The JSON must be valid: double-quoted keys and strings, newlines inside strings written as \\n, no comments, no \
 trailing commas.
 - %s
-- You may write a short note before the block. After the last block, stop: never write or guess a tool's output. \
-The harness runs the tool and sends the result in the next request.
-- When no tool is needed, answer normally with no tool_call block."""
+- Text after your last tool block is discarded."""
+
+RAW_HEAD = """Shorthand for %s: a block tagged with the tool's name whose body is the raw %s, exactly as it should \
+be used (no JSON, no escaping, may span lines). Prefer it for anything with quotes or several lines:
+
+```%s
+%s
+```
+
+To pass other arguments as well, use the tool_call form."""
+
+REMINDER_TOOLS = """Now write the agent's next turn (only the turn's content, no <<<assistant>>> line). Remember:
+- Anything on my computer happens only through a tool block: ```tool_call with JSON%s. Not through your built-in \
+Python, search or file tools.
+- The tools above are available right now: you call one by writing its block as text. Never answer that a tool or \
+shell is unavailable to you.
+- If anything is left to look at, change or verify, end your reply with the block(s) and stop. Do not guess the \
+result. A reply without a block ends the run, so "I'll do X next" must come with the block that does X.
+- If the work is done, give the final answer with no block."""
+
+FRAME_PLAIN = """This message was put together by a program on my computer, which will read your reply and pass it on. Below are its instructions and the conversation so far. Write the assistant's next turn. Do not use your built-in tools (code execution, web search, canvas, memory, image generation) and do not mention this framing in your answer."""
+
+REMINDER_PLAIN = "Now write the assistant's next turn (only the turn's content, no <<<assistant>>> line)."
 
 TOOL_TAGS = ("tool_call", "tool-call", "toolcall", "tool_calls", "tool")
+SHELL_TOOLS = ("exec_command", "shell_command", "shell", "local_shell", "container.exec")
 
 
 def _text(content) -> str:
@@ -95,13 +143,75 @@ def _text(content) -> str:
     return "".join(out)
 
 
-def call_block(name: str, arguments) -> str:
+def raw_arg(schema: dict) -> str | None:
+    """The argument a tool's shorthand block carries: a freeform tool's `input` or a shell tool's command string
+    (exec_command's `cmd`), i.e. the one required argument when it is free text. None for every other tool."""
+    props = (schema or {}).get("properties") or {}
+    req = (schema or {}).get("required") or (list(props) if len(props) == 1 else [])
+    if len(req) == 1 and req[0] in ("cmd", "command", "input", "script") and (props.get(req[0]) or {}).get("type") == "string":
+        return req[0]
+    return None
+
+
+def call_block(name: str, arguments, tools: dict | None = None) -> str:
+    """A tool call as the model should have written it (used to show its own earlier calls back to it)."""
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments or "{}")
         except json.JSONDecodeError:
             arguments = {"raw_arguments": arguments}
+    key = raw_arg((tools or {}).get(name) or {}) if tools and name in tools else None
+    if key and isinstance(arguments, dict) and list(arguments) == [key] and isinstance(arguments[key], str):
+        body = arguments[key]
+        if body.strip() and ("\n" in body or '"' in body or "\\" in body):   # where the shorthand reads better than JSON
+            ticks = max([3] + [len(x) + 1 for x in re.findall(r"`{3,}", body)])
+            return "`" * ticks + name + "\n" + body.strip("\n") + "\n" + "`" * ticks
     return "```tool_call\n" + json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False) + "\n```"
+
+
+def ts_type(schema, indent: str = "") -> str:
+    """A JSON schema as a TypeScript type, the way OpenAI renders function tools into a model's prompt."""
+    if not isinstance(schema, dict):
+        return "any"
+    if "enum" in schema:
+        return " | ".join(json.dumps(v, ensure_ascii=False) for v in schema["enum"]) or "never"
+    if "const" in schema:
+        return json.dumps(schema["const"], ensure_ascii=False)
+    for k in ("anyOf", "oneOf"):
+        if isinstance(schema.get(k), list):
+            return " | ".join(dict.fromkeys(ts_type(x, indent) for x in schema[k])) or "any"
+    t = schema.get("type")
+    if isinstance(t, list):
+        return " | ".join(dict.fromkeys(ts_type({**schema, "type": x}, indent) for x in t))
+    if t in ("integer", "number"):
+        return "number"
+    if t in ("string", "boolean", "null"):
+        return t
+    if t == "array":
+        inner = ts_type(schema.get("items") or {}, indent)
+        return f"({inner})[]" if " | " in inner else inner + "[]"
+    if t == "object" or "properties" in schema:
+        props = schema.get("properties") or {}
+        if not props:
+            extra = schema.get("additionalProperties")
+            return "{[key: string]: %s}" % ts_type(extra, indent) if isinstance(extra, dict) else "{}"
+        req, lines, pad = set(schema.get("required") or []), [], indent + "  "
+        for k, v in props.items():
+            v = v if isinstance(v, dict) else {}
+            notes = [x.strip() for x in str(v.get("description") or "").splitlines() if x.strip()]
+            if "default" in v:
+                notes.append("default: " + json.dumps(v["default"], ensure_ascii=False))
+            lines += [f"{pad}// {x}" for x in notes]
+            key = k if re.fullmatch(r"[A-Za-z_$][\w$]*", k) else json.dumps(k)
+            lines.append(f"{pad}{key}{'' if k in req else '?'}: {ts_type(v, pad)},")
+        return "{\n" + "\n".join(lines) + "\n" + indent + "}"
+    return "any"
+
+
+def tool_decl(name: str, desc: str, schema: dict) -> str:
+    head = "\n".join("// " + x.strip() for x in (desc or "").strip().splitlines() if x.strip())
+    ident = name if re.fullmatch(r"[A-Za-z_$][\w$]*", name) else json.dumps(name)
+    return (head + "\n" if head else "") + f"type {ident} = (_: {ts_type(schema)}) => any;"
 
 
 def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
@@ -122,22 +232,35 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
     elif tools and isinstance(choice, dict) and (choice.get("function") or {}).get("name") in tools:
         rules["must"], rules["only"] = True, choice["function"]["name"]
 
+    raw = {n: raw_arg(s) for n, s in tools.items() if raw_arg(s)}
+    shell = next((n for n in SHELL_TOOLS if n in raw), None)
     system = "\n\n".join(_text(m.get("content")) for m in body.get("messages") or []
                          if m.get("role") in ("system", "developer") and m.get("content"))
-    parts = [PREAMBLE]
+    parts = [FRAME if tools else FRAME_PLAIN]
     if system.strip():
-        parts.append("# System instructions\n" + system.strip())
+        patch = ""
+        if tools and shell and "apply_patch" in system and "apply_patch" not in tools:
+            patch = (f" (in particular, there is no separate apply_patch tool here: to edit a file, run `apply_patch` "
+                     f"as a shell command through {shell}, with the patch in a heredoc)")
+        head = INSTRUCTIONS_HEAD % patch if tools else "# Instructions"
+        parts.append(head + "\n\n" + system.strip())
     if tools:
-        many = ("At most one tool_call block per turn." if rules["single"]
+        many = ("At most one tool block per turn." if rules["single"]
                 else "One block per call; several blocks call several tools in one turn.")
         sec = [TOOLS_HEAD % many]
+        if raw:
+            ex = shell or next(iter(raw))
+            names = ", ".join(f"`{n}` (body = `{k}`)" for n, k in raw.items())
+            sample = ("apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/app.py\n@@\n-old line\n+new line\n"
+                      "*** End Patch\nEOF" if ex == shell and "apply_patch" in system else
+                      "rg -n \"TODO\" src | head -20" if ex == shell else f"<the {raw[ex]} text>")
+            sec.append(RAW_HEAD % (names, "text of that argument", ex, sample))
         if rules["only"]:
             sec.append(f"In this turn you must call the tool `{rules['only']}`.")
         elif rules["must"]:
             sec.append("In this turn you must call a tool.")
-        for name, schema in tools.items():
-            sec.append(f"## {name}\n{descs[name].strip()}\nArguments schema: "
-                       + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+        sec.append("The tools, as TypeScript signatures (`_` is the arguments object, `?` marks an optional argument):\n\n"
+                   + "\n\n".join(tool_decl(n, descs[n], s) for n, s in tools.items()))
         parts.append("\n\n".join(sec))
     fmt = body.get("response_format") or {}
     if fmt.get("type") == "json_schema":
@@ -156,15 +279,22 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 names[tc.get("id")] = fn.get("name", "")
-                segs.append(call_block(fn.get("name", ""), fn.get("arguments")))
+                segs.append(call_block(fn.get("name", ""), fn.get("arguments"), tools))
             convo.append("<<<assistant>>>\n" + "\n".join(s for s in segs if s))
         elif role == "tool":
             name = names.get(m.get("tool_call_id")) or m.get("name") or "tool"
             convo.append(f"<<<tool result: {name}>>>\n" + _text(m.get("content")))
         else:
             convo.append("<<<user>>>\n" + _text(m.get("content")))
-    parts.append("# Conversation\nEach turn starts with a <<<role>>> line.\n\n" + "\n\n".join(convo))
-    parts.append("Write the assistant's next turn now (the turn's content only, no <<<assistant>>> line).")
+    parts.append("# Conversation\nEach turn starts with a <<<role>>> line. <<<user>>> is me (or context the harness adds "
+                 "for me), <<<assistant>>> is you, <<<tool result>>> is what a tool returned on my computer.\n\n"
+                 + "\n\n".join(convo))
+    if tools:
+        how = (f", or the ```{shell} shorthand for a command" if shell else
+               f", or the ```{next(iter(raw))} shorthand" if raw else "")
+        parts.append(REMINDER_TOOLS % how)
+    else:
+        parts.append(REMINDER_PLAIN)
     return "\n\n".join(parts), tools, rules
 
 
@@ -225,9 +355,32 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
     if m:   # the model kept writing the transcript (the next turn, or a made-up tool result): its turn ends there
         md = md[:m.start()]
     calls, keep, pos = [], [], 0
+    shorthand = {n.lower(): (n, raw_arg(sc)) for n, sc in tools.items() if raw_arg(sc)}
     if tools:
         for m in _FENCE.finditer(md):
             lang, inner = m.group(2).lower(), m.group(3)
+            short = shorthand.get(lang)
+            if short:   # ```exec_command: the body is the raw argument (or, from a careful model, JSON after all)
+                name, key = short
+                args = None
+                if inner.lstrip().startswith("{"):
+                    try:
+                        obj = _loads(inner)
+                        c = _as_call(obj, tools) if isinstance(obj, dict) else None
+                        if c and c["name"] == name and isinstance(c["arguments"], dict):
+                            args = c["arguments"]
+                        elif isinstance(obj, dict) and key in obj and set(obj) <= set(tools[name].get("properties") or {}):
+                            args = obj
+                    except json.JSONDecodeError:
+                        pass
+                if args is None:
+                    if not inner.strip():
+                        raise Malformed(f"the {name} block is empty")
+                    args = {key: inner}
+                calls.append(_check({"name": name, "arguments": args}, tools))
+                keep.append(md[pos:m.start()])
+                pos = m.end()
+                continue
             tagged = lang in TOOL_TAGS
             if not tagged and lang not in ("", "json", "jsonc", "plaintext", "text"):
                 continue
@@ -271,9 +424,44 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
 
 
 def repair_message(err: Malformed) -> str:
-    return (f"The harness could not use that reply: {err}.\nSend the whole turn again, corrected. A tool call is a "
+    return (f"The program could not use that reply: {err}.\nSend the whole turn again, corrected. A tool call is a "
             'fenced code block tagged tool_call holding one valid JSON object {"name": ..., "arguments": {...}} '
-            "(newlines inside strings written as \\n).")
+            "(newlines inside strings written as \\n), or the shorthand block tagged with the tool's name. It runs "
+            "on my computer; do not use your built-in tools instead.")
+
+
+# A turn with no call that isn't an answer either. Two kinds seen from the web model: it looked for the tools in its
+# own function-calling interface ("the shell isn't available to me"), or it wrote what it would do next and stopped
+# ("I'll use find instead. Please retry so I can continue."). Either would end the harness's run with nothing done,
+# so it gets one more message in the same chat first.
+_STALL = re.compile(
+    r"\b(?:is|are)(?: not|n['’]t) (?:currently |yet )?(?:available|enabled|accessible|exposed|provided|connected)\b"
+    r"|\b(?:do not|don['’]t|did not|didn['’]t) have (?:access|a way|the ability|any tools?|a tool|tools|a shell|the tools?)\b"
+    r"|\b(?:can['’]?t|cannot|unable to|not able to) (?:directly )?(?:run|execute|access|inspect|reach|open|read|call|use|see|modify|edit)\b"
+    r"|\b(?:retry|try again|re-?run)\b[^.\n]{0,60}\b(?:enabled|available|tools?)\b"
+    r"|\bplease (?:retry|re-?run|run|try again|execute|paste|share|provide|send)\b"
+    r"|\bso (?:that )?I can (?:continue|proceed)\b"
+    r"|\bI(?:['’]ll| will| am going to|['’]m going to)(?: \w+){0,2} (?:use|run|inspect|check|look|read|open|start|begin|apply|"
+    r"patch|create|add|implement|update|fix|search|list|examine|proceed|continue|try|write|edit|verify|test|reproduce)\b"
+    r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b", re.I)
+STALL_MAX = 1500   # longer than this is a real answer that happens to mention a limitation or a next step
+
+
+def stalled(text: str, tools: dict) -> bool:
+    return bool(tools) and len(text) <= STALL_MAX and bool(_STALL.search(text))
+
+
+def nudge_message(tools: dict) -> str:
+    raw = {n: raw_arg(s) for n, s in tools.items() if raw_arg(s)}
+    shell = next((n for n in SHELL_TOOLS if n in raw), None)
+    how = (f"```{shell}\n<the command>\n```" if shell else
+           '```tool_call\n{"name": "<tool name>", "arguments": {...}}\n```')
+    return ("That reply had no tool block, so nothing ran, and sent as it is it would end the agent's run. Nobody "
+            "else runs commands for you here. A tool call is just text in your reply (it does not need your "
+            "function-calling interface) and my program runs it on my computer. If there is a next step, write the "
+            f"turn again and take it now by ending the turn with a block like this:\n\n{how}\n\n"
+            "A command that failed is a reason to try another way, not to stop. If you really are finished, or need "
+            "a decision from me, repeat your answer instead.")
 
 
 def chat_completion(model_id: str, text: str, calls: list[dict], prompt: str, extra: dict | None = None) -> dict:
@@ -774,6 +962,8 @@ class Bridge:
         want = model.lower()
         if want in (p.get("model") or "").lower():
             return p
+        if p.get("model") is None:   # no model picker at all (the Free plan): the account has one model, and it answers
+            return p
         try:
             await page.locator(SWITCHER).first.click(timeout=4000)
             item = page.locator('[role="menuitem"], [role="menuitemradio"], [role="option"]').filter(
@@ -785,10 +975,12 @@ class Bridge:
                 await page.keyboard.press("Escape")
             except Exception:  # noqa: BLE001
                 pass
-        p = await self._probe(page, True)
-        if want not in (p.get("model") or "").lower() and self.o["strict_model"]:
+        shown, p = p.get("model"), await self._probe(page, True)
+        # a picker that is gone on the second look was something else on a half-loaded page: same as no picker
+        if p.get("model") is not None and want not in p["model"].lower() and self.o["strict_model"]:
             raise WebUnavailable(f"model {model!r} is not selectable in the page's model picker (it shows "
-                                 f"{p.get('model')!r})", float(self.o["cooldown_model_s"]), "model")
+                                 f"{p['model']!r}, before the attempt {shown!r})",
+                                 float(self.o["cooldown_model_s"]), "model")
         if p.get("temp") is not True:
             raise WebUnavailable("temporary chat was lost while picking the model, so nothing was sent",
                                  float(self.o["cooldown_tempchat_s"]), "tempchat")
@@ -835,13 +1027,29 @@ class Bridge:
             if done:
                 break
             if time.time() - t0 > timeout:
-                raise WebError(f"no complete reply after {int(timeout)} s")
+                await self._dump(page, p, "timeout")
+                raise WebError(f"no complete reply after {int(timeout)} s (page state saved in {self.home / 'chatgpt-web-debug'})")
         r = await page.evaluate(READ_JS)
         if not (r.get("md") or "").strip():
             raise WebError("the reply was empty")
         if r.get("slug"):
             self.save(model_seen=r["slug"])
         return r
+
+    async def _dump(self, page, probe: dict, why: str):
+        """Keep what the page looked like when a reply could not be read (the last few, for fixing the markers)."""
+        try:
+            d = self.home / "chatgpt-web-debug"
+            d.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for old in sorted(d.glob("*.json"))[:-4]:
+                old.unlink()
+            html = await page.evaluate("""() => { const t = [...document.querySelectorAll('[data-turn-key], [data-message-author-role], article')];
+                const e = t[t.length - 1] || document.querySelector('main') || document.body; return e.outerHTML.slice(0, 400000); }""")
+            read = await page.evaluate(READ_JS)
+            (d / f"{time.strftime('%Y%m%d-%H%M%S')}-{why}.json").write_text(
+                json.dumps({"why": why, "probe": probe, "read": read, "last_turn_html": html}, indent=1))
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
 
     async def _gap(self):
         wait = self._last_done + self.rand(float(self.o["min_gap_s"]), float(self.o["max_gap_s"])) - self.clock()
@@ -899,7 +1107,17 @@ class Bridge:
                         text, calls = parse_reply(r["md"], tools, rules)
                     except Malformed as e2:
                         raise WebError(f"unusable tool call after one repair: {e2}") from None
-                return text, calls, {"model_slug": r.get("slug"), "repaired": repaired}
+                nudged = False
+                if not calls and not repaired and stalled(text, tools):   # "the shell isn't available to me": say how, once
+                    nudged = True
+                    await self.sleep(self.rand(1.0, 2.5))
+                    r2 = await self._send(self._page, nudge_message(tools))
+                    try:
+                        text, calls = parse_reply(r2["md"], tools, rules)
+                        r = r2
+                    except Malformed:
+                        pass   # keep the first answer
+                return text, calls, {"model_slug": r.get("slug"), "repaired": repaired, "nudged": nudged}
             text, calls, extra = await self._guarded(run)
             fmt = (body.get("response_format") or {}).get("type")
             if fmt in ("json_schema", "json_object") and not calls:

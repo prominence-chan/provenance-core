@@ -71,7 +71,8 @@ echo 'PCORE_CHATGPT_WEB=1' >> ~/.tierlm/keys.env    # turn it on, then restart t
 provenance-core webstatus --probe         # on? signed in? how many requests today?
 ```
 
-The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked in the page's model picker). It
+The model is `chatgpt-web/luna` in `catalog.yaml` (the name is what gets picked in the page's model picker; a
+Free account has no picker and one model, which is used as is). It
 sits in a tier by its score like any other model; Provenance / Codex requests for that tier try it first and fall
 back to the normal pool whenever it is busy, signed out, rate limited or showing a challenge.
 

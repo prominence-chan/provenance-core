@@ -146,7 +146,8 @@ class Router:
         self.state.success(m, (time.time() - t0) * 1000)
         msg = data["choices"][0]["message"]
         log(f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
-            + (", repaired" if data["pcore"]["web"].get("repaired") else ""))
+            + (", repaired" if data["pcore"]["web"].get("repaired") else "")
+            + (", nudged" if data["pcore"]["web"].get("nudged") else ""))
         if stream:
             return BufferedStream(data), t0
         self.state.record(m, data["usage"]["total_tokens"])

@@ -109,18 +109,21 @@ rate limited, flagged or banned. Everything below is built to stay small and vis
 opt-in, serial, paced, capped, and stops at the first sign that the site wants a human.
 
 **Status on 2026-11-21.** Verified against the local mock page and a capture of the real page's markup
-(`tests/real_page_2026_11.html`); the text tool protocol with real Provenance requests answered by a pool model;
-failover when the login is missing and when the page is challenged. On the real site: with the stock `playwright`
-driver every load after the first was answered with a Cloudflare "Just a moment..." page that never clears (6 h
-block, requests go to the normal pool). With `driver: patchright` the check passes and real replies come back
-(seven requests, 9 to 50 s each; headings, lists, tables, code blocks, math and a ```` ```tool_call ```` block read
-back intact). Two things found there: the page's markup had changed (turns are `[data-turn-key]` /
-`[data-response-body]`, code blocks are an editor widget; both generations are read now), and the test account was on
-the Free plan, which has **no model picker**: `chatgpt-web/luna` is correctly reported as not selectable, and the
-Free default model (`auto`, served by `gpt-6`) ignored the text tool protocol in 2 of 2 tool requests and used
-ChatGPT's own sandbox instead (it "ran" `pytest` and read `/etc/hosts` in OpenAI's container, not on this machine).
-So `auto` on a Free account is not usable for agent work; prompt fidelity for long requests, the model picker on a
-paid plan and the model's score are still unmeasured.
+(`tests/real_page_2026_11.html`), and on the real site with `driver: patchright` (the stock `playwright` driver is
+answered with a Cloudflare "Just a moment..." page that never clears). The test account is on the Free plan, which
+has **no model picker**: there is one model and it answers, so `chatgpt-web/luna` is accepted as it is (the page
+does not say which model replied; a picker that exists but lacks the named model still fails the request).
+
+With the first prompt that model ignored the text tool protocol in 2 of 2 tool requests and used ChatGPT's own
+sandbox. With the prompt described under "Prompt design": real Provenance sessions (`provenance exec -m
+chatgpt-web/luna -s workspace-write`, the unmodified 25,000-character Codex request) found a failing test, patched
+it with `apply_patch`, added a function with tests, wrote a small CLI tool with its own tests, and reported the
+results: 4 requests of 15 to 50 s per task.
+Seen on the way and handled: a first turn that answered "the shell interface isn't available to me", a turn that
+stopped after a failed command to ask for a retry (the nudge got the next command out of it), and a model-picker
+check that failed on a half-loaded page. Seen once and not explained: a reply the page never
+showed as finished (the request failed after `reply_timeout_s`; the page state is now saved to
+`~/.tierlm/chatgpt-web-debug/` when that happens). The model's score is still a prior, not measured.
 
 **Drivers.** `playwright` (default) is a stock Playwright-driven Chrome and says so (`navigator.webdriver` is true).
 `patchright` (`driver: patchright` under the provider's `web:`, or `PCORE_CHATGPT_WEB_DRIVER=patchright`; needs
@@ -153,21 +156,67 @@ proof-of-work / Turnstile tokens, solve or click through captchas or challenges,
 API. With the default driver it also uses no anti-detection measures at all; `driver: patchright` is the one
 exception, described above.
 
-**Tool-call protocol.** The prompt tells the model to call a tool with a fenced block:
+**Prompt design.** The request is written for the reader it actually has: a chat model inside a consumer chat
+app, not the API model a harness prompt assumes. What the first version got wrong, and what the prompt does now
+(`FRAME`, `INSTRUCTIONS_HEAD`, `TOOLS_HEAD`, `REMINDER_TOOLS` in `chatgpt_web.py`):
+
+- *It has tools of its own and reaches for them.* The first prompt only said "do not use your built-in tools" and
+  the model ran `pytest` in OpenAI's sandbox anyway. The prompt now says where those tools run and that the user's
+  files are not there, so their output is wrong for the task, and that a tool block is the only way to touch the
+  user's machine.
+- *It looks for the harness tools in its function-calling interface and doesn't find them* ("the shell interface
+  isn't available to me in this turn"). The prompt says a tool call is plain text in the reply and always works.
+- *It treats the run as a chat.* After a failed command it wrote what it would do next and asked for a retry, with
+  no tool block, which ends a Codex run. The prompt says what a reply without a block means to the harness: the run
+  is over, so keep going block after block until the task is done, and a failed command is a reason to try another
+  way.
+- For both of those, a short reply with no call that says it cannot act, or that it is about to act, gets **one
+  nudge** in the same temporary chat (`stalled` / `nudge_message`) before the harness sees it. If the model answers
+  the same way again, that answer stands. The log line for the request says `nudged`.
+- *The harness prompt is about another setup.* Codex's instructions speak of "function calls" and name tools the
+  session may not have (`apply_patch`, `update_plan`). The prompt says how to read them, and when the request has a
+  shell tool but no `apply_patch` tool, that edits go through `apply_patch` run as a shell command (Codex's
+  `exec_command` intercepts it).
+- *Tools are shown as TypeScript signatures*, the way OpenAI renders function tools into its models' prompts
+  (`type exec_command = (_: { cmd: string, workdir?: string, ... }) => any;` with descriptions as comments), not as
+  JSON schema. Shorter, and a form the model has seen.
+- *The rules are said twice*: once at the top, and in four lines after the conversation, next to where the reply
+  starts. A real Codex request is 25,000 to 40,000 characters and the top is far away by then.
+
+**Tool-call protocol.** Two ways to call a tool. Any tool, as JSON:
 
 ````
 ```tool_call
-{"name": "shell", "arguments": {"command": ["ls", "-la"]}}
+{"name": "write_stdin", "arguments": {"session_id": 3, "chars": "y\n"}}
 ```
 ````
 
-One block per call (one call per turn when the client sent `parallel_tool_calls: false`). The parser also accepts
+A shell tool or a freeform tool (one required free-text argument: `cmd`, `command`, `input`, `script`), as a block
+named after the tool whose body is that argument, raw. This is what makes patches and heredocs reliable, since
+nothing has to be escaped into a JSON string:
+
+````
+```exec_command
+apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: calc.py
+@@
+-    return sum(xs) // len(xs)
++    return sum(xs) / len(xs)
+*** End Patch
+EOF
+```
+````
+
+The model's own earlier calls are shown back to it in the same two forms. One block per call (one call per turn
+when the client sent `parallel_tool_calls: false`); text after the last block is dropped. The parser also accepts
 an untagged or `json` block that is exactly a call to a known tool, arguments given as a JSON string, raw newlines
-inside JSON strings, and a call written without its fence. A call that is there but unusable (invalid JSON, unknown
-tool, missing required argument, or no call when `tool_choice` required one) gets **one repair round**: the error
-is sent as a second message in the same temporary chat and the corrected reply is parsed; a second failure fails
-the request (the router moves on to the next model). Freeform tools such as `apply_patch` are a function with one
-`input` string, as for every other provider. Images are not passed through: such requests skip the bridge.
+inside JSON strings, JSON inside a shorthand block, and a call written without its fence. A call that is there but
+unusable (invalid JSON, unknown tool, missing required argument, or no call when `tool_choice` required one) gets
+**one repair round**: the error is sent as a second message in the same temporary chat and the corrected reply is
+parsed; a second failure fails the request (the router moves on to the next model). Freeform tools such as
+`apply_patch` are a function with one `input` string, as for every other provider. Images are not passed through:
+such requests skip the bridge.
 
 **Streaming.** The reply is read whole before anything is sent to the client (tool calls must be parsed and maybe
 repaired first, and a failure can still fail over), then replayed as a normal stream. Clients see no tokens until
@@ -199,7 +248,7 @@ Ensembles never include it.
 | captcha, challenge, "unusual activity", block page (after 20 s for an automatic check to pass by itself) | 6 h |
 | usage-limit notice | 1 h |
 | temporary chat not available | 6 h |
-| the model isn't in the picker | 1 h |
+| the page has a model picker and the model isn't in it | 1 h |
 | you closed the window | 10 min |
 | daily cap reached | until local midnight |
 
@@ -220,7 +269,7 @@ page is fine again.
 | `strict_model` | true | fail rather than answer with a different model than the one named |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
-A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice). The page
+A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice; on a page with no picker, as on the Free plan, the account's one model answers). The page
 markers the bridge reads live in `PROBE_JS` / `READ_JS`; when chatgpt.com changes its markup, that is the place to
 update.
 
