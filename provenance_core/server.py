@@ -8,20 +8,24 @@ GET  /v1/models             the tier aliases plus every usable concrete model
 GET  /status                tiers, models, scores, headroom, health
 POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_api.py
 POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py
-/web/*                      account setup for the web-chat bridge from the app, see web_setup.py"""
+/web/*                      account setup for the web-chat bridge from the app, see web_setup.py
+GET  /health                is it up, which process, what it serves (for the app that started it)
+/pool/keys                  API keys for the token pool, set from the app, see pool_keys.py"""
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import anthropic_api, responses_api, web_setup
+from . import __version__, anthropic_api, pool_keys, responses_api, web_setup
 from .catalog import load
 from .router import NoCapacity, Router, estimate_tokens
-from .settings import env
+from .settings import env, home_dir
 
 
 def create_app(
@@ -47,6 +51,32 @@ def create_app(
         tiers = [t for t, _ in router.catalog.tiers]
         raise HTTPException(404, f"unknown model {name}; use one of {tiers} or a catalog id")
 
+    started = time.time()
+
+    @app.get("/health")
+    async def health(authorization: str | None = Header(None)):
+        """For the app that started this router (and anyone checking which router answers): the process, its home,
+        and what it can serve right now. Cheap: nothing is opened or fetched."""
+        check(authorization)
+        cat = router.catalog
+        api = [p for p in cat.providers.values() if p.type == "openai"]
+        web = [n for n, p in cat.providers.items() if p.type == "chatgpt_web"]
+        return {
+            "ok": True,
+            "service": "provenance-core",
+            "version": __version__,
+            "pid": os.getpid(),
+            "home": str(home_dir()),
+            "uptime_s": int(time.time() - started),
+            "api": {
+                "providers": len(api),
+                "usable": sum(p.usable for p in api),
+                "models": sum(1 for m in cat.models.values() if not cat.is_web(m) and cat.providers[m.provider].usable),
+            },
+            "web": {"providers": len(web), "enabled": [n for n in web if cat.providers[n].usable]},
+            "tiers": [t for t, _ in cat.tiers],
+        }
+
     @app.get("/v1/sources")
     async def sources(authorization: str | None = Header(None)):
         """Per tier: what it can be served from (each signed-in chat model, and the pooled API models as one), how
@@ -67,6 +97,9 @@ def create_app(
                             "busy": s["busy"],
                             "available": s["available"],
                             "pinnable": s["pinnable"],
+                            # why it cannot be used: "keys" (no API key for any of its models), "signin" (no
+                            # account signed in), else null
+                            "needs": s["needs"],
                         }
                         for s in router.sources(t, web=router.web_ok("responses"))
                     ],
@@ -222,6 +255,15 @@ def create_app(
     app.state.web_setup = setup
     app.router.on_shutdown.append(setup.close)
 
+    async def close_browsers():  # on shutdown: no browser is left running (a sign-in window was closed just above)
+        for b in list(router.bridges.values()):
+            try:  # release waits for a chat in progress: not for long when shutting down (the watchdogs remain)
+                await asyncio.wait_for(b.release(), 10)
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                pass
+
+    app.router.on_shutdown.append(close_browsers)
+
     def fail(e: Exception, state: str | None = None):
         msg = str(e).strip("'\"")
         if isinstance(e, KeyError):
@@ -275,6 +317,25 @@ def create_app(
         except KeyError as e:
             return fail(e)
 
+    @app.post("/web/login/show")
+    async def web_login_show(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        b = await body_of(request)
+        try:
+            return await setup.show(str(b.get("provider") or ""), b.get("account"))
+        except web_setup.SetupError as e:
+            return fail(e, setup.login_state(str(b.get("provider")), b.get("account"))["state"])
+        except KeyError as e:
+            return fail(e)
+
+    @app.patch("/web/providers/{provider}")
+    async def web_provider_update(provider: str, request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return await setup.update_provider(provider, await body_of(request))
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
     @app.post("/web/login/cancel")
     async def web_login_cancel(request: Request, authorization: str | None = Header(None)):
         check(authorization)
@@ -290,6 +351,28 @@ def create_app(
         try:
             return setup.prepare_browser()
         except web_setup.SetupError as e:
+            return fail(e)
+
+    # ---- API keys for the token pool, set from the app (pool_keys.py; values are never sent back) ---------------
+    @app.get("/pool/keys")
+    async def pool_keys_view(authorization: str | None = Header(None)):
+        check(authorization)
+        return {"providers": pool_keys.view(router.catalog)}
+
+    @app.put("/pool/keys/{provider}")
+    async def pool_keys_set(provider: str, request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return pool_keys.set_keys(router.catalog, provider, (await body_of(request)).get("values"))
+        except (pool_keys.KeySetupError, KeyError) as e:
+            return fail(e)
+
+    @app.delete("/pool/keys/{provider}")
+    async def pool_keys_clear(provider: str, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return pool_keys.clear_keys(router.catalog, provider)
+        except (pool_keys.KeySetupError, KeyError) as e:
             return fail(e)
 
     anthropic_api.register(app, router, token)

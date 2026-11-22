@@ -1,0 +1,23 @@
+# The catalog Provenance.app's own router runs with (docs/TECHNICAL.md, "Provenance.app's router"): catalog.yaml as it
+# is, changed only where a new user's first start needs something else. `extends:` loads catalog.yaml first and lays
+# this file over it (catalog.overlay): mappings merge, `models` entries merge into the one with the same id.
+extends: catalog.yaml
+
+providers:
+  # One account to start with (the app adds more); a never signed-in account is skipped instead of opening its browser
+  # to find the sign-in page; no macOS notifications (the app shows each site's state itself).
+  chatgpt-web: {web: {accounts: [main], skip_unchecked: true, notify: false, idle_close_s: 1800}}
+  qwen-web: {web: {accounts: [main], skip_unchecked: true, notify: false}}
+  gemini-web: {web: {accounts: [main], skip_unchecked: true, notify: false}}
+  # Z.ai has no models in the catalog (all commented out there): nothing to sign in for.
+  zai-web: {remove: true}
+  # OVH's anonymous quota measured 1 request per model per IP per year (see catalog.yaml): without a token it only
+  # ever answers 429, so it needs a key like the others.
+  ovh: {auth: key}
+
+models:
+  # catalog.yaml ties Gemini's models to its owner's accounts (a Pro account on main, free ones on b and c). A new
+  # user's accounts are unknown: every account is offered all three, and the page's model picker decides.
+  - {id: gemini-web/neon, accounts: null}
+  - {id: gemini-web/hydrogen, accounts: null}
+  - {id: gemini-web/auto, accounts: null}

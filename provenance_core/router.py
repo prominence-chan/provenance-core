@@ -19,7 +19,6 @@ import httpx
 
 from . import compact, prune
 from .catalog import Catalog, Model
-from .settings import env
 from .state import State
 
 
@@ -28,9 +27,9 @@ class NoCapacity(Exception):
 
 
 def _home():
-    from pathlib import Path
+    from .settings import home_dir
 
-    return Path(env("HOME") or Path.home() / ".tierlm")
+    return home_dir()
 
 
 def estimate_tokens(body: dict) -> int:
@@ -115,6 +114,7 @@ class Router:
                 "busy": max(busy, c["busy"]),
                 "slots": max(1, c["accounts"]),
                 "available": ok,
+                "needs": None if c.get("signed_in", True) else "signin",
             }
         heads = [self.state.headroom(m, tokens) for m in models if self.state.available(m)]
         heads = [h for h in heads if h > 0]
@@ -123,6 +123,7 @@ class Router:
             "busy": busy,
             "slots": max(1, len(heads)),
             "available": bool(heads),
+            "needs": None,
         }
 
     def sources(self, tier: str, web: bool = True) -> list[dict]:
@@ -147,6 +148,12 @@ class Router:
                     "pinnable": load["available"] and load["remaining"] >= 0.1,
                 }
             )
+        if "pool" not in groups and any(
+            not self.catalog.is_web(m) for m in self.catalog.models_in(tier, usable_only=False)
+        ):  # the tier has API models, none with a key: the pool is listed as needing keys rather than left out
+            out.append({"id": "pool", "label": "Token pool", "kind": "pool", "models": [], "remaining": 0.0,
+                        "busy": 0, "slots": 1, "available": False, "needs": "keys", "rank": -1.0,
+                        "pinnable": False})  # fmt: skip
         return sorted(out, key=lambda s: -s["rank"])
 
     def candidates(

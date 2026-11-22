@@ -32,7 +32,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import compact, prune
+from . import compact, prune, settings
 from .settings import env
 
 
@@ -1317,6 +1317,9 @@ DEFAULTS = {
     # installed Google Chrome: the same build, so the same "Google Chrome" brand to sites; this Mac only)
     "browser_source": "cft",
     "notify": True,  # macOS notification when the provider goes unavailable
+    # an account no check has ever seen signed in (a new one, nothing signed in yet) is skipped, without penalty,
+    # instead of opening its browser to find the sign-in page. Provenance.app's catalog turns it on
+    "skip_unchecked": False,
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
     "site": None,  # another chat site from SITES (e.g. zai) instead of chatgpt.com
 }
@@ -1325,15 +1328,32 @@ LOGIN_HINT = "run `provenance-core weblogin` and sign in to ChatGPT in the windo
 
 
 def home_dir() -> Path:
-    return Path(env("HOME") or Path.home() / ".tierlm")
+    return settings.home_dir()
 
 
 def enabled(options: dict | None) -> bool:
-    """Off unless turned on: `enabled: true` on the provider, or PCORE_CHATGPT_WEB=1 (=0 forces it off)."""
-    v = env("CHATGPT_WEB")
-    if v is not None and v != "":
-        return v.strip().lower() in ("1", "true", "on", "yes")
-    return bool((options or {}).get("enabled"))
+    """Off unless turned on. In order: PCORE_CHATGPT_WEB=0 forces every web provider off; then a choice made in the
+    app (`user_enabled`, from <PCORE_HOME>/settings.json, see provider_settings.py); then PCORE_CHATGPT_WEB=1 turns
+    them on; then `enabled: true` on the provider."""
+    o = options or {}
+    v = (env("CHATGPT_WEB") or "").strip().lower()
+    if v and v not in ("1", "true", "on", "yes"):
+        return False
+    if o.get("user_enabled") is not None:
+        return bool(o["user_enabled"])
+    return bool(v) or bool(o.get("enabled"))
+
+
+def enabled_by(options: dict | None) -> str:
+    """What decides enabled(): "env-off" (PCORE_CHATGPT_WEB=0, cannot be changed from the app), "app", "env" or
+    "catalog"."""
+    o = options or {}
+    v = (env("CHATGPT_WEB") or "").strip().lower()
+    if v and v not in ("1", "true", "on", "yes"):
+        return "env-off"
+    if o.get("user_enabled") is not None:
+        return "app"
+    return "env" if v else "catalog"
 
 
 class Bridge:
@@ -1462,9 +1482,11 @@ class Bridge:
     def capacity(self, accounts=None) -> dict:
         s = self.status()
         cap = int(self.o["daily_cap"])
-        out = s["blocked"] or s["signing_in"]
+        unchecked = bool(self.o.get("skip_unchecked")) and s["signed_in"] is None
+        out = s["blocked"] or s["signing_in"] or unchecked
         left = 0.0 if out or not cap else max(0, cap - s["today"]) / cap
-        return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0}
+        return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0,
+                "signed_in": s["signed_in"] is True}  # fmt: skip
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
@@ -1485,6 +1507,8 @@ class Bridge:
         if self.signing_in():
             raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
         s = self.load()
+        if self.o.get("skip_unchecked") and s.get("signed_in") is None:
+            raise WebSkip(f"no one has signed in on this account ({self.account or 'main'}) yet")
         left = (s.get("blocked_until") or 0) - self.clock()
         if left > 0:
             raise WebUnavailable(s.get("reason") or "unavailable", left, s.get("kind") or "blocked")
@@ -2541,7 +2565,7 @@ class BridgePool:
         """What is left today on these accounts (all of them by default) and how busy they are; the router shares
         requests out between sources by it."""
         bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
-        open_ = [b for b in bs if not b.status()["blocked"] and not b.signing_in()]
+        open_ = [b for b in bs if b.capacity()["accounts"]]
         cap = sum(int(b.o["daily_cap"]) for b in open_)
         used = sum(min(b.load().get("count", 0), int(b.o["daily_cap"])) for b in open_)
         return {
@@ -2549,6 +2573,7 @@ class BridgePool:
             "busy": sum(b.busy for b in bs),
             "accounts": len(open_),
             "available": bool(open_) and used < cap,
+            "signed_in": any(b.status()["signed_in"] is True for b in bs),
         }
 
     def _order(self, model: str, body: dict, accounts=None) -> list[Bridge]:

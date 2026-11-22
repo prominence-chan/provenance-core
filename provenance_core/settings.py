@@ -4,6 +4,7 @@ setups written for tierlm keep working."""
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 PREFIXES = ("PCORE_", "TIERLM_")
 
@@ -15,6 +16,11 @@ def env(name: str, default: str | None = None) -> str | None:
         if v is not None:
             return v
     return default
+
+
+def home_dir() -> Path:
+    """Where the router keeps its state (PCORE_HOME; ~/.tierlm, the pre-rename location, by default)."""
+    return Path(env("HOME") or Path.home() / ".tierlm")
 
 
 def scoped(name: str, scope: str, value, defaults: dict, scopes=("api", "web")) -> dict | None:

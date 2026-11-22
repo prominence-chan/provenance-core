@@ -1,6 +1,7 @@
 """provenance-core CLI (`python -m provenance_core ...`; `python -m tierlm ...` still works).
 
-serve [--catalog catalog.yaml] [--scores scores.yaml] [--host 127.0.0.1] [--port 4141]
+serve [--catalog catalog.yaml] [--scores scores.yaml] [--host 127.0.0.1] [--port 4141] [--watch-stdin]
+                                --watch-stdin: shut down when stdin closes (the app that started it went away)
 calibrate [--only id1,id2]      run the probe set, write scores.yaml
 tiers                           show tiers, models, scores and which providers are usable
 discover <provider>             list the provider's /models (to update the catalog)
@@ -39,6 +40,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=int(env("PORT", 4141)))
     ap.add_argument("--only", default="")
+    ap.add_argument("--watch-stdin", action="store_true", help="serve: shut down when stdin reaches EOF")
     a, extra = ap.parse_known_args()
     if a.cmd in ("usage", "env", "statusline-tee"):
         return _usage_cmd(a, extra)
@@ -51,6 +53,8 @@ def main():
         from .server import create_app
 
         _web_boot(cat)
+        if a.watch_stdin:
+            _exit_with_parent()
         uvicorn.run(create_app(router=Router(cat)), host=a.host, port=a.port)
     elif a.cmd == "calibrate":
         from .calibrate import calibrate
@@ -71,6 +75,30 @@ def main():
         r = httpx.get(f"{p.base_url}/models", headers={**p.auth_headers(), **p.headers}, timeout=30)
         for m in r.json().get("data", []):
             print(m.get("id"))
+
+
+def _exit_with_parent():
+    """`serve --watch-stdin`: the process that started the router (Provenance.app) holds the other end of its stdin.
+    When that process goes away, however it goes (quit, crash, kill -9), stdin reaches EOF and the router shuts
+    down as it does on Ctrl+C, closing its browsers and any sign-in window; if that hangs, it exits anyway."""
+    import os
+    import signal
+    import sys
+    import threading
+
+    def wait():
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass
+        print("stdin closed: the app that started this router is gone; shutting down", flush=True)
+        os.kill(os.getpid(), signal.SIGTERM)
+        t = threading.Timer(20.0, lambda: os._exit(1))
+        t.daemon = True
+        t.start()
+
+    threading.Thread(target=wait, daemon=True, name="watch-stdin").start()
 
 
 def _web_boot(cat):
@@ -109,7 +137,8 @@ def _web_boot(cat):
                 "normal pool until then.",
                 flush=True,
             )
-            notify("ChatGPT web login is missing or expired: run `provenance-core weblogin`")
+            if p.options.get("notify", True):  # Provenance.app's catalog turns these off: the app shows it itself
+                notify("ChatGPT web login is missing or expired: run `provenance-core weblogin`")
         else:
             print(
                 f"chatgpt-web: on but unavailable for {st['blocked_for_s'] // 60} more min: {st['reason']}", flush=True
