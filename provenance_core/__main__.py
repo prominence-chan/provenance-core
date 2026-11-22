@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--probe", action="store_true")
     ap.add_argument("--boot", action="store_true")
+    ap.add_argument("--account", default=None, help="weblogin: which of the provider's `accounts` to sign in")
     ap.add_argument("--catalog", default=env("CATALOG", "catalog.yaml"))
     ap.add_argument("--scores", default=env("SCORES", "scores.yaml"))
     ap.add_argument("--host", default="127.0.0.1")
@@ -73,12 +74,19 @@ def main():
 
 def _web_boot(cat):
     """Server start: say where the chatgpt-web provider stands (from the last check; the page isn't opened)."""
-    from .chatgpt_web import LOGIN_HINT, Bridge, notify
+    from .chatgpt_web import LOGIN_HINT, make_bridge, notify
 
     for p in cat.providers.values():
         if p.type != "chatgpt_web" or not p.usable:
             continue
-        st = Bridge(p.base_url, p.options).status()
+        st = make_bridge(p.base_url, p.options).status()
+        for n, s in (st.get("accounts") or {}).items():
+            state = "signed in" if s["signed_in"] else "NOT signed in (provenance-core weblogin --account " + n + ")"
+            print(
+                f"chatgpt-web account {n}: {state}, {s['today']} of {s['daily_cap']} today"
+                + (f", out for {s['blocked_for_s'] // 60} more min: {s['reason']}" if s["blocked"] else ""),
+                flush=True,
+            )
         if st["signed_in"] and not st["blocked"]:
             print(f"chatgpt-web: on, signed in, {st['today']} of {st['daily_cap']} requests used today", flush=True)
         elif st["signed_in"] is False or st["kind"] == "login" or st["signed_in"] is None:
@@ -100,7 +108,7 @@ def _web_cmd(a, cat):
     import sys
     import time
 
-    from .chatgpt_web import LOGIN_HINT, Bridge, login_window, notify
+    from .chatgpt_web import LOGIN_HINT, BridgePool, login_window, make_bridge, notify
 
     name = next((n for n, p in cat.providers.items() if p.type == "chatgpt_web"), None)
     if not name:
@@ -116,12 +124,17 @@ def _web_cmd(a, cat):
         except (httpx.HTTPError, ValueError):
             return None
 
-    bridge = Bridge(p.base_url, p.options)
+    bridge = make_bridge(p.base_url, p.options)
     if a.cmd == "weblogin":
-        server("POST", "/chatgpt-web/release")
-        code = login_window(bridge)
+        acct = f"account={a.account}" if a.account else ""
+        try:
+            one = bridge.pick(a.account) if isinstance(bridge, BridgePool) else bridge
+        except KeyError as e:
+            sys.exit(str(e))
+        server("POST", "/chatgpt-web/release?" + acct)
+        code = login_window(one)
         if code == 0:
-            server("POST", "/chatgpt-web/release?reset=1")
+            server("POST", "/chatgpt-web/release?reset=1&" + acct)
         sys.exit(code)
     on = p.usable
     if a.boot and not on:
@@ -151,6 +164,11 @@ def _web_cmd(a, cat):
         f"  today: {st.get('today', 0)} of {st.get('daily_cap')} requests"
         + (f"; last model seen: {st['model_seen']}" if st.get("model_seen") else "")
     )
+    for n, s in (st.get("accounts") or {}).items():
+        print(
+            f"  account {n}: {'signed in' if s['signed_in'] else 'not signed in'}, {s['today']} of {s['daily_cap']}"
+            + (f", out for {s['blocked_for_s'] // 60} more min: {s['reason']}" if s["blocked"] else "")
+        )
     if st.get("blocked"):
         print(f"  unavailable for {st['blocked_for_s'] // 60} more min: {st.get('reason')}")
     if not st.get("signed_in"):

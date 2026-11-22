@@ -1,6 +1,6 @@
-"""ChatGPT web as a provider (`type: chatgpt_web` in the catalog): your own signed-in chatgpt.com chat, used as a
-stateless completion engine. The harness (Codex / Provenance) owns context, tools and memory; every request is
-rendered into one message, sent in a NEW temporary chat, and the reply is parsed back into text and tool calls.
+"""ChatGPT web as a provider (`type: chatgpt_web` in the catalog): your own signed-in chatgpt.com chat.
+The harness owns tools and memory. A request starts a temporary chat or safely continues its own tab, and the
+reply is parsed back into text and tool calls.
 
 How it stays honest and gentle (read docs/TECHNICAL.md before turning it on):
 - a real, visible Chrome window on its own profile (~/.tierlm/chatgpt-web-profile) that you sign into by hand once
@@ -23,6 +23,7 @@ limited or banned. That is why this is opt-in and deliberately slow."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -65,40 +66,23 @@ class Malformed(ValueError):
 # - tools are shown the way OpenAI shows function tools to its models (TypeScript signatures), not as JSON schema
 # - a command is written raw in a block named after the tool, so heredocs and patches need no JSON escaping
 # - the rules that matter are repeated after the conversation, next to where the reply starts
-FRAME = """This message was put together by a program on my computer. I'm running a coding agent there (a Codex-style \
-harness), and you are the model that decides its next step. The program will read your reply and act on it, so this \
-is not a normal chat. Below are the agent's instructions, its tools, and the conversation so far (my requests, your \
-earlier steps, and what the tools returned). Write the agent's next turn.
-
-How this works:
-- You cannot reach my computer yourself. To run a command or read or change a file there, write a tool block (format \
-under "Tools"). The program runs it on my machine and sends you the output in the next message.
-- A tool block is plain text in your reply. These tools will not show up in your own tool or function-calling \
-interface, and they don't need to: writing the block is the call, and it always works.
-- Your built-in tools (Python / code execution, file analysis, web search, canvas, memory, image generation) run on \
-OpenAI's servers. My files and my project are not there, so whatever they return is wrong for this task. Do not use \
-them. The tools listed under "Tools" are the only ones.
-- Work one step at a time: a short note on what you're doing, then the tool block(s), then stop and wait. Never \
-write a tool's output yourself, and never say you ran or checked something unless a tool result below shows it.
-- A reply with no tool block ends the agent's run and hands control back to me. So keep going, one tool block after \
-another, until the task is really done; do not stop to tell me what you will do next, and do not ask me to run or \
-retry anything. If a command fails, that is information: try another way with a new tool block.
-- When the task is finished, or you need a decision only I can make, reply normally with no tool block."""
+FRAME = """You are the coding agent for my computer. The harness executes the text tool blocks below and returns
+their results in the next turn. Only those tools reach my files; your built-in tools run elsewhere. Plan and reason
+as needed, then issue all independent calls allowed by this turn's tool rules. Never invent tool results. Keep
+working through failures. A reply without a tool block ends the run; use one only when done or when you need my
+decision. Write the next assistant turn, without a role marker."""
 
 INSTRUCTIONS_HEAD = """# Agent instructions
-These come from the harness and were written for a model with native function calling. Where they say to call a \
-function or use a tool, write a tool block. If they mention a tool that is not listed under "Tools", it does not \
-exist in this session%s."""
+Where these say to call a function, write a tool block. Only tools listed below exist%s."""
 
 TOOLS_HEAD = """# Tools
-To call a tool, write a fenced code block with the language tag tool_call that holds one JSON object:
+Call a tool by writing this block in your reply (it need not appear in your native tool list):
 
 ```tool_call
 {"name": "<tool name>", "arguments": {<arguments>}}
 ```
 
-- The JSON must be valid: double-quoted keys and strings, newlines inside strings written as \\n, no comments, no \
-trailing commas.
+- Use valid JSON (escape newlines inside strings).
 - %s
 - Text after your last tool block is discarded."""
 
@@ -111,14 +95,8 @@ be used (no JSON, no escaping, may span lines). Prefer it for anything with quot
 
 To pass other arguments as well, use the tool_call form."""
 
-REMINDER_TOOLS = """Now write the agent's next turn (only the turn's content, no <<<assistant>>> line). Remember:
-- Anything on my computer happens only through a tool block: ```tool_call with JSON%s. Not through your built-in \
-Python, search or file tools.
-- The tools above are available right now: you call one by writing its block as text. Never answer that a tool or \
-shell is unavailable to you.
-- If anything is left to look at, change or verify, end your reply with the block(s) and stop. Do not guess the \
-result. A reply without a block ends the run, so "I'll do X next" must come with the block that does X.
-- If the work is done, give the final answer with no block."""
+REMINDER_TOOLS = """Next turn: use ```tool_call JSON%s for work on my computer. Stop after the call blocks and
+wait for results. If the task is complete, answer without a block."""
 
 FRAME_PLAIN = """This message was put together by a program on my computer, which will read your reply and pass it on. Below are its instructions and the conversation so far. Write the assistant's next turn. Do not use your built-in tools (code execution, web search, canvas, memory, image generation) and do not mention this framing in your answer."""
 
@@ -203,7 +181,7 @@ def ts_type(schema, indent: str = "") -> str:
         req, lines, pad = set(schema.get("required") or []), [], indent + "  "
         for k, v in props.items():
             v = v if isinstance(v, dict) else {}
-            notes = [x.strip() for x in str(v.get("description") or "").splitlines() if x.strip()]
+            notes = [str(v.get("description") or "").strip().replace("\n", " ")[:160]] if v.get("description") else []
             if "default" in v:
                 notes.append("default: " + json.dumps(v["default"], ensure_ascii=False))
             lines += [f"{pad}// {x}" for x in notes]
@@ -214,7 +192,8 @@ def ts_type(schema, indent: str = "") -> str:
 
 
 def tool_decl(name: str, desc: str, schema: dict) -> str:
-    head = "\n".join("// " + x.strip() for x in (desc or "").strip().splitlines() if x.strip())
+    # The native tool documentation can dwarf the task; retain the call shape and a short purpose.
+    head = "// " + " ".join((desc or "").split())[:400] if desc else ""
     ident = name if re.fullmatch(r"[A-Za-z_$][\w$]*", name) else json.dumps(name)
     return (head + "\n" if head else "") + f"type {ident} = (_: {ts_type(schema)}) => any;"
 
@@ -328,6 +307,139 @@ def render_prompt(body: dict) -> tuple[str, dict[str, dict], dict]:
     else:
         parts.append(REMINDER_PLAIN)
     return "\n\n".join(parts), tools, rules
+
+
+LEAN_SYSTEM = """You are a coding agent working in a terminal on my machine, inside the given working directory. Be precise and efficient: look before you change, keep changes minimal and in the style of the code around them, and check your work when that is cheap. Search with `rg`. Edit files with `apply_patch`, run as a shell command with the patch in a heredoc ("*** Begin Patch", then "*** Update File: <path>" with "@@" hunks of " ", "-" and "+" lines, or "*** Add File: <path>" with "+" lines, or "*** Delete File: <path>", then "*** End Patch"). Never ask for approval, never run destructive git commands, and leave files unrelated to the task alone. End with a short final answer in the format the task asks for."""
+LEAN_DROP_TOOLS = ("request_user_input", "view_image", "get_goal", "create_goal", "update_goal", "update_plan")
+
+
+def lean_body(body: dict, system_chars: int = 3000, drop_tools=LEAN_DROP_TOOLS) -> dict:
+    """A harness request cut down for a web chat: the harness's long base prompt (Codex sends ~18,000 characters of
+    it, written for its own API models) becomes a few lines, its skills list goes, the environment block keeps only
+    the working directory, shell and date, and tools an unattended run never needs are not offered. The same
+    request always comes out the same, so a continued chat still lines up."""
+    out, replaced = [], False
+    for m in body.get("messages") or []:
+        role, text = m.get("role"), _text(m.get("content"))
+        if role in ("system", "developer"):
+            if "<skills_instructions>" in text:
+                continue
+            if len(text) > system_chars:
+                if not replaced:
+                    out.append({"role": role, "content": LEAN_SYSTEM})
+                    replaced = True
+                continue
+        elif role == "user" and text.lstrip().startswith("<environment_context>"):
+            got = {k: re.search(rf"<{k}>(.*?)</{k}>", text, re.S) for k in ("cwd", "shell", "current_date")}
+            if got["cwd"]:
+                line = ", ".join(f"{k}: {v.group(1).strip()}" for k, v in got.items() if v)
+                m = {
+                    **m,
+                    "content": f"<environment_context>{line}; writes are allowed in cwd and /tmp</environment_context>",
+                }
+        out.append(m)
+    tools = [t for t in body.get("tools") or [] if (t.get("function") or {}).get("name") not in drop_tools]
+    return {**body, "messages": out, **({"tools": tools} if body.get("tools") is not None else {})}
+
+
+def continuation_key(body: dict, model: str) -> str | None:
+    """Identify a conversation by everything said before the model's first turn (agents started in the same
+    directory share their first, environment message); matching the full prefix still gates reuse."""
+    opening = []
+    for m in body.get("messages") or []:
+        if m.get("role") == "assistant":
+            break
+        if m.get("role") not in ("system", "developer"):
+            opening.append(_text(m.get("content")))
+    if not opening:
+        return None
+    seed = json.dumps([model, opening], sort_keys=True, default=str)
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+def _message_shape(m: dict) -> str:
+    """Ignore call IDs, which can be regenerated by a Responses client on resume."""
+    calls = [
+        ((tc.get("function") or {}).get("name"), (tc.get("function") or {}).get("arguments"))
+        for tc in m.get("tool_calls") or []
+    ]
+    return json.dumps([m.get("role"), _text(m.get("content")), calls], sort_keys=True, default=str)
+
+
+def continuation_prompt(messages: list[dict], tools: dict[str, dict], prior: dict) -> str:
+    """Send only new harness events; the earlier instructions and tool calls are already in this chat tab."""
+    names = {tc.get("id"): (tc.get("function") or {}).get("name") for tc in prior.get("tool_calls") or []}
+    parts = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant":
+            blocks = [_text(m.get("content")).strip()]
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                names[tc.get("id")] = fn.get("name")
+                blocks.append(call_block(fn.get("name", ""), fn.get("arguments"), tools))
+            parts.append("<<<assistant>>>\n" + "\n".join(x for x in blocks if x))
+        elif role == "tool":
+            name = names.get(m.get("tool_call_id")) or m.get("name") or "tool"
+            parts.append(f"<<<tool result: {name}>>>\n" + _text(m.get("content")))
+        elif role == "user":
+            parts.append("<<<user>>>\n" + _text(m.get("content")))
+    return "# New harness events\n" + "\n\n".join(parts) + "\n\n" + (REMINDER_TOOLS % "" if tools else REMINDER_PLAIN)
+
+
+def compact_initial_prompt(body: dict, limit: int) -> tuple[str, dict[str, dict], dict, bool]:
+    """Bound an old transcript on a fresh tab, preserving instructions, tools, task and recent evidence."""
+    prompt, tools, rules = render_prompt(body)
+    if len(prompt) <= limit:
+        return prompt, tools, rules, False
+    messages = [dict(m) for m in body.get("messages") or []]
+    first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
+    older = [i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")][:-8]
+
+    def render():
+        return render_prompt({**body, "messages": [m for m in messages if m is not None]})[0]
+
+    for i in older:
+        m = messages[i]
+        if m.get("role") == "tool":
+            s = _text(m.get("content"))
+            if len(s) > 800:
+                m["content"] = s[:400] + f"\n[... {len(s) - 800} older characters omitted ...]\n" + s[-400:]
+        elif m.get("role") == "assistant":
+            s = _text(m.get("content"))
+            if len(s) > 600:
+                m["content"] = s[:300] + "\n[... earlier reasoning omitted ...]\n" + s[-300:]
+            if m.get("tool_calls"):
+                m["tool_calls"] = []
+                m["content"] = (_text(m.get("content"))[:500] + "\n[earlier tool action omitted]").strip()
+        elif m.get("role") == "user" and i != first_user:
+            s = _text(m.get("content"))
+            if len(s) > 1200:
+                m["content"] = s[:600] + "\n[... earlier user text omitted ...]\n" + s[-600:]
+    prompt = render()
+    if len(prompt) > limit:
+        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+        for i in tool_indices[:-2]:
+            s = _text(messages[i].get("content"))
+            if len(s) > 1200:
+                messages[i]["content"] = s[:600] + "\n[... tool output shortened ...]\n" + s[-600:]
+        for i in tool_indices[-2:]:
+            s = _text(messages[i].get("content"))
+            if len(s) > 8000:
+                messages[i]["content"] = s[:4000] + "\n[... recent tool output shortened ...]\n" + s[-4000:]
+        prompt = render()
+    if len(prompt) > limit:
+        # Keep the initial task and recent turns verbatim. The harness has already had these older events;
+        # the current model needs the latest evidence more than raw output from the start of the run.
+        removable = [i for i in older if i != first_user]
+        for n, i in enumerate(removable):
+            messages[i] = (
+                {"role": "user", "content": "[earlier harness events omitted to fit the chat page]"} if n == 0 else None
+            )
+            prompt = render()
+            if len(prompt) <= limit:
+                break
+    return prompt, tools, rules, True
 
 
 # ---- the text protocol: reply -> text + tool calls ------------------------------------------------------------------
@@ -604,7 +716,8 @@ PROBE_JS = r"""(fresh) => {
     const r = f.getBoundingClientRect();
     if (/challenges\.cloudflare\.com|arkoselabs|funcaptcha|hcaptcha|recaptcha|challenge/i.test(src) && vis(f) && r.width > 120 && r.height > 40) { out.challenge = 'captcha frame'; break; }
   }
-  out.limit = m(/you(?:'|’)ve (?:reached|hit) (?:your|the|our)[^.\n]{0,80}limit|you(?:'|’)re out of[^.\n]{0,60}|too many requests|usage cap|limit reached/i);
+  out.busy = m(/temporar(?:y|ily)[^.\n]{0,80}limit[^.\n]{0,80}|limit[^.\n]{0,60}temporar(?:y|ily)[^.\n]{0,60}|(?:unable|failed|couldn(?:'|’)t) to load[^.\n]{0,60}|try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|experiencing (?:high|heavy) demand/i);
+  out.limit = out.busy ? null : m(/you(?:'|’)ve (?:reached|hit) (?:your|the|our)[^.\n]{0,80}limit|you(?:'|’)re out of[^.\n]{0,60}|too many requests|usage cap|limit reached/i);
   out.error = m(/something went wrong|error generating|network error|unable to load|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|conversation not found|an error occurred/i, scoped);
   let temp = null;
   for (const el of document.querySelectorAll('[aria-label]')) {
@@ -781,7 +894,16 @@ DEFAULTS = {
     "reply_timeout_s": 600.0,  # longest wait for one reply (thinking models take minutes)
     "idle_close_s": 900.0,  # close the window after this long without a request
     "max_prompt_chars": 120000,
+    "fresh_prompt_chars": 60000,  # compact old harness history before sending a new tab's first message
     "strict_model": True,  # a model other than "auto" must be the one selected in the page's model picker
+    "allow_auto_fallback": False,  # a named model may use the page's Auto choice when the name disappears
+    "reuse_chat": False,  # keep a temporary tab per active agent conversation
+    "max_chat_tabs": 6,
+    "lean": False,  # replace the harness's long base prompt with a few lines and drop tools a web chat never needs
+    "lean_system_chars": 3000,  # a system message longer than this is the harness's base prompt
+    "accounts": None,  # e.g. [main, b, c]: one Chrome profile per signed-in account, requests spread across them
+    "backoff_base_s": 60.0,  # a "temporary limit" / failed-to-load page: wait this long, doubling each time in a row
+    "backoff_max_s": 900.0,
     "endpoints": ["responses"],  # tier requests from these front ends may use the bridge (responses, messages, chat)
     "cooldown_login_s": 1800,
     "cooldown_challenge_s": 6 * 3600,
@@ -791,7 +913,8 @@ DEFAULTS = {
     "cooldown_model_s": 3600,
     "challenge_wait_s": 20.0,  # an automatic browser check gets this long to pass by itself; nothing is clicked
     "driver": "playwright",  # or "patchright": drive Chrome without the automation markers (docs/TECHNICAL.md)
-    "headless": False,  # tests only: the real thing is always a visible window
+    "headless": False,  # true: no window at all. chatgpt.com's browser check stops a headless Chrome, so use `quiet`
+    "quiet": False,  # macOS: hide the window's Chrome right after it opens, so it never takes the screen or focus
     "notify": True,  # macOS notification when the provider goes unavailable
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
 }
@@ -822,7 +945,9 @@ class Bridge:
         sleep=asyncio.sleep,
         clock=time.time,
         rand=random.uniform,
+        account: str | None = None,
     ):
+        self.account = account
         self.base_url = base_url.rstrip("/")
         self.o = {**DEFAULTS, **(options or {})}
         if env(
@@ -830,8 +955,11 @@ class Bridge:
         ):  # PCORE_CHATGPT_WEB_DRIVER=patchright: a per-machine choice, kept out of the catalog
             self.o["driver"] = env("CHATGPT_WEB_DRIVER").strip()
         self.home = Path(home) if home else home_dir()
-        self.profile = Path(self.o["profile"] or self.home / "chatgpt-web-profile").expanduser()
-        self.state_path = self.home / "chatgpt_web.json"
+        tag = "" if account in (None, "", "main", "default") else "-" + re.sub(r"[^\w.-]", "_", account)
+        base = Path(self.o["profile"] or self.home / "chatgpt-web-profile").expanduser()
+        self.profile = base.with_name(base.name + tag)
+        self.state_path = self.home / f"chatgpt_web{tag}.json"
+        self.busy = 0  # requests in flight or queued on this account (the pool spreads by it)
         self.sleep, self.clock, self.rand = sleep, clock, rand
         self.lock = asyncio.Lock()
         self._pw = self._ctx = self._page = None
@@ -840,6 +968,7 @@ class Bridge:
         self._last_done = 0.0
         self._idle: asyncio.Task | None = None
         self._notified: str | None = None
+        self._sessions: dict[str, dict] = {}
 
     # ---- persisted state: today's count, the last login check, why it's blocked -------------------------------
     def load(self) -> dict:
@@ -875,20 +1004,21 @@ class Bridge:
             "model_seen": s.get("model_seen"),
             "window_open": self._page is not None,
             "profile": str(self.profile),
+            **({"account": self.account} if self.account else {}),
         }
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
         self._notified = None
         self._gone = False
-        self.save(blocked_until=0, reason=None, kind=None)
+        self.save(blocked_until=0, reason=None, kind=None, strikes=0)
 
     def _block(self, e: WebUnavailable):
         ch = {"blocked_until": self.clock() + e.cooldown, "reason": e.reason, "kind": e.kind}
         if e.kind == "login":
             ch.update(signed_in=False, checked_at=int(self.clock()))
         self.save(**ch)
-        if self.o["notify"] and self._notified != e.kind and e.kind != "closed":
+        if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy"):
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
 
@@ -932,8 +1062,20 @@ class Bridge:
                 channel="chrome",
                 headless=bool(self.o["headless"]),
                 no_viewport=True,
-                args=["--window-size=1180,860"],
+                args=["--window-size=1180,860"]
+                + (
+                    # a hidden window must keep rendering and running timers, or replies stop arriving
+                    [
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-background-timer-throttling",
+                    ]
+                    if self.o["quiet"]
+                    else []
+                ),
             )
+            if self.o["quiet"] and not self.o["headless"]:
+                hide_chrome(self.profile)
         except Exception as e:  # noqa: BLE001 - profile in use (weblogin still open), Chrome missing, ...
             await self._shutdown()
             raise WebUnavailable(
@@ -953,8 +1095,19 @@ class Bridge:
         self._ctx.on("close", closed)
         return self._page
 
+    async def _new_page(self):
+        page = await self._ctx.new_page()
+
+        def closed(*_):
+            if not self._closing:
+                self._gone = True
+
+        page.on("close", closed)
+        return page
+
     async def _shutdown(self):
         self._closing = True
+        self._sessions.clear()
         ctx, pw, self._ctx, self._pw, self._page = self._ctx, self._pw, None, None, None
         try:
             if ctx:
@@ -997,7 +1150,15 @@ class Bridge:
                 await asyncio.sleep(0.5)
         return await page.evaluate(PROBE_JS, fresh)
 
+    def _strike(self) -> float:
+        """One more failure in a row -> how long to stay away now (doubles each time, up to backoff_max_s)."""
+        n = int(self.load().get("strikes", 0)) + 1
+        self.save(strikes=n)
+        return min(float(self.o["backoff_base_s"]) * 2 ** (n - 1), float(self.o["backoff_max_s"]))
+
     def _notices(self, p: dict):
+        if p.get("busy") and not p.get("challenge"):
+            raise WebUnavailable(f"ChatGPT is turning chats away for now ({p['busy'][:120]!r})", self._strike(), "busy")
         """Anything on the page that means "stop": never interact with it, just report."""
         if p.get("challenge"):
             raise WebUnavailable(
@@ -1010,10 +1171,10 @@ class Bridge:
                 f"ChatGPT reports a usage limit ({p['limit']!r})", float(self.o["cooldown_limit_s"]), "limit"
             )
 
-    async def _open_chat(self, model: str) -> dict:
+    async def _open_chat(self, model: str, page=None) -> dict:
         """A fresh temporary chat, ready for typing. Raises WebUnavailable for anything a user would have to sort
         out by hand."""
-        page = await self._ensure_page()
+        page = page or await self._ensure_page()
         url = f"{self.base_url}/?temporary-chat=true"
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -1071,7 +1232,11 @@ class Bridge:
 
     async def _pick_model(self, page, model: str, p: dict) -> dict:
         want = model.lower()
-        if want in (p.get("model") or "").lower():
+
+        def auto_ok(shown):
+            return bool(self.o["allow_auto_fallback"] and re.search(r"(?:^|\s)auto$", shown or "", re.I))
+
+        if want in (p.get("model") or "").lower() or auto_ok(p.get("model")):
             return p
         if p.get("model") is None:  # no model picker at all (the Free plan): the account has one model, and it answers
             return p
@@ -1091,7 +1256,12 @@ class Bridge:
                 pass
         shown, p = p.get("model"), await self._probe(page, True)
         # a picker that is gone on the second look was something else on a half-loaded page: same as no picker
-        if p.get("model") is not None and want not in p["model"].lower() and self.o["strict_model"]:
+        if (
+            p.get("model") is not None
+            and want not in p["model"].lower()
+            and self.o["strict_model"]
+            and not auto_ok(p["model"])
+        ):
             raise WebUnavailable(
                 f"model {model!r} is not selectable in the page's model picker (it shows "
                 f"{p['model']!r}, before the attempt {shown!r})",
@@ -1186,7 +1356,7 @@ class Bridge:
         try:
             return await fn()
         except WebUnavailable as e:
-            if e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed"):
+            if e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy"):
                 self._block(e)
             raise
         except WebError:
@@ -1208,26 +1378,82 @@ class Bridge:
 
     # ---- public --------------------------------------------------------------------------------------------------
     async def complete(self, model: str, body: dict, model_id: str | None = None, wait: float | None = None) -> dict:
-        """One chat-completions request -> one temporary chat -> an OpenAI chat completion dict."""
+        """One completion request -> a fresh or safely continued temporary chat."""
+        if self.o["lean"]:
+            body = lean_body(body, int(self.o["lean_system_chars"]))
         prompt, tools, rules = render_prompt(body)
-        if len(prompt) > int(self.o["max_prompt_chars"]):
-            raise WebSkip(f"prompt is {len(prompt)} characters, over the bridge's {self.o['max_prompt_chars']}")
         self._precheck()
-        await self._acquire(wait)
+        self.busy += 1
+        try:
+            await self._acquire(wait)
+        except BaseException:
+            self.busy -= 1
+            raise
         try:
             self._precheck()
             await self._gap()
 
+            key = continuation_key(body, model) if self.o["reuse_chat"] else None
+            messages = [m for m in body.get("messages") or [] if m.get("role") not in ("system", "developer")]
+            setup = json.dumps(
+                {
+                    k: body.get(k)
+                    for k in ("tools", "tool_choice", "response_format", "parallel_tool_calls", "_single_tool_call")
+                },
+                sort_keys=True,
+                default=str,
+            )
+            setup += json.dumps(
+                [m for m in body.get("messages") or [] if m.get("role") in ("system", "developer")],
+                sort_keys=True,
+                default=str,
+            )
+            session = self._sessions.get(key) if key else None
+            reuse = bool(
+                session
+                and not session["page"].is_closed()
+                and session["setup"] == setup
+                and len(messages) > len(session["seen"])
+                and all(_message_shape(a) == _message_shape(b) for a, b in zip(messages, session["seen"], strict=False))
+            )
+            if reuse:
+                page = session["page"]
+                delta = messages[len(session["seen"]) :]
+                prompt = continuation_prompt(delta, tools, session["reply"])
+                self._sessions.pop(key)
+                self._sessions[key] = session  # most recently used tab goes last
+            else:
+                if key and session:
+                    self._sessions.pop(key)
+                    page = session["page"]  # a changed transcript starts a fresh chat in its own tab
+                else:
+                    await self._guarded(self._ensure_page)
+                    page = await self._new_page() if key and self._sessions else self._page
+                compacted = False
+                if len(prompt) > int(self.o["fresh_prompt_chars"]):
+                    prompt, tools, rules, compacted = compact_initial_prompt(body, int(self.o["fresh_prompt_chars"]))
+            if len(prompt) > int(self.o["max_prompt_chars"]):
+                raise WebSkip(f"prompt is {len(prompt)} characters, over the bridge's {self.o['max_prompt_chars']}")
+            self._page = page
+
             async def run():
-                await self._open_chat(model)
-                r = await self._send(self._page, prompt)
+                if reuse:
+                    p = await self._probe(page, False)
+                    self._notices(p)
+                    if p.get("temp") is not True:
+                        raise WebUnavailable(
+                            "temporary chat was lost", float(self.o["cooldown_tempchat_s"]), "tempchat"
+                        )
+                else:
+                    await self._open_chat(model, page)
+                r = await self._send(page, prompt)
                 repaired = False
                 try:
                     text, calls = parse_reply(r["md"], tools, rules)
                 except Malformed as e:  # one repair round, in the same temporary chat
                     repaired = True
                     await self.sleep(self.rand(1.0, 2.5))
-                    r = await self._send(self._page, repair_message(e))
+                    r = await self._send(page, repair_message(e))
                     try:
                         text, calls = parse_reply(r["md"], tools, rules)
                     except Malformed as e2:
@@ -1238,30 +1464,79 @@ class Bridge:
                 ):  # "the shell isn't available to me": say how, once
                     nudged = True
                     await self.sleep(self.rand(1.0, 2.5))
-                    r2 = await self._send(self._page, nudge_message(tools))
+                    r2 = await self._send(page, nudge_message(tools))
                     try:
                         text, calls = parse_reply(r2["md"], tools, rules)
                         r = r2
                     except Malformed:
                         pass  # keep the first answer
-                return text, calls, {"model_slug": r.get("slug"), "repaired": repaired, "nudged": nudged}
+                return (
+                    text,
+                    calls,
+                    {
+                        "model_slug": r.get("slug"),
+                        "repaired": repaired,
+                        "nudged": nudged,
+                        "continued": reuse,
+                        "sent_chars": len(prompt),
+                        "account": self.account,
+                        "compacted": False if reuse else compacted,
+                    },
+                )
 
-            text, calls, extra = await self._guarded(run)
+            try:
+                text, calls, extra = await self._guarded(run)
+            except Exception as e:
+                if key:
+                    self._sessions.pop(key, None)  # the page may contain a partial reply
+                if isinstance(e, WebError) and not isinstance(e, WebUnavailable | WebSkip):
+                    # the page failed without saying why (an error banner, nothing sent, no reply): the second
+                    # time in a row is treated like a temporary limit
+                    if int(self.load().get("strikes", 0)) >= 1:
+                        self._block(WebUnavailable(f"repeated page errors ({str(e)[:120]})", self._strike(), "busy"))
+                    else:
+                        self.save(strikes=1)
+                raise
+            if self.load().get("strikes"):
+                self.save(strikes=0)
             fmt = (body.get("response_format") or {}).get("type")
             if fmt in ("json_schema", "json_object") and not calls:
                 text = re.sub(r"^```\w*\n|\n```$", "", text.strip())
-            return chat_completion(model_id or f"chatgpt-web/{model}", text, calls, prompt, extra)
+            data = chat_completion(model_id or f"chatgpt-web/{model}", text, calls, prompt, extra)
+            if key:
+                self._sessions[key] = {
+                    "page": page,
+                    "seen": messages + [data["choices"][0]["message"]],
+                    "reply": data["choices"][0]["message"],
+                    "setup": setup,
+                }
+                while len(self._sessions) > max(1, int(self.o["max_chat_tabs"])):
+                    old_key = next(iter(self._sessions))
+                    old = self._sessions.pop(old_key)
+                    if old["page"] is not page:
+                        self._closing = True
+                        try:
+                            await old["page"].close()
+                        finally:
+                            self._closing = False
+            return data
         finally:
             self._last_done = self.clock()
             self._arm_idle()
+            self.busy -= 1
             self.lock.release()
 
     async def check(self, model: str = "auto", close: bool = False) -> dict:
         """Open a fresh temporary chat without sending anything: is the login there, is temporary chat there?"""
         await self._acquire(None)
+        probe_page = None
+        prior_page = self._page
         try:
             try:
-                p = await self._guarded(lambda: self._open_chat(model))
+                await self._guarded(self._ensure_page)
+                if self._sessions:
+                    probe_page = await self._new_page()
+                p = await self._guarded(lambda: self._open_chat(model, probe_page))
                 self.reset()
                 return {**self.status(), "ok": True, "page_model": p.get("model")}
             except WebUnavailable as e:
@@ -1269,11 +1544,124 @@ class Bridge:
             except WebError as e:
                 return {**self.status(), "ok": False, "reason": str(e), "kind": "error"}
         finally:
+            if probe_page:
+                self._closing = True
+                try:
+                    await probe_page.close()
+                finally:
+                    self._closing = False
+                self._page = prior_page
             if close:
                 await self._shutdown()
             else:
                 self._arm_idle()
             self.lock.release()
+
+
+class BridgePool:
+    """Several signed-in accounts, one Bridge (Chrome profile, window, daily count, cooldowns) each. A request goes
+    to the account already holding its chat, else to the least busy account that is not cooling down; an account
+    that turns it away passes it to the next."""
+
+    def __init__(self, base_url: str = "https://chatgpt.com", options: dict | None = None, **kw):
+        names = [str(n) for n in (options or {}).get("accounts") or ["main"]]
+        self.bridges = {n: Bridge(base_url, options, account=n, **kw) for n in dict.fromkeys(names)}
+        first = next(iter(self.bridges.values()))
+        self.o, self.profile, self.base_url = first.o, first.profile, first.base_url
+        self._turn = 0
+
+    def pick(self, account: str | None = None) -> Bridge:
+        if account and account not in self.bridges:
+            raise KeyError(f"no account {account!r} (accounts: {', '.join(self.bridges)})")
+        return self.bridges[account] if account else next(iter(self.bridges.values()))
+
+    def _order(self, model: str, body: dict) -> list[Bridge]:
+        lean = lean_body(body, int(self.o["lean_system_chars"])) if self.o["lean"] else body
+        key = continuation_key(lean, model)
+        self._turn += 1
+        bs = list(self.bridges.values())
+        rot = {id(b): (i - self._turn) % len(bs) for i, b in enumerate(bs)}  # ties go round-robin
+        return sorted(bs, key=lambda b: (key not in b._sessions, b.busy, b.load().get("count", 0) // 10, rot[id(b)]))
+
+    async def complete(self, model: str, body: dict, model_id: str | None = None, wait: float | None = None) -> dict:
+        last: Exception | None = None
+        for b in self._order(model, body):
+            try:
+                return await b.complete(model, body, model_id=model_id, wait=wait)
+            except (WebUnavailable, WebSkip) as e:
+                last = e
+        raise last
+
+    def status(self) -> dict:
+        per = {n: b.status() for n, b in self.bridges.items()}
+        soonest = min(per.values(), key=lambda s: s["blocked_for_s"])
+        return {
+            "signed_in": True
+            if any(s["signed_in"] for s in per.values())
+            else False
+            if all(s["signed_in"] is False for s in per.values())
+            else None,
+            "checked_at": max((s["checked_at"] or 0 for s in per.values()), default=0) or None,
+            "today": sum(s["today"] for s in per.values()),
+            "daily_cap": sum(int(s["daily_cap"]) for s in per.values()),
+            "blocked": all(s["blocked"] for s in per.values()),
+            "blocked_for_s": soonest["blocked_for_s"],
+            "reason": soonest["reason"],
+            "kind": soonest["kind"],
+            "model_seen": next((s["model_seen"] for s in per.values() if s["model_seen"]), None),
+            "window_open": any(s["window_open"] for s in per.values()),
+            "profile": str(self.profile),
+            "accounts": per,
+        }
+
+    def reset(self, account: str | None = None):
+        for b in [self.pick(account)] if account else self.bridges.values():
+            b.reset()
+
+    async def release(self, account: str | None = None):
+        for b in [self.pick(account)] if account else self.bridges.values():
+            await b.release()
+
+    async def check(self, model: str = "auto", close: bool = False, account: str | None = None) -> dict:
+        results = {}
+        for n, b in self.bridges.items():
+            if not account or n == account:
+                results[n] = await b.check(model, close=close)
+        ok = [r for r in results.values() if r["ok"]]
+        return {
+            **self.status(),
+            "ok": bool(ok),
+            "page_model": ok[0].get("page_model") if ok else None,
+            **({} if ok else {"reason": next(iter(results.values())).get("reason")}),
+            "checks": {n: {"ok": r["ok"], "reason": r.get("reason")} for n, r in results.items()},
+        }
+
+
+def make_bridge(base_url: str, options: dict | None = None):
+    """A Bridge, or a BridgePool when the provider lists `accounts`."""
+    return BridgePool(base_url, options) if (options or {}).get("accounts") else Bridge(base_url, options)
+
+
+def hide_chrome(profile: Path):
+    """Hide (as Cmd+H does) the Chrome that runs on this profile; the user's own Chrome is another process and is
+    left alone. Best effort: needs macOS and permission to use System Events."""
+    try:
+        pids = subprocess.run(
+            ["pgrep", "-f", f"user-data-dir={profile}"], capture_output=True, text=True
+        ).stdout.split()
+        for pid in pids[:40]:
+            subprocess.Popen(
+                [
+                    "osascript",
+                    "-e",
+                    'tell application "System Events" to set visible of '
+                    f"(every process whose unix id is {int(pid)}) to false",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except (OSError, ValueError):
+        pass
 
 
 def notify(text: str):

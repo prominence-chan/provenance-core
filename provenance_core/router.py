@@ -60,11 +60,11 @@ class Router:
         return [tier]
 
     def bridge(self, provider: str):
-        from .chatgpt_web import Bridge
+        from .chatgpt_web import make_bridge
 
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
-            self.bridges[provider] = Bridge(p.base_url, p.options)
+            self.bridges[provider] = make_bridge(p.base_url, p.options)
         return self.bridges[provider]
 
     def web_ok(self, endpoint: str) -> bool:
@@ -164,6 +164,10 @@ class Router:
             f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
             + (", repaired" if data["pcore"]["web"].get("repaired") else "")
             + (", nudged" if data["pcore"]["web"].get("nudged") else "")
+            + (", continued chat" if data["pcore"]["web"].get("continued") else ", new chat")
+            + (", history shortened" if data["pcore"]["web"].get("compacted") else "")
+            + f", {data['pcore']['web'].get('sent_chars', '?')} chars typed"
+            + (f", account {data['pcore']['web']['account']}" if data["pcore"]["web"].get("account") else "")
         )
         if stream:
             return BufferedStream(data), t0

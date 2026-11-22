@@ -41,7 +41,7 @@ function chrome() {
   $('tempctl').innerHTML = !S.login ? '' : temp ? '<button aria-label="Turn off temporary chat">t</button>'
       : (S.temp_toggle ? '<button aria-label="Turn on temporary chat" id="tt">t</button>' : '');
   if ($('tt')) $('tt').onclick = () => { temp = true; chrome(); };
-  $('banner').innerHTML = S.limit ? '<div role="alert">You’ve reached your limit for Luna. Responses will use another model until 9 PM.</div>' : '';
+  $('banner').innerHTML = S.limit ? '<div role="alert">You’ve reached your limit for Luna. Responses will use another model until 9 PM.</div>' : S.notice ? '<div role="alert">' + S.notice + '</div>' : '';
 }
 $('sw').onclick = () => {
   const m = $('menu'); m.style.display = 'block'; m.innerHTML = '';
@@ -104,6 +104,7 @@ class Mock:
             "temp_toggle": False,
             "challenge": False,
             "limit": False,
+            "notice": "",  # any other banner text (e.g. a temporary-limit message)
             "model": "Luna",
             "models": ["Luna", "Nimbus"],
             "delay": 150,

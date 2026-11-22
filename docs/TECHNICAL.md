@@ -102,7 +102,7 @@ server-side tools (web search, file search, MCP, computer use), PDF documents.
 ## ChatGPT web provider
 
 `type: chatgpt_web` in `catalog.yaml` (`provenance_core/chatgpt_web.py`): your own signed-in chatgpt.com chat as a
-stateless completion engine.
+completion engine. The local catalog enables bounded temporary-chat reuse for successive turns of one agent.
 
 **Risk first.** Driving the web app with a program is against OpenAI's terms of use for ChatGPT; the account can be
 rate limited, flagged or banned. Everything below is built to stay small and visible rather than to hide: it is
@@ -136,9 +136,11 @@ request at a time, the pauses, the daily cap, and stopping at any challenge that
 
 **What it does per request**
 
-1. Renders the whole chat request (system prompt, tool definitions, every message, earlier tool calls and their
-   results) into one message.
-2. Opens `https://chatgpt.com/?temporary-chat=true` in its Chrome window and checks what a user would see: signed
+1. Renders the initial chat request (system prompt, tools, and conversation) into one message. Long first messages
+   keep the task and recent evidence while shortening old tool output and actions to `fresh_prompt_chars`. If a later
+   request extends the same transcript, it sends only the new harness events in that chat's tab. A changed transcript
+   or tool setup starts fresh with the whole request. At most `max_chat_tabs` tabs stay open.
+2. Opens `https://chatgpt.com/?temporary-chat=true` in its Chrome window for a new conversation and checks what a user would see: signed
    in, no challenge or limit notice, temporary chat actually on (a "Temporary Chat" heading or a "Turn off temporary
    chat" control; if the URL flag didn't take, the page's own toggle is tried once), and the wanted model selected
    in the model picker.
@@ -147,9 +149,9 @@ request at a time, the pauses, the daily cap, and stopping at any challenge that
 4. Parses tool calls out of the reply and returns an ordinary chat completion (`finish_reason: tool_calls`), which
    the Responses / Anthropic / chat front ends translate as for any provider.
 
-Nothing carries over between requests: every request is a new temporary chat, so ChatGPT's memory and history are
-not involved and nothing is saved in the account. If temporary chat can't be confirmed, nothing is sent and the
-provider goes unavailable.
+Successive turns in a matching agent transcript can carry context in the same temporary chat. Different agents use
+different tabs, and a server restart starts a fresh chat. Temporary chats stay out of account history. If temporary
+chat can't be confirmed, nothing is sent and the provider goes unavailable.
 
 **What it never does:** read cookies or tokens from any browser profile, handle your password, forge sentinel /
 proof-of-work / Turnstile tokens, solve or click through captchas or challenges, or call ChatGPT's private backend
@@ -180,8 +182,9 @@ app, not the API model a harness prompt assumes. What the first version got wron
 - *Tools are shown as TypeScript signatures*, the way OpenAI renders function tools into its models' prompts
   (`type exec_command = (_: { cmd: string, workdir?: string, ... }) => any;` with descriptions as comments), not as
   JSON schema. Shorter, and a form the model has seen.
-- *The rules are said twice*: once at the top, and in four lines after the conversation, next to where the reply
-  starts. A real Codex request is 25,000 to 40,000 characters and the top is far away by then.
+- *The short rules are repeated*: once at the top, and again after the conversation or new events. The harness still
+  supplies its own system instructions; the bridge's framing is shorter and no longer tells the model to work one
+  action at a time. A client that sets `parallel_tool_calls: false` still permits only one tool call per response.
 
 **Tool-call protocol.** Two ways to call a tool. Any tool, as JSON:
 
@@ -248,7 +251,7 @@ Ensembles never include it.
 | captcha, challenge, "unusual activity", block page (after 20 s for an automatic check to pass by itself) | 6 h |
 | usage-limit notice | 1 h |
 | temporary chat not available | 6 h |
-| the page has a model picker and the model isn't in it | 1 h |
+| the page has a model picker and the model isn't in it (unless `allow_auto_fallback` accepts Auto) | 1 h |
 | you closed the window | 10 min |
 | daily cap reached | until local midnight |
 
@@ -267,7 +270,14 @@ page is fine again.
 | `reply_timeout_s` | 600 | longest wait for one reply |
 | `idle_close_s` | 900 | close the window after this long without a request |
 | `max_prompt_chars` | 120000 | larger requests skip the bridge |
+| `fresh_prompt_chars` | 60000 | target size for a new tab's first prompt; older history is shortened if needed |
 | `strict_model` | true | fail rather than answer with a different model than the one named |
+| `allow_auto_fallback` | false | allow a named model request to use the page's Auto selection when that name disappears |
+| `reuse_chat`, `max_chat_tabs` | false, 6 | reuse a matching agent's temporary chat and cap open tabs |
+| `lean`, `lean_system_chars` | false, 3000 | replace a harness base prompt longer than `lean_system_chars` (Codex sends ~18,000 characters) with a few lines, drop its skills list and the tools an unattended run never uses, keep only cwd / shell / date of the environment block |
+| `accounts` | none | e.g. `[main, b, c]`: one Chrome profile, window, daily count and cooldown per signed-in account (`provenance-core weblogin --account b`). A request goes to the account already holding its chat, else the least busy one that is not cooling down; `daily_cap` is per account |
+| `backoff_base_s`, `backoff_max_s` | 60, 900 | a "temporary limits" / failed-to-load notice, or two page errors in a row: stay away this long, doubling each time in a row |
+| `quiet` | false | macOS: hide the bridge's Chrome as soon as it opens (your own Chrome is untouched). `headless: true` is stopped by the site's browser check, so this is the way to keep it off the screen |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
 A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice; on a page with no picker, as on the Free plan, the account's one model answers). The page

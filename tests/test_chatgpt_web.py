@@ -4,6 +4,7 @@ cooldowns, daily cap) and the page driver against a local mock page (tests/mock_
 import asyncio
 import json
 import os
+import time
 
 import httpx
 import pytest
@@ -76,14 +77,51 @@ def test_prompt_holds_the_whole_request():
         "<<<tool result: shell>>>\na.py\nb.py",
         "<<<user>>>\nand now?",
         "At most one tool block",
-        "run on OpenAI's servers",
+        "your built-in tools run elsewhere",
         "Shorthand for `apply_patch` (body = `input`)",
     ):
         assert piece in prompt
-    assert prompt.rstrip().endswith("give the final answer with no block.")  # the rules again, next to the reply
+    assert prompt.rstrip().endswith("answer without a block.")  # the rules again, next to the reply
     # the model's own earlier call, rendered in the protocol, parses back
     text, calls = cw.parse_reply(prompt[prompt.index("<<<assistant>>>\n") : prompt.index("<<<tool result:")], tools)
     assert calls[0]["name"] == "shell" and json.loads(calls[0]["arguments"]) == {"command": ["ls"]}
+
+
+def test_tool_documentation_is_bounded_without_losing_call_shape():
+    verbose = json.loads(json.dumps(TOOLS[0]))
+    verbose["function"]["description"] = "Run a command. " + "background detail " * 2000
+    verbose["function"]["parameters"]["properties"]["command"]["description"] = "argv " * 2000
+    prompt, _, _ = cw.render_prompt({"messages": [{"role": "user", "content": "inspect"}], "tools": [verbose]})
+    assert len(prompt) < 3000
+    assert "type shell" in prompt and "command: string[]" in prompt and "Run a command." in prompt
+
+
+def test_long_initial_transcript_keeps_task_and_recent_evidence():
+    messages = [{"role": "user", "content": "Find the regression in module alpha."}]
+    for i in range(12):
+        messages += [
+            {"role": "assistant", "content": f"Checking step {i}."},
+            {"role": "tool", "content": ("old output " * 1000) if i < 8 else f"result {i}"},
+        ]
+    prompt, _, _, compacted = cw.compact_initial_prompt({"messages": messages, "tools": TOOLS}, 9000)
+    assert compacted and len(prompt) <= 9000
+    assert "Find the regression in module alpha." in prompt
+    assert "result 11" in prompt
+    assert "old output " * 100 not in prompt
+
+
+def test_compaction_bounds_recent_large_tool_output():
+    body = {
+        "messages": [
+            {"role": "user", "content": "Find the bug."},
+            {"role": "assistant", "content": "Reading."},
+            {"role": "tool", "content": "A" * 100000 + " END_MARKER"},
+            {"role": "user", "content": "Use the result and finish."},
+        ]
+    }
+    prompt, _, _, compacted = cw.compact_initial_prompt(body, 20000)
+    assert compacted and len(prompt) <= 20000
+    assert "Find the bug." in prompt and "END_MARKER" in prompt and "Use the result and finish." in prompt
 
 
 def test_prompt_tool_choice_and_images():
@@ -169,12 +207,11 @@ def test_prompt_for_a_codex_request():
     for piece in (
         "no separate apply_patch tool here: to edit a file, run `apply_patch` as a shell command through exec_command",
         "Shorthand for `exec_command` (body = `cmd`)",
-        "// Runs a command in a PTY.\n// Returns output.\ntype exec_command = (_: {\n  // Shell command to execute.\n  cmd: string,\n",
+        "// Runs a command in a PTY. Returns output.\ntype exec_command = (_: {\n  // Shell command to execute.\n  cmd: string,\n",
         '  sandbox_permissions?: "use_default" | "require_escalated",\n  prefix_rule?: string[],\n}) => any;',
         "type write_stdin = (_: {\n  session_id: number,\n  chars?: string,\n}) => any;",
         '```tool_call\n{"name": "exec_command", "arguments": {"cmd": "ls"}}\n```',
         "```exec_command\n" + patch + "\n```",  # its earlier multi-line command, shown unescaped
-        "or the ```exec_command shorthand for a command",
     ):
         assert piece in prompt
     assert "write_stdin` (body" not in prompt  # no free-text argument: no shorthand
@@ -599,6 +636,58 @@ def test_page_plain_reply_and_markdown(mock, tmp_path):
 
 
 @browser
+def test_temporary_chat_reuses_only_its_own_conversation(mock, tmp_path):
+    mock.replies = [
+        tool_call("shell", {"command": ["pwd"]}),
+        tool_call("shell", {"command": ["ls"]}),
+        "<p>done</p>",
+    ]
+
+    async def go(b):
+        a = {
+            "messages": [{"role": "system", "content": "Work carefully."}, {"role": "user", "content": "task A"}],
+            "tools": TOOLS,
+        }
+        b_body = {
+            "messages": [{"role": "system", "content": "Work carefully."}, {"role": "user", "content": "task B"}],
+            "tools": TOOLS,
+        }
+        first = await b.complete("luna", a)
+        await b.complete("luna", b_body)
+        follow = {
+            **a,
+            "messages": a["messages"]
+            + [
+                first["choices"][0]["message"],
+                {
+                    "role": "tool",
+                    "tool_call_id": first["choices"][0]["message"]["tool_calls"][0]["id"],
+                    "content": "/repo",
+                },
+            ],
+        }
+        last = await b.complete("luna", follow)
+        return last, len(b._sessions)
+
+    last, sessions = scenario(mock, tmp_path, go, reuse_chat=True)
+    assert last["choices"][0]["message"]["content"] == "done"
+    assert sessions == 2
+    assert all(sent["temp"] for sent in mock.sent)
+    assert "task A" in mock.sent[0]["prompt"] and "task B" in mock.sent[1]["prompt"]
+    assert "<<<tool result: shell>>>\n/repo" in mock.sent[2]["prompt"]
+    assert "task A" not in mock.sent[2]["prompt"] and "Work carefully." not in mock.sent[2]["prompt"]
+
+
+@browser
+def test_named_model_can_fall_back_to_auto(mock, tmp_path):
+    mock.state["model"] = "Auto"
+    mock.state["models"] = ["Auto"]
+    result = scenario(mock, tmp_path, lambda b: b.complete("luna", dict(USER)), allow_auto_fallback=True)
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert mock.sent[0]["model"] == "Auto"
+
+
+@browser
 def test_page_tool_call_and_repair(mock, tmp_path):
     good = "<p>Listing.</p>" + tool_call("shell", {"command": ["ls", "-la"]})
     mock.replies = [
@@ -846,3 +935,104 @@ def test_reads_the_2026_11_markup():
     )
     assert [(c["name"], json.loads(c["arguments"])) for c in calls] == [("read_file", {"path": "/etc/hosts"})]
     assert "Python\n" not in md and "Run" not in md and "tool_call" not in text
+
+
+def test_lean_body_cuts_the_harness_prompt():
+    body = {
+        "messages": [
+            {"role": "developer", "content": "You are a coding agent running in the Codex CLI. " + "rule " * 3000},
+            {"role": "developer", "content": "<skills_instructions>\n## Skills\n- imagegen</skills_instructions>"},
+            {"role": "developer", "content": "Reply in French."},
+            {
+                "role": "user",
+                "content": "<environment_context>\n  <cwd>/repo</cwd>\n  <shell>zsh</shell>\n"
+                "  <current_date>2026-11-21</current_date>\n  <filesystem>"
+                + "x" * 900
+                + "</filesystem>\n</environment_context>",
+            },
+            {"role": "user", "content": "fix the bug"},
+        ],
+        "tools": TOOLS + [{"type": "function", "function": {"name": "update_goal", "parameters": {}}}],
+    }
+    lean = cw.lean_body(body)
+    prompt, tools, _ = cw.render_prompt(lean)
+    assert len(prompt) < 4500 and "update_goal" not in tools and "shell" in tools
+    for piece in ("apply_patch", "Reply in French.", "cwd: /repo, shell: zsh, current_date: 2026-11-21", "fix the bug"):
+        assert piece in prompt
+    assert "Skills" not in prompt and "xxxx" not in prompt
+    assert cw.lean_body(body) == lean  # stable, so a continued chat still lines up
+
+
+def test_agents_in_one_directory_get_their_own_chat():
+    env = {"role": "user", "content": "<environment_context><cwd>/repo</cwd></environment_context>"}
+    a = {"messages": [env, {"role": "user", "content": "task A"}]}
+    b = {"messages": [env, {"role": "user", "content": "task B"}]}
+    later = {"messages": a["messages"] + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "more"}]}
+    assert cw.continuation_key(a, "luna") != cw.continuation_key(b, "luna")
+    assert cw.continuation_key(a, "luna") == cw.continuation_key(later, "luna")
+
+
+def test_accounts_have_their_own_profile_and_state(tmp_path):
+    pool = cw.make_bridge("https://chatgpt.com", {"accounts": ["main", "b"], "daily_cap": 5})
+    assert isinstance(pool, cw.BridgePool) and list(pool.bridges) == ["main", "b"]
+    pool = cw.BridgePool("https://chatgpt.com", {"accounts": ["main", "b"], "daily_cap": 5}, home=tmp_path)
+    m, b = pool.bridges["main"], pool.bridges["b"]
+    assert m.profile.name == "chatgpt-web-profile" and b.profile.name == "chatgpt-web-profile-b"
+    assert m.state_path.name == "chatgpt_web.json" and b.state_path.name == "chatgpt_web-b.json"
+    m.save(count=5, signed_in=True)
+    b.save(signed_in=True)
+    st = pool.status()
+    assert st["today"] == 5 and st["daily_cap"] == 10 and not st["blocked"] and st["signed_in"]
+    assert pool._order("luna", dict(USER))[0] is b  # the one with room goes first
+    b.busy = 2
+    assert pool._order("luna", dict(USER))[0] is m
+
+
+@browser
+def test_pool_spreads_and_fails_over(mock, tmp_path):
+    mock.replies = ["<p>one</p>", "<p>two</p>", "<p>three</p>"]
+
+    async def go():
+        pool = cw.BridgePool(
+            mock.url,
+            {
+                "accounts": ["main", "b"],
+                "headless": True,
+                "min_gap_s": 0,
+                "max_gap_s": 0,
+                "notify": False,
+                "profile": str(tmp_path / "profile"),
+                "driver": os.environ.get("PCORE_TEST_DRIVER", "playwright"),
+            },
+            home=tmp_path,
+        )
+        try:
+            pool.bridges["main"].save(blocked_until=time.time() + 600, reason="temporary limit", kind="busy")
+            r1 = await pool.complete("auto", dict(USER))
+            pool.bridges["main"].reset()
+            r2, r3 = await asyncio.gather(pool.complete("auto", dict(USER)), pool.complete("auto", dict(USER)))
+            return [r1, r2, r3], {n: b.load()["count"] for n, b in pool.bridges.items()}
+        finally:
+            await pool.release()
+
+    replies, counts = run(go())
+    assert sorted(r["choices"][0]["message"]["content"] for r in replies) == ["one", "three", "two"]
+    assert counts["b"] >= 1 and counts["main"] >= 1 and sum(counts.values()) == 3
+
+
+@browser
+def test_temporary_limit_backs_off_and_doubles(mock, tmp_path):
+    mock.state["notice"] = "Temporary limits are stopping this chat from loading. Try again later."
+
+    async def go(b):
+        waits = []
+        for _ in range(2):
+            try:
+                await b.complete("auto", dict(USER))
+            except cw.WebUnavailable as e:
+                waits.append((e.kind, round(e.cooldown)))
+            b.save(blocked_until=0)
+        return waits, mock.sent
+
+    waits, sent = scenario(mock, tmp_path, go)
+    assert waits == [("busy", 60), ("busy", 120)] and not sent

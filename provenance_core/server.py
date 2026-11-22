@@ -135,11 +135,18 @@ def create_app(
     def web_provider() -> str | None:
         return next((n for n, p in router.catalog.providers.items() if p.type == "chatgpt_web"), None)
 
+    def acct(b, account: str | None) -> dict:  # only a pool of accounts takes an account name
+        if not account or not hasattr(b, "bridges"):
+            return {}
+        if account not in b.bridges:
+            raise HTTPException(404, f"no account {account!r}")
+        return {"account": account}
+
     def web_models(name: str):
         return [m for m in router.catalog.models.values() if m.provider == name]
 
     @app.get("/chatgpt-web/status")
-    async def web_status(probe: int = 0, authorization: str | None = Header(None)):
+    async def web_status(probe: int = 0, account: str | None = None, authorization: str | None = Header(None)):
         check(authorization)
         name = web_provider()
         if not name:
@@ -147,7 +154,7 @@ def create_app(
         on = router.catalog.providers[name].usable
         b = router.bridge(name)
         if probe and on:  # opens a fresh temporary chat, sends nothing
-            st = await b.check(next((m.model for m in web_models(name)), "auto"))
+            st = await b.check(next((m.model for m in web_models(name)), "auto"), **acct(b, account))
             if st["ok"]:
                 for m in web_models(name):
                     router.state.health.pop(m.id, None)
@@ -169,15 +176,15 @@ def create_app(
         }
 
     @app.post("/chatgpt-web/release")
-    async def web_release(reset: int = 0, authorization: str | None = Header(None)):
+    async def web_release(reset: int = 0, account: str | None = None, authorization: str | None = Header(None)):
         check(authorization)
         name = web_provider()
         if not name:
             raise HTTPException(404, "no chatgpt_web provider in the catalog")
         b = router.bridge(name)
-        await b.release()
+        await b.release(**acct(b, account))
         if reset:  # after a fresh sign-in: forget the block and the router's cooldown
-            b.reset()
+            b.reset(**acct(b, account))
             for m in web_models(name):
                 router.state.health.pop(m.id, None)
         return {"released": True, **b.status()}
