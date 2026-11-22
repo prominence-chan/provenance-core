@@ -32,7 +32,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import compact, prune
+from . import compact, prune, settings
 from .settings import env
 
 
@@ -1320,7 +1320,7 @@ LOGIN_HINT = "run `provenance-core weblogin` and sign in to ChatGPT in the windo
 
 
 def home_dir() -> Path:
-    return Path(env("HOME") or Path.home() / ".tierlm")
+    return settings.home_dir()
 
 
 def enabled(options: dict | None) -> bool:

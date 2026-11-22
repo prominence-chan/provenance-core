@@ -19,7 +19,6 @@ import httpx
 
 from . import compact, prune
 from .catalog import Catalog, Model
-from .settings import env
 from .state import State
 
 
@@ -28,9 +27,9 @@ class NoCapacity(Exception):
 
 
 def _home():
-    from pathlib import Path
+    from .settings import home_dir
 
-    return Path(env("HOME") or Path.home() / ".tierlm")
+    return home_dir()
 
 
 def estimate_tokens(body: dict) -> int:
