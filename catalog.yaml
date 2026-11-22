@@ -50,7 +50,9 @@ providers:
                 web: {daily_cap: 500, min_gap_s: 4, max_gap_s: 9, endpoints: [responses],
                       allow_auto_fallback: true, reuse_chat: true, max_chat_tabs: 6,
                       # daily_cap is per account. lean: a few lines instead of the harness's 18k base prompt.
-                      lean: true, quiet: true, idle_close_s: 21600, accounts: [main, b, c]}}
+                      lean: true, quiet: true, idle_close_s: 21600, accounts: [main, b, c],
+                      # the bridge's own background-only browser (browser_host.py): no Dock icon, never takes focus
+                      browser: bundled}}
   # Z.ai web (chat.z.ai) through the same bridge (`site: zai`). `share: chatgpt-web` = no Chrome of its own: it works
   # as extra tabs in the chatgpt-web accounts' windows (so a Z.ai sign-in is done in those profiles). Without a
   # sign-in it is the guest page, which offers GLM-5.3-Flash only (GLM-5.3 and 5.2 need an account).

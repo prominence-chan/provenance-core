@@ -1049,6 +1049,8 @@ SITES = {
         # code blocks are an editor widget that only draws the lines in view, so the finished reply is taken from
         # the page's own Copy button (the reply's markdown, as written) instead of from the elements
         "copy": 'button[aria-label="Copy"]',
+        # the free plan's daily cap on a model is written under the chat, in place of a reply
+        "limit": "You(?:'|’)ve reached today(?:'|’)s [^.\\n]{0,60}limit[^\\n]{0,120}",
     },
     "gemini": {  # gemini.google.com, signed in; temporary chats via the page's toggle
         "name": "Gemini",
@@ -1103,6 +1105,7 @@ SITE_PROBE_JS = r"""([cfg, fresh]) => {
   out.busy = m(/try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|(?:high|heavy) (?:demand|traffic|load)|server (?:is )?busy|too many (?:requests|users)|rate limit/i, scoped);
   out.limit = out.busy ? null : m(/(?:reached|hit|exceeded) (?:your|the|our)[^.\n]{0,80}(?:limit|quota)|(?:daily|usage) (?:limit|quota|cap)[^.\n]{0,60}|(?:log|sign) in to continue[^.\n]{0,60}/i, scoped);
   out.error = m(/something went wrong|network error|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|an error occurred|failed to (?:send|fetch|generate)[^.\n]{0,40}/i, scoped);
+  if (!out.limit && !out.busy && cfg.limit && document.body) out.limit = m(new RegExp(cfg.limit, 'i'), document.body.innerText.slice(-700));
   out.full = m(/context (?:window|length)[^.\n]{0,30}(?:full|exceeded)|conversation (?:is|has gotten) too long|maximum (?:length|context)[^.\n]{0,40}/i, scoped);
   out.stop = !!first(cfg.stop);
   const send = first(cfg.send);
@@ -1684,7 +1687,9 @@ class Bridge:
             )
         if p.get("limit"):
             raise WebUnavailable(
-                f"ChatGPT reports a usage limit ({p['limit']!r})", float(self.o["cooldown_limit_s"]), "limit"
+                f"{self.site['name'] if self.site else 'ChatGPT'} reports a usage limit ({p['limit']!r})",
+                float(self.o["cooldown_limit_s"]),
+                "limit",
             )
 
     async def _open_chat(self, model: str, page=None) -> dict:
@@ -1737,12 +1742,18 @@ class Bridge:
         if p.get("temp") is not True:  # the url flag didn't take: try the page's own toggle once
             toggle = page.locator('button[aria-label*="temporary chat" i]').first
             try:
-                try:
-                    await toggle.click(timeout=3000)
-                except Exception:  # noqa: BLE001 - a hidden window does not take clicks; the script click does
-                    await toggle.evaluate("el => el.click()", timeout=3000)
-                await asyncio.sleep(1.5)
-                p = await self._probe(page, True)
+                for _ in range(3):  # the toggle can be there before it works (Gemini): press again if it did not take
+                    try:
+                        await toggle.click(timeout=3000)
+                    except Exception:  # noqa: BLE001 - a hidden window does not take clicks; the script click does
+                        await toggle.evaluate("el => el.click()", timeout=3000)
+                    await asyncio.sleep(1.5)
+                    p = await self._probe(page, True)
+                    if p.get("temp") is True:
+                        break
+                    toggle = page.locator('button[aria-label^="Turn on temporary chat" i]').first
+                    if not await toggle.count():
+                        toggle = page.locator('button[aria-label*="temporary chat" i]').first
             except Exception:  # noqa: BLE001
                 pass
         if p.get("temp") is not True or p.get("users") or p.get("assistants"):
