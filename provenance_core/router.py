@@ -17,13 +17,20 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import prune
+from . import compact, prune
 from .catalog import Catalog, Model
+from .settings import env
 from .state import State
 
 
 class NoCapacity(Exception):
     pass
+
+
+def _home():
+    from pathlib import Path
+
+    return Path(env("HOME") or Path.home() / ".tierlm")
 
 
 def estimate_tokens(body: dict) -> int:
@@ -44,6 +51,7 @@ class Router:
         state: State | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 120.0,
+        home=None,
     ):
         self.catalog = catalog
         self.state = state or State()
@@ -51,6 +59,9 @@ class Router:
         self.bridges: dict = {}  # provider name -> chatgpt_web.Bridge (made on first use)
         self.inflight: dict[str, int] = {}  # model id -> requests being served right now
         self._view: tuple | None = None  # the last api_view: (body, pruned body, report)
+        # summarising compaction's briefs, shared by API models and the web bridges; model-written ones are also
+        # kept on disk under PCORE_HOME (only written when compaction with a model is switched on)
+        self.compactor = compact.Compactor(home or _home())
 
     # ---- selection -------------------------------------------------------------------------------------------
     def tiers_for(self, tier: str, fallback: str) -> list[str]:
@@ -67,9 +78,13 @@ class Router:
 
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
-            opts = p.options if "prune" in p.options else {**p.options, "prune": self.catalog.prune}
+            opts = dict(p.options)
+            for k in ("prune", "compact"):  # the catalog's top-level setting, unless the provider has its own
+                opts.setdefault(k, getattr(self.catalog, k))
             share = opts.get("share")  # work inside another web provider's Chrome windows
-            self.bridges[provider] = make_bridge(p.base_url, opts, self.bridge(share) if share else None)
+            b = self.bridges[provider] = make_bridge(p.base_url, opts, self.bridge(share) if share else None)
+            for one in getattr(b, "bridges", {"": b}).values():
+                one.compactor, one.summarize = self.compactor, self.summarize
         return self.bridges[provider]
 
     def web_ok(self, endpoint: str) -> bool:
@@ -142,20 +157,31 @@ class Router:
         fallback: str = "none",
         web: bool = False,
         source: str | None = None,
+        compactable: dict | None = None,
     ) -> list[Model]:
         """`web`: include chatgpt_web models. Off by default so ensembles, calibration and anything that didn't ask
         never reach the web bridge; the front ends pass it per the provider's `endpoints`. `source`: the pinned
-        source of the first tier, tried before the others. A conversation stays on the model that served it."""
+        source of the first tier, tried before the others. A conversation stays on the model that served it.
+        `compactable`: compaction's options when it is on for API models: then a model whose context window is
+        smaller than the request still qualifies (it is sent a compacted history; see api_body), after the models
+        of its tier that take the history whole."""
         out: list[Model] = []
         sticky = self.state.sticky(session)
         for i, t in enumerate(self.tiers_for(tier, fallback)):
             by_source: dict[str, list[Choice]] = {}
+            short: set[str] = set()  # models that would get a compacted history
             for m in self.catalog.models_in(t):
-                if not self.state.available(m) or m.context < tokens:
+                if not self.state.available(m):
                     continue
+                need = tokens
+                if m.context < tokens:
+                    if self.catalog.is_web(m) or not compactable or m.context < int(compactable["min_context"]):
+                        continue
+                    need = int(m.context * float(compactable["fill"]))
+                    short.add(m.id)
                 if not web and self.catalog.is_web(m):
                     continue
-                head = self.state.headroom(m, tokens)
+                head = self.state.headroom(m, need)
                 if head <= 0:
                     continue
                 lat = self.state.health.get(m.id)
@@ -167,6 +193,7 @@ class Router:
             if source and i == 0 and source in by_source:
                 order = [source] + [s for s in order if s != source]
             tier_models = [c.model for s in order for c in sorted(by_source[s], key=lambda c: -c.rank)]
+            tier_models.sort(key=lambda m: m.id in short)  # stable: the whole-history models first
             pinned_here = source and i == 0 and source in by_source
             for m in tier_models:
                 if m.id == sticky and (not pinned_here or self.source_id(m) == source):
@@ -182,7 +209,7 @@ class Router:
         turns, judged on that part alone, so consecutive requests still share their prefix byte for byte and provider
         prompt caches keep hitting. The web bridge always gets the body as sent (it prunes its own fresh prompts)."""
         opts = prune.config("api", self.catalog.prune)
-        if not opts:
+        if not opts or body.get("_pcore_internal"):
             return body, None
         if self._view and self._view[0] is body:
             return self._view[1], self._view[2]
@@ -190,13 +217,55 @@ class Router:
         self._view = (body, pruned, report)
         return pruned, report
 
+    def compact_options(self) -> dict | None:
+        return compact.config("api", self.catalog.compact)
+
+    async def api_body(self, m: Model, body: dict) -> tuple[dict, dict | None, dict | None]:
+        """(the body model `m` is sent, what pruning removed, what compaction did). Compaction (`compact` on for
+        "api") only touches a request that does not fit the model's context window: the history before a cut on
+        prune's grid becomes a brief, made from the history as the client sent it and cached per cut, so every
+        request with the same cut starts with the same bytes; the rest is sent as api_view has it."""
+        view, pruned = self.api_view(body)
+        o = self.compact_options()
+        if not o or body.get("_pcore_internal") or estimate_tokens(view) <= m.context:
+            return view, pruned, None
+        max_t = int(view.get("max_tokens") or view.get("max_completion_tokens") or 1024)
+        budget = int((m.context * float(o["fill"]) - max_t) * 4)  # in estimate_tokens' characters
+        msgs, rep = await self.compactor.acompact(
+            body.get("messages") or [], view.get("messages") or [], budget, o, compact.json_size, "api", self.summarize
+        )
+        return ({**view, "messages": msgs} if rep else view), pruned, rep
+
+    async def summarize(self, system: str, text: str, who: str, max_chars: int) -> tuple[str, str]:
+        """compact.py's narrative writer: one request to the API models of tier `who` (or to the API model with that
+        id). Never a web bridge: it is called with the history the bridge could not take."""
+        body = {
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
+            "temperature": 0,
+            "max_tokens": max(512, max_chars // 2),
+            "_pcore_internal": True,
+        }
+        if who in self.catalog.models:
+            m = self.catalog.models[who]
+            if self.catalog.is_web(m):
+                raise ValueError(f"{who} is a web model; compaction only asks API models")
+            data = await self.call(m, body)
+        else:
+            tier = self.catalog.resolve_tier(who)
+            if not tier:
+                raise ValueError(f"compaction model {who!r} is neither a tier nor a model id")
+            data, m = await self.complete(body, tier, attempts=2, web=False)
+        return (data["choices"][0]["message"].get("content") or ""), m.id
+
     async def call(self, m: Model, body: dict, stream: bool = False):
         p = self.catalog.providers[m.provider]
         if p.type == "chatgpt_web":
             return await self._web_call(m, body, stream)
-        body, pruned = self.api_view(body)
+        body, pruned, compacted = await self.api_body(m, body)
         if pruned and pruned["saved"]:
             print(f"prune: {m.id} history {prune.summary(pruned)}", flush=True)
+        if compacted:
+            print(f"compact: {m.id} history {compact.summary(compacted)}", flush=True)
         payload = {**{k: v for k, v in body.items() if not k.startswith("_")}, "model": m.model, "stream": stream}
         headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
         t0 = time.time()
@@ -219,6 +288,8 @@ class Router:
         data = resp.json()
         if pruned and pruned["saved"]:
             data.setdefault("pcore", {})["prune"] = pruned
+        if compacted:
+            data.setdefault("pcore", {})["compact"] = compacted
         self.state.success(m, (time.time() - t0) * 1000)
         used = (data.get("usage") or {}).get("total_tokens") or estimate_tokens(body)
         self.state.record(m, used)
@@ -245,7 +316,13 @@ class Router:
                 + (", continued chat" if web.get("continued") else ", new chat")
                 + (", previous chat was full" if web.get("restarted") else "")
                 + (f", history {prune.summary(web['pruned'])}" if (web.get("pruned") or {}).get("saved") else "")
-                + (", history shortened" if web.get("compacted") else "")
+                + (
+                    f", history summarised ({compact.summary(web['compaction'])})"
+                    if web.get("compaction")
+                    else ", history shortened"
+                    if web.get("compacted")
+                    else ""
+                )
                 + f", {web.get('sent_chars', '?')} chars typed"
                 + (f", account {web['account']}" if web.get("account") else "")
             )
@@ -291,7 +368,7 @@ class Router:
     ) -> tuple[dict, Model]:
         tokens = estimate_tokens(self.api_view(body)[0])  # the size an API model would be sent
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web, source)[:attempts]:
+        for m in self.candidates(tier, tokens, session, fallback, web, source, self.compact_options())[:attempts]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 data = await self.call(m, body)
@@ -314,7 +391,7 @@ class Router:
     ):
         tokens = estimate_tokens(self.api_view(body)[0])
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web, source)[:4]:
+        for m in self.candidates(tier, tokens, session, fallback, web, source, self.compact_options())[:4]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 resp, t0 = await self.call(m, body, stream=True)

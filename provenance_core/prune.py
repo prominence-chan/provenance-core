@@ -46,7 +46,7 @@ import json
 import posixpath
 import re
 
-from .settings import env
+from .settings import scoped
 
 RULES = (
     "dup_system",
@@ -79,19 +79,7 @@ def config(scope: str, value) -> dict | None:
     prompts), or None when it is off there. `value` is the setting as written: true / false, a dict of options, or
     {"api": ..., "web": ...} (each true / false / options). Off by default. PCORE_PRUNE overrides it: 0 / off, 1 / on /
     all, or the name of one scope."""
-    if isinstance(value, dict) and ("api" in value or "web" in value):
-        value = value.get(scope)
-    e = (env("PRUNE") or "").strip().lower()
-    if e:
-        if not (e in ("1", "true", "on", "yes", "all") or e == scope):
-            return None
-        value = value if isinstance(value, dict) else True
-    if not value:
-        return None
-    o = {**DEFAULTS, **(value if isinstance(value, dict) else {})}
-    if o.pop("enabled", True) is False:
-        return None
-    return o
+    return scoped("PRUNE", scope, value, DEFAULTS)
 
 
 # ---- the parts of a message ---------------------------------------------------------------------------------------------

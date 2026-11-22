@@ -59,6 +59,7 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
   `<provider>/<model>`).
 - **tiers** and **aliases**.
 - **prune** (optional, off when absent): history pruning, see "History pruning" below.
+- **compact** (optional, off when absent): summarising compaction, see "Context compaction" below.
 
 A provider without its key (or with an unset `${VAR}`) is skipped. Free-tier lineups change weekly:
 `python -m provenance_core discover <provider>` lists a provider's current models; re-run `calibrate` afterwards.
@@ -153,6 +154,123 @@ Each request records what was removed (per rule: count and characters saved): th
 N of M chars (rule count/chars, ...)`), `pcore.web.pruned` in its completion, and for API models a `prune:` log line
 and `pcore.prune` in the response.
 
+## Context compaction
+
+Pruning only removes what the model no longer needs; when a history is still too big for where it is going, something
+has to go. `provenance_core/compact.py` decides what: the old part of the conversation becomes a written brief and the
+newest turns stay as sent. It is **off by default**.
+
+```yaml
+compact: true                    # top level of catalog.yaml: API models and the web bridge
+compact: {web: true}             # or one of them; each value may be a dict of options instead of true
+compact: {api: {model: spark}}   # with a model-written narrative (see below)
+```
+
+`PCORE_COMPACT` overrides it: `1` / `all`, `api`, `web`, `0` (off). A chatgpt_web provider's `web:` block may set
+`compact:` for that bridge.
+
+**What the model is given**: the system message(s) and the opening (everything before the agent's first turn: the
+environment block and the task) verbatim; one user message holding the brief of turns 1..N; turns N+1.. verbatim. The
+cut is always at an assistant turn, so every kept tool call has its result and every kept result its call. The brief
+(rules only: no model call, 10-20 ms on a 500,000-character history, deterministic) has, in order of priority:
+
+| section | from |
+|---|---|
+| what the user asked for | every user message after the opening, verbatim (each clipped only when even that does not fit) |
+| files changed | every file a call changed: created / written whole / edited / deleted, how many times, at which turn, failed changes, how often read, and the last change itself (patch lines, the head of a whole write) for as many of the newest as fit |
+| what was tried and failed | each failed command or change with its first error line, and whether a later run or change worked |
+| the agent's plan | its last `update_plan` |
+| commands and outcomes | every command that is not a look-around (tests, builds, git, scripts), latest run of each: exit code, run count, the last output line |
+| the agent's notes | its own prose, most recent kept first (answers to the user marked) |
+| files read | the names of files read but not changed |
+| where it stood | its last words, and the turn the verbatim part starts at |
+| with room to spare | the latest text of each file (a whole write, or a read after its last change), then the latest output of searches and listings |
+
+The sections share the brief's size by weight; one that needs less than its share leaves the rest to the others. The
+brief is at most `brief_chars` (16,000) and `brief_share` (0.3) of the budget; on the web bridge it may also grow into
+whatever the kept turns leave (`use_room`).
+
+**Where the cut goes, and why it is stable.** On the same grid as pruning's stable boundary: every `step`-th assistant
+turn (8 for API models, 4 on the web), at least `keep_turns` (4) from the end; the earliest grid turn at which the
+opening, a full-size brief and everything after the cut fit in the budget. That is judged on the history as the
+client sent it (not the pruned one, which can shrink when pruning's own boundary moves), and the history only grows
+at its end, so the cut only ever moves forward, one grid step at a time. The brief is made from the history before
+the cut as sent, so it depends on that part alone; it is cached under a hash of it (call ids left out, since a
+Responses client may regenerate them on resume), in memory (64 cuts) and, when a model wrote part of it, on disk
+under `<PCORE_HOME>/compact/`. Between two moves of the cut every request starts with byte-identical messages up to
+and including the brief, followed by the newer turns as the rest of the pipeline sends them. If even the latest cut
+leaves too much (a few huge recent outputs), the kept turns' tool output is shortened (`trimmed` in the record); that
+part then differs from request to request.
+
+**Where it runs, and how it fits with pruning and chat continuation**
+
+- *Web bridge:* where the blunt cut ran, i.e. only on the first message of a new chat (the first request, after a
+  restart, a changed transcript, or when the site says the chat is full) when it is over `fresh_prompt_chars`.
+  Order: `lean` → prune (`fresh` mode) → compaction (the brief from the lean history as sent, the kept turns from the
+  pruned one) → rendered; if it is still over the limit (or there are too few turns to summarise) the blunt cut has
+  the last word. Whether a later request continues the chat is decided on the client's own messages (the session
+  remembers those), and a continued chat is typed exactly as sent, so neither pass can make a chat look changed: a
+  continued chat is never affected. A model narrative, if configured, is written before the bridge takes its window
+  (`Bridge.warm`), never while holding it; the restart path uses one only if it is already cached.
+- *API models:* only for a model whose context window is smaller than the (pruned) request, and only one with at
+  least `min_context` (32,000) tokens: such a model is then a candidate again, after the models of its tier that take
+  the history whole. The budget is `fill` (0.85) of its context minus `max_tokens`. Pruning (stable mode) runs first
+  and is what the kept turns are sent as; the brief replaces the oldest part, so pruning's stable prefix and the
+  brief's line up: when pruning's boundary moves, the bytes from the cut on change once, as they do with pruning alone.
+
+**Who writes the brief.** By default the rules alone. With `model: <tier or API model id>` a cheap API model of the
+router's own pool (via `Router.complete` on that tier, `web: False`, so never a web bridge) writes three short
+sections, *decisions made / what was tried and did not work / in progress and the next step*, from the rules' digest
+(at most `model_input_chars`, 40,000), never from the raw history, and only when the part summarised is at least
+`model_min_chars` (100,000). The rules' sections stay; the model's text replaces most of the notes. It is bounded
+(`model_chars`, 4,000), timed out (`model_timeout_s`, 30) and on any failure (timeout, no capacity, an empty reply)
+left out; whatever comes out is cached for that cut, so the prefix stays fixed. Measured (below), the model's text was
+faithful but short and added little that the rules had not already kept, at several seconds per call and 4 failures
+in 24, so rules-only is the default.
+
+**Record.** Each compaction is reported as `{scope, before, after, budget, boundary, summarised: {messages, turns,
+chars}, kept: {messages, turns}, brief_chars, writer ("extractive" or "model:<id>"), model_error, cached, trimmed, ms,
+key}`: for API models a `compact:` log line and `pcore.compact` in the response; on the bridge `pcore.web.compaction`
+and `history summarised (...)` in its log line. (`/v1/responses` does not pass `pcore` through, as with pruning.)
+
+**The blunt cut** (`compact_initial_prompt`, still used when compaction is off) used to drop old tool calls but keep
+some of their results, so the model saw outputs without the commands that produced them, and it protected only the
+first user message (for Codex, the environment block; the task could be shortened). It now keeps old calls with their
+arguments shortened (a command's first line, a patch's file lines), removes old turns only as a whole call-and-results
+group, and keeps every message before the first assistant turn as sent.
+
+**Measured** (2026-11-22) on the owner's Provenance sessions: the 3 sessions whose fresh prompt goes over 60,000
+characters, plus two chained conversations built from them (all big sessions one after another: 265 messages, 550,000
+characters; every session one after another: 417 messages, 585,000 characters, 50 user messages). 71 request points
+(up to 20 per conversation, every request whose lean + pruned fresh prompt is over 60,000), each through the web
+bridge's fresh-prompt path. "Named with state": the path and a change word on one line. A user message line, a failed
+command (one with an error line in its output) or a note "survives" when its text is in the prompt.
+
+| measure | blunt cut (main) | blunt cut (fixed) | compaction |
+|---|---|---|---|
+| prompt characters (mean, limit 60,000) | 48,454 | 50,785 | 54,000 |
+| files touched again later, named | 33/33 | 33/33 | 33/33 |
+| every file changed so far, named with its state | 28/97 (29%) | 44/97 (45%) | 97/97 (100%) |
+| later user messages at least 90% intact | 709/1019 (70%) | 664/1019 (65%) | 1019/1019 (100%) |
+| opening task lines kept | 75% | 100% | 100% |
+| failed commands named with their error | 4/111 (4%) | 67/111 (60%) | 111/111 (100%) |
+| the agent's notes (80+ characters) kept | 630/993 (63%) | 567/993 (57%) | 775/993 (78%) |
+| distinct tool-output lines still shown | 24% | 22% | 23% |
+| tool results shown without their call | 2,922 | 0 | 0 |
+| time (median / max) | 4 / 107 ms | 6 / 177 ms | 9 / 39 ms |
+
+What compaction loses: raw tool output beyond the newest turns (the same share as the blunt cut keeps, but chosen
+differently: the latest text of files and searches instead of the head and tail of every old output), the older
+notes when there are many, and anything only visible in an old output that no section picks up (a value printed by a
+script, a line in a log). For API models (one 65,536-token model, every request of the chained conversations, prune
+on): 133 compacted requests, the cut moved 16 times (only forward), 115 requests reused their cut's brief, median
+request 348,000-409,000 → 103,000 characters, 14 ms for a new cut and 6 ms for a cached one. With the same cut, a request's
+messages are a byte-identical prefix of the next one's except when pruning's boundary moves or the kept turns had to
+be trimmed. The model narratives (24 calls through the running router: `spark` and `ember`, 6 cut points twice): 20
+usable, 4 empty replies; `spark` median 4 s (two calls over 30 s), `ember` median 11 s; 600-1,800 characters; 95% of
+the file names and commands they quote are in their digest; and they named a file the agent touched in its next three
+turns in 2 of 20 cases (the rules' "where it stood": 0 of 6).
+
 ## ChatGPT web provider
 
 `type: chatgpt_web` in `catalog.yaml` (`provenance_core/chatgpt_web.py`): your own signed-in chatgpt.com chat as a
@@ -192,7 +310,8 @@ request at a time, the pauses, the daily cap, and stopping at any challenge that
 
 1. Renders the initial chat request (system prompt, tools, and conversation) into one message. Long first messages
    keep the task and recent evidence while shortening old tool output and actions to `fresh_prompt_chars` (with
-   `prune` on, the history is pruned first; see "History pruning"). If a later
+   `prune` on, the history is pruned first; with `compact` on, the old part becomes a brief instead; see "History
+   pruning" and "Context compaction"). If a later
    request extends the same transcript, it sends only the new harness events in that chat's tab. A changed transcript
    or tool setup starts fresh with the whole request. At most `max_chat_tabs` tabs stay open.
 2. Opens `https://chatgpt.com/?temporary-chat=true` in its Chrome window for a new conversation and checks what a user would see: signed
@@ -327,6 +446,7 @@ page is fine again.
 | `max_prompt_chars` | 120000 | larger requests skip the bridge |
 | `fresh_prompt_chars` | 60000 | target size for a new tab's first prompt; older history is shortened if needed |
 | `prune` | unset | history pruning for a new tab's first prompt (true or options; see "History pruning"); unset: the catalog's top-level `prune` |
+| `compact` | unset | summarising compaction instead of the blunt cut for a new tab's first prompt (see "Context compaction"); unset: the catalog's top-level `compact` |
 | `strict_model` | true | fail rather than answer with a different model than the one named |
 | `allow_auto_fallback` | false | allow a named model request to use the page's Auto selection when that name disappears |
 | `reuse_chat`, `max_chat_tabs` | false, 6 | reuse a matching agent's temporary chat and cap open tabs |
@@ -443,6 +563,7 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_LOW_PCT` | `95` | subscription usage that counts as low |
 | `PCORE_CHATGPT_WEB` | unset | `1` turns the chatgpt-web provider on, `0` forces it off |
 | `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `prune`) |
+| `PCORE_COMPACT` | unset | summarising compaction: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `compact`) |
 
 Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLARE_API_TOKEN`, ...; see
 `catalog.yaml`).
