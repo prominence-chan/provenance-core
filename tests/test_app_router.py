@@ -33,10 +33,12 @@ def home(tmp_path, monkeypatch):
     for v in ("TEST_KEY", "TEST_ACCT"):
         monkeypatch.delenv(v, raising=False)
     pool_keys.FROM_FILE.clear()
+    pool_keys.SHADOWED.clear()
     yield tmp_path
     for v in list(pool_keys.FROM_FILE):
         os.environ.pop(v, None)
     pool_keys.FROM_FILE.clear()
+    pool_keys.SHADOWED.clear()
 
 
 def catalog(tmp_path, **web) -> Path:
@@ -295,3 +297,31 @@ def test_watch_stdin_shuts_the_router_down(home, tmp_path):
     finally:
         if p.poll() is None:
             p.kill()
+
+
+def test_clearing_an_app_key_puts_the_environments_own_back(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", "from-keys-env")
+    monkeypatch.setenv("TEST_ACCT", "acct")
+    _, c = client(catalog(tmp_path))
+    with c:
+        assert c.put("/pool/keys/keyed", json={"values": {"TEST_KEY": "from-the-app"}}).status_code == 200
+        assert os.environ["TEST_KEY"] == "from-the-app"
+        r = c.delete("/pool/keys/keyed")  # TEST_ACCT is the environment's own: said so, and kept
+        assert r.status_code == 409 and "TEST_ACCT" in r.json()["detail"]
+    assert os.environ["TEST_KEY"] == "from-keys-env" and os.environ["TEST_ACCT"] == "acct"
+    assert "from-the-app" not in (home / "keys.json").read_text()
+
+
+def test_a_hand_edited_settings_file(home, tmp_path):
+    (home / "settings.json").write_text(
+        '{"note": "mine", "providers": {"chatgpt-web": {"enabled": "false", "daily_cap": "lots"}, "other-web": 3}}'
+    )
+    path = catalog(tmp_path, daily_cap=50)
+    cat = load(path)
+    assert "user_enabled" not in cat.providers["chatgpt-web"].options  # "false" is not false: ignored
+    assert cat.providers["chatgpt-web"].options["daily_cap"] == 50
+    _, c = client(path)
+    with c:
+        assert c.patch("/web/providers/chatgpt-web", json={"daily_cap": 70}).status_code == 200
+    saved = yaml.safe_load((home / "settings.json").read_text())
+    assert saved["note"] == "mine" and saved["providers"]["chatgpt-web"]["daily_cap"] == 70

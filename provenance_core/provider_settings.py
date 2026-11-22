@@ -29,12 +29,14 @@ def settings_file(home: Path | None = None) -> Path:
 
 
 def load(home: Path | None = None) -> dict:
+    """The whole file (other top-level keys are kept as they are), with `providers` always a dict of dicts."""
     try:
         d = json.loads(settings_file(home).read_text())
     except (OSError, ValueError):
         d = {}
-    provs = d.get("providers") if isinstance(d, dict) else None
-    return {"providers": {str(k): dict(v) for k, v in (provs or {}).items() if isinstance(v, dict)}}
+    d = d if isinstance(d, dict) else {}
+    provs = d.get("providers") if isinstance(d.get("providers"), dict) else {}
+    return {**d, "providers": {str(k): dict(v) for k, v in provs.items() if isinstance(v, dict)}}
 
 
 def save(d: dict, home: Path | None = None):
@@ -46,10 +48,12 @@ def save(d: dict, home: Path | None = None):
 
 
 def _apply_one(p, s: dict):
-    if "enabled" in s:
-        p.options["user_enabled"] = bool(s["enabled"])
-    if "daily_cap" in s and p.type == "chatgpt_web":
-        p.options["daily_cap"] = int(s["daily_cap"])
+    """Only values of the right type are applied: a hand-edited file with "false" or "lots" is ignored there."""
+    if isinstance(s.get("enabled"), bool):
+        p.options["user_enabled"] = s["enabled"]
+    cap = s.get("daily_cap")
+    if p.type == "chatgpt_web" and isinstance(cap, int) and not isinstance(cap, bool) and 1 <= cap <= DAILY_CAP_MAX:
+        p.options["daily_cap"] = cap
 
 
 def apply(providers: dict, home: Path | None = None):

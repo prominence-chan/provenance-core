@@ -21,6 +21,7 @@ from .settings import home_dir
 _VAR = re.compile(r"\$\{(\w+)\}")
 MAX_LEN = 4096
 FROM_FILE: set[str] = set()  # variables this process took from keys.json or set from the app
+SHADOWED: dict[str, str] = {}  # the environment's own value of a variable keys.json replaced, put back on clear
 
 
 class KeySetupError(ValueError):
@@ -50,10 +51,16 @@ def _write(d: dict[str, str], home: Path | None = None):
     tmp.replace(p)
 
 
+def _set(k: str, v: str):
+    if k not in FROM_FILE and os.environ.get(k):
+        SHADOWED[k] = os.environ[k]
+    os.environ[k] = v
+    FROM_FILE.add(k)
+
+
 def load_into_env(home: Path | None = None):
     for k, v in _read(home).items():
-        os.environ[k] = v
-        FROM_FILE.add(k)
+        _set(k, v)
 
 
 def provider_vars(p) -> list[str]:
@@ -116,14 +123,13 @@ def set_keys(catalog, provider: str, values: dict) -> dict:
     d.update(clean)
     _write(d)
     for k, v in clean.items():
-        os.environ[k] = v
-        FROM_FILE.add(k)
+        _set(k, v)
     return next(x for x in view(catalog) if x["id"] == provider)
 
 
 def clear_keys(catalog, provider: str) -> dict:
-    """Remove the provider's keys set from the app. A variable that comes from the environment (keys.env, the shell)
-    cannot be removed from here."""
+    """Remove the provider's keys set from the app; where the environment had its own value (keys.env, the shell),
+    that one applies again. A variable only the environment sets cannot be removed from here."""
     p = _provider(catalog, provider)
     names = provider_vars(p)
     outside = [n for n in names if os.environ.get(n) and n not in FROM_FILE]
@@ -131,8 +137,11 @@ def clear_keys(catalog, provider: str) -> dict:
     for n in names:
         d.pop(n, None)
         if n in FROM_FILE:
-            os.environ.pop(n, None)
             FROM_FILE.discard(n)
+            if n in SHADOWED:
+                os.environ[n] = SHADOWED.pop(n)
+            else:
+                os.environ.pop(n, None)
     _write(d)
     if outside:
         raise KeySetupError(

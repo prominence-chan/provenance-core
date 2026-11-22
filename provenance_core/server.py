@@ -14,6 +14,7 @@ GET  /health                is it up, which process, what it serves (for the app
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -256,8 +257,8 @@ def create_app(
 
     async def close_browsers():  # on shutdown: no browser is left running (a sign-in window was closed just above)
         for b in list(router.bridges.values()):
-            try:
-                await b.release()
+            try:  # release waits for a chat in progress: not for long when shutting down (the watchdogs remain)
+                await asyncio.wait_for(b.release(), 10)
             except Exception:  # noqa: BLE001 - shutting down regardless
                 pass
 
