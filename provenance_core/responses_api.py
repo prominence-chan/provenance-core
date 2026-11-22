@@ -183,12 +183,26 @@ def items_to_messages(items) -> tuple[list[str], list[dict]]:
     return system, msgs
 
 
+class ToolNames(set):
+    """The names of custom/freeform tools, plus `ns`: function name -> the namespace tool that offered it."""
+
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.ns: dict[str, str] = {}
+
+
 def tools_to_openai(tools) -> tuple[list[dict], set[str], bool]:
     """-> (OpenAI tools, names of custom/freeform tools, whether local_shell is offered)"""
-    out, custom, shell = [], set(), False
+    out, custom, shell = [], ToolNames(), False
     flat = []
     for t in tools or []:  # namespace tools (e.g. a multi-agent tool group) carry their function tools nested
-        flat += (t.get("tools") or []) if t.get("type") == "namespace" else [t]
+        if t.get("type") == "namespace":
+            flat += t.get("tools") or []
+            for f in t.get("tools") or []:  # a call to one of them must name the group again, or Codex rejects it
+                if f.get("name") and t.get("name"):
+                    custom.ns[f["name"]] = t["name"]
+        else:
+            flat.append(t)
     for t in flat:
         kind = t.get("type")
         if kind == "function":
@@ -311,6 +325,7 @@ def call_item(c: dict, custom: set[str], shell: bool) -> dict:
         "id": "fc_" + secrets.token_hex(12),
         "call_id": c["id"],
         "name": name,
+        **({"namespace": custom.ns[name]} if name in getattr(custom, "ns", {}) else {}),
         "arguments": json.dumps(parse_args(args)),
         "status": "completed",
     }
@@ -443,6 +458,12 @@ def register(app, router: Router, token: str | None):
         target = map_model(router, model_name)
         body, convo, custom, shell = to_openai(req, history)
         session = session_key(request, target, convo)
+        meta = req.get("client_metadata") if isinstance(req.get("client_metadata"), dict) else {}
+        thread = meta.get("thread_id") or req.get("prompt_cache_key")
+        if thread and not (request.headers.get("x-pcore-session") or request.headers.get("x-tierlm-session")):
+            # the client names its thread: stick by that, not by the first message (Codex opens every thread in
+            # a folder with the same context block, which would tie them all to one model)
+            session = f"t:{thread}|{target.label}"
         single = req.get("parallel_tool_calls") is False
         if single:
             body["_single_tool_call"] = True  # a hint for the chatgpt_web prompt; dropped before any HTTP provider
