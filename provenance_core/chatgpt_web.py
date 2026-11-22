@@ -32,7 +32,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import prune
+from . import compact, prune
 from .settings import env
 
 
@@ -404,13 +404,42 @@ def continuation_prompt(messages: list[dict], tools: dict[str, dict], prior: dic
     return "# New harness events\n" + "\n\n".join(parts) + "\n\n" + (REMINDER_TOOLS % "" if tools else REMINDER_PLAIN)
 
 
+def short_call_arguments(arguments) -> str:
+    """An old tool call's arguments cut down to what it did: a command's first line, a patch's file lines; short
+    values stay as they are. The call keeps its name and id, so its result still has a call to belong to."""
+    try:
+        a = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except json.JSONDecodeError:
+        return json.dumps({"raw_arguments": str(arguments)[:200]}, ensure_ascii=False)
+    if not isinstance(a, dict):
+        return json.dumps(a, ensure_ascii=False)[:300]
+
+    def cut(v):
+        if isinstance(v, str) and len(v) > 240:
+            if "*** Begin Patch" in v:
+                files = [
+                    x for x in v.split("\n") if x.startswith(("*** Add File", "*** Update File", "*** Delete File"))
+                ]
+                return "\n".join(["*** Begin Patch", *files, "[... the rest of this earlier patch omitted ...]"])
+            first = v.strip().split("\n")[0]
+            return first[:200] + " [... the rest of this earlier command omitted ...]"
+        if isinstance(v, list) and len(json.dumps(v)) > 300:
+            return [cut(x) for x in v]
+        return v
+
+    return json.dumps({k: cut(v) for k, v in a.items()}, ensure_ascii=False)
+
+
 def compact_initial_prompt(body: dict, limit: int) -> tuple[str, dict[str, dict], dict, bool]:
-    """Bound an old transcript on a fresh tab, preserving instructions, tools, task and recent evidence."""
+    """Bound an old transcript on a fresh tab, preserving instructions, tools, task and recent evidence. The blunt
+    cut (no summary; see compact.py for the one that summarises): old outputs and calls are shortened, then whole
+    old turns go. A call and its results are only ever removed together, so every result shown keeps its command."""
     prompt, tools, rules = render_prompt(body)
     if len(prompt) <= limit:
         return prompt, tools, rules, False
     messages = [dict(m) for m in body.get("messages") or []]
-    first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
+    first_asst = next((i for i, m in enumerate(messages) if m.get("role") == "assistant"), len(messages))
+    opening = {i for i, m in enumerate(messages[:first_asst]) if m.get("role") == "user"}  # the task: kept as sent
     older = [i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")][:-8]
 
     def render():
@@ -427,9 +456,11 @@ def compact_initial_prompt(body: dict, limit: int) -> tuple[str, dict[str, dict]
             if len(s) > 600:
                 m["content"] = s[:300] + "\n[... earlier reasoning omitted ...]\n" + s[-300:]
             if m.get("tool_calls"):
-                m["tool_calls"] = []
-                m["content"] = (_text(m.get("content"))[:500] + "\n[earlier tool action omitted]").strip()
-        elif m.get("role") == "user" and i != first_user:
+                m["tool_calls"] = [
+                    {**tc, "function": {**(tc.get("function") or {}), "arguments": short_call_arguments((tc.get("function") or {}).get("arguments"))}}
+                    for tc in m["tool_calls"]
+                ]  # fmt: skip
+        elif m.get("role") == "user" and i not in opening:
             s = _text(m.get("content"))
             if len(s) > 1200:
                 m["content"] = s[:600] + "\n[... earlier user text omitted ...]\n" + s[-600:]
@@ -447,16 +478,70 @@ def compact_initial_prompt(body: dict, limit: int) -> tuple[str, dict[str, dict]
         prompt = render()
     if len(prompt) > limit:
         # Keep the initial task and recent turns verbatim. The harness has already had these older events;
-        # the current model needs the latest evidence more than raw output from the start of the run.
-        removable = [i for i in older if i != first_user]
-        for n, i in enumerate(removable):
-            messages[i] = (
-                {"role": "user", "content": "[earlier harness events omitted to fit the chat page]"} if n == 0 else None
-            )
+        # the current model needs the latest evidence more than raw output from the start of the run. A turn goes
+        # whole: the assistant message with the results of its calls (only when all of them are old).
+        old, groups, at = set(older) - opening, [], {}
+        for i in sorted(old):
+            m = messages[i]
+            if m.get("role") == "tool" and m.get("tool_call_id") in at:
+                groups[at[m["tool_call_id"]]].append(i)
+                continue
+            groups.append([i])
+            for tc in m.get("tool_calls") or [] if m.get("role") == "assistant" else []:
+                at[tc.get("id")] = len(groups) - 1
+        kept_results = {
+            m.get("tool_call_id") for i, m in enumerate(messages) if m.get("role") == "tool" and i not in old
+        }
+        removable = [
+            g for g in groups if not any(tc.get("id") in kept_results for tc in messages[g[0]].get("tool_calls") or [])
+        ]
+        for n, g in enumerate(removable):
+            for k, i in enumerate(g):
+                messages[i] = (
+                    {"role": "user", "content": "[earlier harness events omitted to fit the chat page]"}
+                    if n == 0 and k == 0
+                    else None
+                )
             prompt = render()
             if len(prompt) <= limit:
                 break
     return prompt, tools, rules, True
+
+
+def _web_budget(fresh: dict, limit: int) -> int:
+    """What the conversation may take of a fresh prompt of `limit` characters: the rest goes to the framing,
+    instructions and tool list, rendered here once without any conversation."""
+    bare = {**fresh, "messages": [m for m in fresh.get("messages") or [] if m.get("role") in ("system", "developer")]}
+    return limit - len(render_prompt(bare)[0]) - 200
+
+
+def _web_size(m: dict) -> int:
+    return 0 if m.get("role") in ("system", "developer") else compact.rendered_size(m)
+
+
+def summarised_prompt(
+    body: dict, fresh: dict, limit: int, opts: dict, compactor: compact.Compactor
+) -> tuple[str, dict[str, dict], dict, dict | None]:
+    """A fresh chat's first message with the old part of the history as a brief (compact.py) instead of the blunt
+    cut: `body` is the request as sent (the brief is made from it), `fresh` the same after pruning (what is kept
+    verbatim comes from it). Never waits on a model: a model's narrative is used only when it is already cached
+    (Bridge.warm). If the brief cannot be made (too few turns) or the result is still too long, the blunt cut has
+    the last word, so the prompt is never over `limit` because of this. -> (prompt, tools, rules, the record)."""
+    raw, view = body.get("messages") or [], fresh.get("messages") or []
+    budget = _web_budget(fresh, limit)
+    rep = None
+    for _ in range(3):
+        msgs, rep = compactor.compact(raw, view, budget, opts, _web_size, "web")
+        if rep is None:
+            break
+        prompt, tools, rules = render_prompt({**fresh, "messages": msgs})
+        if len(prompt) <= limit:
+            return prompt, tools, rules, rep
+        budget -= len(prompt) - limit + 500  # _web_size was short of the real rendering: try again with less
+    prompt, tools, rules, _ = compact_initial_prompt({**fresh, "messages": msgs if rep else view}, limit)
+    if rep:
+        rep["blunt_cut_after"] = True
+    return prompt, tools, rules, rep
 
 
 # ---- the text protocol: reply -> text + tool calls ------------------------------------------------------------------
@@ -1189,6 +1274,10 @@ DEFAULTS = {
     # prune.py's pass (true, or a dict of its options) on the history a fresh chat starts with; a continued chat is
     # sent as is. Off unless set here, by `prune:` in the catalog, or by PCORE_PRUNE=1 / web
     "prune": None,
+    # compact.py's summarising compaction (true, or a dict of its options) instead of the blunt cut when a fresh
+    # chat's first message is over fresh_prompt_chars. Off unless set here, by `compact:` in the catalog, or by
+    # PCORE_COMPACT=1 / web
+    "compact": None,
     "accounts": None,  # e.g. [main, b, c]: one Chrome profile per signed-in account, requests spread across them
     "backoff_base_s": 60.0,  # a "temporary limit" / failed-to-load page: wait this long, doubling each time in a row
     "backoff_max_s": 900.0,
@@ -1292,6 +1381,10 @@ class Bridge:
         self.signin: str | None = None
         self._parker: asyncio.Task | None = None  # bundled: keeps every window of the browser off screen
         self._repark: asyncio.Event | None = None
+        # summarising compaction: the router hands over its own (shared cache, and `summarize`, which asks a cheap
+        # API model of its pool for the narrative; never this bridge)
+        self.compactor = compact.Compactor()
+        self.summarize = None
 
     # ---- what the app shows, and the sign-in flow uses --------------------------------------------------------
     @property
@@ -2135,6 +2228,52 @@ class Bridge:
         except TimeoutError:
             raise WebSkip("another request is using the ChatGPT window") from None
 
+    # ---- the first message of a new chat ---------------------------------------------------------------------------
+    def _pruned(self, body: dict) -> tuple[dict, dict | None]:
+        popts = prune.config("web", self.o.get("prune"))
+        return prune.prune_body(body, "fresh", popts) if popts else (body, None)
+
+    def fresh_prompt(self, body: dict) -> tuple[str, dict, dict, bool, dict]:
+        """The whole request as one message for a new chat: pruned (`prune`), then, when it is still over
+        `fresh_prompt_chars`, summarised (`compact`) or else cut (the blunt cut). -> (prompt, tools, rules, whether
+        the history was shortened, {"pruned": prune's record, "compaction": compaction's record})."""
+        limit = int(self.o["fresh_prompt_chars"])
+        prompt, tools, rules = render_prompt(body)
+        fresh, pruned = self._pruned(body)
+        info = {"pruned": pruned, "compaction": None}
+        if pruned and pruned["saved"]:
+            prompt, tools, rules = render_prompt(fresh)
+        if len(prompt) <= limit:
+            return prompt, tools, rules, False, info
+        copts = compact.config("web", self.o.get("compact"))
+        if copts:
+            prompt, tools, rules, info["compaction"] = summarised_prompt(body, fresh, limit, copts, self.compactor)
+            if info["compaction"]:
+                return prompt, tools, rules, True, info
+        prompt, tools, rules, compacted = compact_initial_prompt(fresh, limit)
+        return prompt, tools, rules, compacted, info
+
+    async def warm(self, body: dict):
+        """Before the window is taken: when compaction asks for a model-written brief, have it written (or found in
+        the cache) now, so that fresh_prompt, which runs while the window is held, finds it ready. Bounded by the
+        compaction's model_timeout_s; on any failure the brief is the rules-only one."""
+        copts = compact.config("web", self.o.get("compact"))
+        if not (copts and copts.get("model") and self.summarize):
+            return
+        fresh, _ = self._pruned(body)
+        try:
+            await self.compactor.acompact(
+                body.get("messages") or [],
+                fresh.get("messages") or [],
+                _web_budget(fresh, int(self.o["fresh_prompt_chars"])),
+                copts,
+                _web_size,
+                "web",
+                self.summarize,
+            )
+        except Exception as e:  # noqa: BLE001 - a brief is an optimisation: never fail the request over it
+            print(f"chatgpt-web: compaction warm-up failed: {e}", flush=True)
+
     # ---- public --------------------------------------------------------------------------------------------------
     async def complete(
         self, model: str, body: dict, model_id: str | None = None, wait: float | None = None, on_text=None
@@ -2145,6 +2284,34 @@ class Bridge:
             body = lean_body(body, int(self.o["lean_system_chars"]))
         prompt, tools, rules = render_prompt(body)
         self._precheck()
+        key = continuation_key(body, model) if self.o["reuse_chat"] else None
+        messages = [m for m in body.get("messages") or [] if m.get("role") not in ("system", "developer")]
+        setup = json.dumps(
+            {
+                k: body.get(k)
+                for k in ("tools", "tool_choice", "response_format", "parallel_tool_calls", "_single_tool_call")
+            },
+            sort_keys=True,
+            default=str,
+        )
+        setup += json.dumps(
+            [m for m in body.get("messages") or [] if m.get("role") in ("system", "developer")],
+            sort_keys=True,
+            default=str,
+        )
+
+        def continues() -> bool:
+            session = self._sessions.get(key) if key else None
+            return bool(
+                session
+                and not session["page"].is_closed()
+                and session["setup"] == setup
+                and len(messages) > len(session["seen"])
+                and all(_message_shape(a) == _message_shape(b) for a, b in zip(messages, session["seen"], strict=False))
+            )
+
+        if not continues() and len(prompt) > int(self.o["fresh_prompt_chars"]):
+            await self.warm(body)  # a model's brief, if one is wanted, is written now: never while holding the window
         self.busy += 1
         try:
             await self._acquire(wait)
@@ -2155,30 +2322,9 @@ class Bridge:
             self._precheck()
             await self._gap()
 
-            key = continuation_key(body, model) if self.o["reuse_chat"] else None
-            messages = [m for m in body.get("messages") or [] if m.get("role") not in ("system", "developer")]
-            setup = json.dumps(
-                {
-                    k: body.get(k)
-                    for k in ("tools", "tool_choice", "response_format", "parallel_tool_calls", "_single_tool_call")
-                },
-                sort_keys=True,
-                default=str,
-            )
-            setup += json.dumps(
-                [m for m in body.get("messages") or [] if m.get("role") in ("system", "developer")],
-                sort_keys=True,
-                default=str,
-            )
             session = self._sessions.get(key) if key else None
-            reuse = bool(
-                session
-                and not session["page"].is_closed()
-                and session["setup"] == setup
-                and len(messages) > len(session["seen"])
-                and all(_message_shape(a) == _message_shape(b) for a, b in zip(messages, session["seen"], strict=False))
-            )
-            pruned = None
+            reuse = continues()
+            compacted, fresh_info = False, {"pruned": None, "compaction": None}
             if reuse:
                 page = session["page"]
                 delta = messages[len(session["seen"]) :]
@@ -2193,17 +2339,10 @@ class Bridge:
                 else:
                     await self._guarded(self._ensure_page)
                     page = await self._new_page() if key and self._sessions else self._page
-                compacted, fresh = False, body
-                # Pruning happens only here, on the text a new chat starts with. Whether a later request continues
-                # this chat is decided on the messages as the client sent them (session["seen"] below), so the
-                # pass can never make a chat look changed, and a continued chat is typed exactly as sent.
-                popts = prune.config("web", self.o.get("prune"))
-                if popts:
-                    fresh, pruned = prune.prune_body(body, "fresh", popts)
-                    if pruned["saved"]:
-                        prompt, tools, rules = render_prompt(fresh)
-                if len(prompt) > int(self.o["fresh_prompt_chars"]):
-                    prompt, tools, rules, compacted = compact_initial_prompt(fresh, int(self.o["fresh_prompt_chars"]))
+                # Pruning and compaction happen only here, on the text a new chat starts with. Whether a later
+                # request continues this chat is decided on the messages as the client sent them (session["seen"]
+                # below), so neither can make a chat look changed, and a continued chat is typed exactly as sent.
+                prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
             if len(prompt) > int(self.o["max_prompt_chars"]):
                 raise WebSkip(f"prompt is {len(prompt)} characters, over the bridge's {self.o['max_prompt_chars']}")
             self._page = page
@@ -2253,7 +2392,8 @@ class Bridge:
                         "sent_chars": len(prompt),
                         "account": self.account,
                         "compacted": False if reuse else compacted,
-                        "pruned": pruned,
+                        "pruned": None if reuse else fresh_info["pruned"],
+                        "compaction": None if reuse else fresh_info["compaction"],
                     },
                 )
 
@@ -2266,12 +2406,10 @@ class Bridge:
                     # the chat is full or stopped taking messages: nothing was sent, so carry on in a fresh chat
                     # with the history the caller sent (shortened), in the same request
                     await self._dump(page, {"reason": str(e)}, "full")
-                    reuse, compacted = False, False
-                    prompt, tools, rules = render_prompt(body)
-                    if len(prompt) > int(self.o["fresh_prompt_chars"]):
-                        prompt, tools, rules, compacted = compact_initial_prompt(
-                            body, int(self.o["fresh_prompt_chars"])
-                        )
+                    # the same first message a new chat gets (pruned, summarised or cut); a model's brief only if
+                    # one is already cached, since the window is held here
+                    reuse = False
+                    prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
                     text, calls, extra = await self._guarded(run)
                     extra["restarted"] = True
             except Exception as e:

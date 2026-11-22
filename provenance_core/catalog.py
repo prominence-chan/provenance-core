@@ -94,6 +94,8 @@ class Catalog:
     aliases: dict[str, str] = field(default_factory=dict)  # e.g. tier-1 -> nova, auto -> solstice
     # history pruning (prune.py): `prune: true`, a dict of its options, or {api: ..., web: ...}; off when absent
     prune: object = None
+    # summarising compaction (compact.py): the same forms as prune; off when absent
+    compact: object = None
 
     def resolve_tier(self, name: str) -> str | None:
         """A tier name, or an alias of one; None if it's neither (a concrete model id, or unknown)."""
@@ -183,4 +185,5 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
         tiers=tiers,
         aliases=dict(data.get("aliases") or {}),
         prune=data.get("prune"),
+        compact=data.get("compact"),
     )
