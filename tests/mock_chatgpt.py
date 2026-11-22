@@ -85,6 +85,21 @@ btn.onclick = async () => {
 };
 </script></body></html>"""
 
+# The sign-in page (state login="cookie"): signed in means the browser sends the session cookie. With signin_auto the
+# page signs itself in after a moment, the way a person would by typing a password; `flush` more cookies are set as
+# well, which makes Chrome write its cookie store at once instead of within 30 s (it writes after 512 changes).
+SIGNIN = r"""<!doctype html><html><head><meta charset="utf-8"><title>Log in</title></head><body>
+<h1>Log in</h1><p id="s">waiting</p><script>
+const S = __STATE__;
+if (S.signin_auto) setTimeout(async () => {
+  await fetch('/__signin', {method: 'POST', body: '{}'});
+  for (let i = 0; i < S.flush; i++) document.cookie = 'pad' + (i % 40) + '=' + i + '; path=/';
+  document.getElementById('s').textContent = 'signed in';
+  location.href = '/';
+}, S.signin_after_ms);
+</script></body></html>"""
+SESSION = "pcore-mock-session"
+
 CHALLENGE = "<!doctype html><html><head><title>Just a moment...</title></head><body><h1>chatgpt.com</h1><p>Verify you are human by completing the action below.</p></body></html>"
 
 
@@ -117,6 +132,11 @@ class Mock:
             "models": ["Luna", "Nimbus"],
             "delay": 150,
             "full_after": 0,  # this many user messages fill a chat (0 = never)
+            # login: True / False, or "cookie": signed in when the browser sends SESSION (set by the sign-in page)
+            "signin_auto": False,  # the sign-in page signs itself in
+            "signin_after_ms": 300,
+            "flush": 0,
+            "email": "person@example.com",  # shown in the page's bootstrap data when signed in
         }
         self.replies: list = ["<p>ok</p>"]
         self.sent: list[dict] = []
@@ -135,19 +155,40 @@ class Mock:
                 self.wfile.write(data)
 
             def do_GET(self):
-                if urlparse(self.path).path != "/":
+                path = urlparse(self.path).path
+                if path == "/auth/login":
+                    mock.signin_pages += 1
+                    return self._out(SIGNIN.replace("__STATE__", json.dumps(mock.state)))
+                if path != "/":
                     self.send_response(404)
                     self.end_headers()
                     return
                 if mock.state["challenge"]:
                     return self._out(CHALLENGE)
                 st = dict(mock.state)
+                if st["login"] == "cookie":
+                    st["login"] = f"{SESSION}=1" in (self.headers.get("Cookie") or "")
                 want = parse_qs(urlparse(self.path).query).get("model", [None])[0]
                 if want and want in st["models"]:
                     st["model"] = want
-                self._out(PAGE.replace("__STATE__", json.dumps(st)))
+                page = PAGE.replace("__STATE__", json.dumps(st))
+                if st["login"] and st.get("email"):
+                    boot = json.dumps({"session": {"user": {"email": st["email"]}}})
+                    page = page.replace(
+                        "<body>", f'<body><script type="application/json" id="client-bootstrap">{boot}</script>', 1
+                    )
+                self._out(page)
 
             def do_POST(self):
+                if urlparse(self.path).path == "/__signin":
+                    self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    mock.signins += 1
+                    self.send_response(200)
+                    self.send_header("Set-Cookie", f"{SESSION}=1; Max-Age=86400; Path=/; HttpOnly")
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                    return
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 mock.sent.append(req)
                 r = (
@@ -161,6 +202,7 @@ class Mock:
                 self._out(json.dumps(out), "application/json")
 
         self.per_page = None
+        self.signin_pages = self.signins = 0
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()

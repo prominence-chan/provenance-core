@@ -208,7 +208,8 @@ Successive turns in a matching agent transcript can carry context in the same te
 different tabs, and a server restart starts a fresh chat. Temporary chats stay out of account history. If temporary
 chat can't be confirmed, nothing is sent and the provider goes unavailable.
 
-**What it never does:** read cookies or tokens from any browser profile, handle your password, forge sentinel /
+**What it never does:** read cookie values or tokens from any browser profile (the sign-in flow reads only the
+names and dates of the site's session cookie in the bridge's own profile, see "Account setup"), handle your password, forge sentinel /
 proof-of-work / Turnstile tokens, solve or click through captchas or challenges, or call ChatGPT's private backend
 API. With the default driver it also uses no anti-detection measures at all; `driver: patchright` is the one
 exception, described above.
@@ -280,9 +281,11 @@ such requests skip the bridge.
 repaired first, and a failure can still fail over), then replayed as a normal stream. Clients see no tokens until
 the reply is complete.
 
-**Sign-in.** `provenance-core weblogin` opens an ordinary Chrome window (not driven by anything) on the dedicated
-profile `~/.tierlm/chatgpt-web-profile`; you sign in by hand and quit that Chrome, then the profile is checked once
-through the bridge. The server says at start whether the login is there (from the last check), `provenance-ui` runs
+**Sign-in.** From the app (`POST /web/login`, see "Account setup from the app" below) or with `provenance-core
+weblogin [provider] [--account b]`, which uses the same flow through the running server (or in its own process when
+none runs): an ordinary window, not driven by anything, opens on the account's profile at the site's sign-in page;
+you sign in by hand and it closes by itself (or you close it), then the site is checked in the background browser.
+The server says at start whether the login is there (from the last check), `provenance-ui` runs
 `provenance-core webstatus --boot` when it starts (a live check if the last one is older than 12 h; silent when
 all is well), and a macOS notification appears when the login turns out to be missing or expired.
 
@@ -334,9 +337,13 @@ page is fine again.
 | `accounts` | none | e.g. `[main, b, c]`: one Chrome profile, window, daily count and cooldown per signed-in account (`provenance-core weblogin --account b`). A request goes to the account already holding its chat, else the least busy one that is not cooling down; `daily_cap` is per account |
 | `backoff_base_s`, `backoff_max_s` | 60, 900 | a "temporary limits" / failed-to-load notice, or two page errors in a row: stay away this long, doubling each time in a row |
 | `quiet` | false | macOS: hide the bridge's Chrome as soon as it opens (your own Chrome is untouched). `headless: true` is stopped by the site's browser check, so this is the way to keep it off the screen |
-| `browser` | `chrome` | which browser runs the window: `chrome` (the installed Google Chrome), `bundled` (the bridge's own background-only Chrome for Testing, see "Bundled browser" below), `auto` (bundled when it is ready, else chrome while it is prepared in the background). `share:` guests use their host's browser |
+| `browser` | `chrome` | which browser runs the window: `chrome` (the installed Google Chrome), `bundled` (the bridge's own background-only Chrome for Testing, see "Bundled browser" below; a request waits while it is downloaded the first time), `auto` (bundled when it is ready; while it is prepared in the background, requests skip the bridge with no penalty and nothing else is opened; the choice for a shipped app). `share:` guests use their host's browser |
+| `browser_fallback` | unset | `auto` only: `chrome` = use the installed Chrome (a window that can show) while the bundled one is not ready, the old `auto` |
 | `browser_trim` | true | bundled only: also pass the trimmed switch set |
 | `browser_source` | `cft` | bundled only: `cft` (Chrome for Testing) or `chrome` (a background-only clone of the installed Google Chrome, this Mac only) |
+| `browser_watch_s` | 2 | bundled only: how often every window's position is checked and put back off screen |
+| `login_timeout_s` | 900 | a sign-in window left open this long is closed (then the account is checked) |
+| `name`, `login_url`, `session_cookies` | the site's | what the app calls the provider, where the sign-in window opens, and `{domains, names}` of the cookie that means signed in (`CHATGPT_SITE` / `SITES`) |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
 A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice; on a page with no picker, as on the Free plan, the account's one model answers). The page
@@ -356,13 +363,18 @@ window (`--no-startup-window`) and the bridge creates its one window already off
 (`Target.createTarget {newWindow, background, left: 20000, top: 20000}`): no window is ever drawn on screen; macOS
 keeps a 40x41 px corner of it inside the display. Tabs are background tabs of that window. `quiet`'s hiding and
 parking are not needed and are skipped. The same profile directory is used, so the sign-in carries over (both
-launches use `--use-mock-keychain --password-store=basic`, the same cookie-encryption key). `weblogin` always opens a
-normal window: a background-only app cannot take the keyboard.
+launches use `--use-mock-keychain --password-store=basic`, the same cookie-encryption key). Signing in always opens a
+normal window (the bundled build's plain copy): a background-only app cannot take the keyboard.
 
-- **Getting it.** `python -m provenance_core.browser_host` prepares it ahead of time; otherwise the first launch in
-  `bundled` mode does (in `auto` mode, a background thread does while the installed Chrome is used). Sources, in
-  order: an app under `Provenance.app/Contents/Resources/browser/` or named by `PCORE_BROWSER_APP`, the copy already
-  prepared, Playwright's cache, a download from Google's Chrome for Testing bucket (~190 MB zip, md5-checked). It
+- **Getting it.** `python -m provenance_core.browser_host` prepares it ahead of time; otherwise `serve` starts
+  preparing it in the background (bundled or auto mode), or the first launch in `bundled` mode does, or
+  `POST /web/browser/prepare`. Progress and errors are in `GET /web/accounts` → `browser` (`preparing`, `stage`
+  look / download / unpack / copy, `progress` 0-1 while downloading, `error` in plain words). A failed attempt is
+  retried by requests at most every 5 min (`RETRY_S`), by `POST /web/browser/prepare` at once. Sources, in
+  order: the app, or the folder holding it, named by `PCORE_BROWSER_APP` (this is how Provenance.app, run from
+  anywhere, should point at its own `Contents/Resources/browser`: set it in the router's environment when the app
+  starts it), an app under `Provenance.app/Contents/Resources/browser/` in /Applications or ~/Applications, the copy
+  already prepared, Playwright's cache, a download from Google's Chrome for Testing bucket (~190 MB zip, md5-checked). It
   must be at least as new as the installed Chrome's major version and as the profile's `Last Version` (an older
   browser must not open a newer profile); the closest major from above is chosen, so the installed Chrome (used by
   `weblogin`) can still open the profile. When Chrome updates to a new major version, a matching build is prepared
@@ -384,6 +396,20 @@ normal window: a background-only app cannot take the keyboard.
   port=0`, 127.0.0.1). A watchdog (a shell waiting on a pipe only the bridge holds) ends the browser if the bridge
   dies, so a browser nobody can see is never left running. `release` / idle close sends `Browser.close` and waits
   for the process. A bundled window that vanished is restarted on the next request without the "closed" cooldown.
+- **Nothing ever shows, including after a crash or with the screen locked.** What could still draw something, and
+  what stops it: (1) macOS moves windows onto a display when the display layout changes (an external display
+  unplugged at sleep, a lid opened, the bridge started with no display at all); and (2) a page can open a popup
+  window of its own after one of the bridge's clicks. A watcher on the browser's own CDP session (`park_windows`:
+  `Target.getTargets` / `Browser.getWindowForTarget` / `Browser.setWindowBounds`, nothing attached to any page)
+  checks every window every `browser_watch_s` and at once when a page opens, and puts any window that is not where
+  it was parked back off screen (a minimized one is left alone; a maximized or full-screen one is made normal
+  first). Tested by moving the window 60 px further onto the display: back within 1.5 s. (3) After a crash or the
+  watchdog's kill, Chrome offers to restore the session in a bubble: `--hide-crash-restore-bubble`, and with
+  `--no-startup-window` no session is restored into a window. (4) The app cannot be activated (LSBackgroundOnly),
+  so nothing can take focus at any point. Not tested: an actual display change, a launch with the screen locked
+  (both reduce to (1)), and whether macOS shows its "quit unexpectedly" dialog when a background-only app crashes
+  (it is not expected to; the trimmed set turns off Chrome's own crash reporter). The window server lists the live
+  bundled windows at x 1670, y 1071 of a 1710x1112 display (the 40x41 px corner) and none as on screen otherwise.
 - **Trimmed switches** (`browser_trim`, `TRIM_ARGS` / `TRIM_FEATURES`): `--process-per-site` (tabs of one site share
   a renderer), `--disable-back-forward-cache`, no spare renderer, no phishing classifier, domain reliability, pings,
   metrics upload, crash reporter, download protection, optimization-guide fetches/models, autofill server, CT
@@ -405,6 +431,85 @@ normal window: a background-only app cannot take the keyboard.
   browser/chrome/`, re-cloned whenever Chrome updates, never older than the profile); it is for this Mac only, as
   Google Chrome cannot be shipped inside Provenance.app. Device-bound Google sessions (DBSC) keep their keys per
   browser app, so a Google sign-in made in the installed Chrome may have to be renewed in the bundled one.
+
+### Account setup from the app (`/web/*`, `provenance-core/web_setup.py`)
+
+Everything a desktop app needs to set up the web chats without a terminal: pick a model, sign in in a window the
+router opens, see it verified. Same auth as the other routes. Every `reason` and 409 `detail` is written to be shown
+to the person as it is.
+
+| endpoint | |
+|---|---|
+| `GET /web/accounts` | `browser` (`mode`, `source`, `ready`, `version`, `preparing`, `stage`, `progress` 0-1 while downloading else null, `error`), `accounts` (the global list of ids), `providers`: `id`, `name` ("ChatGPT", "Gemini", ...), `url`, `enabled`, `shares_browser_with`, `models` (`id`, `label`, `tier`, `model`, `accounts`: null = every account), `accounts` (per account: `signed_in` true / false / null = never checked, `checked_at`, `email` (the identity the page showed at the last check, else null), `blocked`, `reason`, `blocked_for_s`, `today`, `daily_cap`, `signing_in`, `window_open`, `login` {`state`, `reason`}) |
+| `POST /web/login` `{provider, account, bounds?}` | start a sign-in; answers once the window is open (`{"state": "open"}`), or `preparing` while the browser is downloaded; 409 when a sign-in already holds that account's browser. `bounds` `{left, top, width, height}` places the window (default 80, 60, 1000x800), e.g. beside the app |
+| `GET /web/login?provider=&account=` | `{state, reason}` (plus `provider`, `account`, `since`, `how`: cookie / closed / timeout); poll about once a second |
+| `POST /web/login/cancel` `{provider, account}` | closes the window, nothing is checked: `{"state": "idle"}` |
+| `POST /web/accounts` `{account}` | a new account slot (a new browser profile) on every web provider |
+| `DELETE /web/accounts/{id}` | removes it from every provider; its profile directory is never deleted (`profile_kept`, `note` say so) |
+| `POST /web/browser/prepare` | start preparing the bundled browser if it is not ready; answers with `browser` |
+
+**Accounts are global.** One account is one browser profile, shared by every site (`share:`), so the same ids are
+listed under every provider. The catalog's `accounts:` lists are merged, and what was added or removed from the app is
+kept in `<PCORE_HOME>/web_accounts.json` and applied when the catalog is loaded: catalog.yaml is never rewritten. An
+account added at run time joins the running pools at once (a provider that had one account becomes a pool, keeping
+its open browser).
+
+**The sign-in, step by step** (one provider + account; `LoginFlow`):
+
+```
+idle ──POST──> preparing ──> open ──(session cookie seen | window closed | login_timeout_s)──> verifying ──> signed_in
+                                                                                                     └──> failed
+preparing / open / verifying ──POST /web/login/cancel──> idle      (window closed, nothing checked)
+signed_in / failed stay until the next POST /web/login or cancel for that provider + account
+anything that cannot be done (no browser to sign in with, the profile held by another window) ──> failed
+```
+
+1. *preparing*: waits while the bundled browser is downloaded (`reason`: "Getting the browser ready (45%)...").
+   Pauses every bridge on the account's profile (all sites: their requests skip the account with no penalty and
+   their background browser is not started), waits up to 120 s for a chat in progress there, closes the background
+   browser (a request still running after that is skipped, not penalized).
+2. *open*: one ordinary window on the profile at the site's sign-in page (`login_url`), with the same build that
+   runs in the background: the bundled build's plain (normal) copy, the installed Chrome only when there is no
+   bundled build (or in `chrome` mode). Started with `open -n -a` so macOS brings it to the front like an app the
+   user opened (measured: the frontmost app became it); always with an explicit position and size, because Chrome
+   would otherwise reopen the profile's last window where the background browser left it, off screen. No debugging
+   port, no automation switch, nothing attached.
+3. Ends on the first of: the site's session cookie is new or changed in the profile's cookie database (then 3 s
+   for the site's redirect); the window was closed (the app quit, or its last window closed while the app runs, as
+   the window server's list shows); `login_timeout_s`.
+4. *verifying*: the window is quit as Cmd+Q does (`NSRunningApplication.terminate`, no permission needed), the pause
+   is lifted, and `Bridge.check` opens a fresh chat in the background browser without sending anything; it also
+   reads who is signed in from the page (`IDENTITY_JS`: ChatGPT's page data, Google's account button). Then
+   `signed_in` (with a `reason` when the site reports a usage limit), or `failed`: "The window was closed before
+   sign-in finished.", "The sign-in window was closed after 15 minutes because sign-in did not finish. Try
+   again.", "<site> still asks to sign in...", a human check, no temporary chats, the site not loading.
+
+A failed or cancelled sign-in lifts the pause too: an account is never left with neither a sign-in window nor a
+background browser that can start. If the router dies, a watchdog closes the window.
+
+**Why sign-in is watched from outside the window.** Google refuses sign-in in browsers it considers automated
+("This browser or app may not be secure"), and `navigator.webdriver` is the documented tell. Measured on Chrome for
+Testing 157 with a page reporting what it sees: no debugging port → `webdriver: false`; `--remote-debugging-port`
+with nothing attached → `webdriver: true` (as with Playwright or patchright attached). Watching the window over a
+debugging port would therefore mark it automated to every site, Google's sign-in included; hiding that flag would be
+defeating the check. So the window runs with no automation at all and is watched through the profile: Chrome keeps
+its cookie database (`Default/Network/Cookies`, SQLite) readable while it runs (measured), and writes new cookies
+to it within about 30 s (measured 30.8 s; it also writes after 512 changes). Only `host_key`, `name` and the date
+columns are read, never `value` / `encrypted_value`. Two more measurements decided how the window is closed: a
+SIGTERM makes Chrome exit at once without writing cookies set in the last 30 s (a just-finished sign-in would be
+lost), while a Cmd+Q style quit writes them. Session cookies per site (`session` in `CHATGPT_SITE` / `SITES`, or
+`session_cookies` in `web:`): ChatGPT `__Secure-next-auth.session-token*` on chatgpt.com, Google `SID` /
+`__Secure-1PSID` / `__Secure-3PSID` on google.com, Qwen and Z.ai `token` (not confirmed). With no names, only closing
+the window or the timeout ends a sign-in.
+
+**Verified** against the mock page (`tests/test_web_setup.py`): signed out → window → the page signs itself in →
+cookie seen → window closed → checked → `signed_in` with the e-mail; the background browser closed and every site on
+the account skipping while the window is open; closed by hand after and before signing in; timeout; cancel; 409; the
+accounts endpoints and their persistence; the browser's progress and `auto` waiting for it. Those tests start the
+window headless and directly (`WebSetup.launch = "exec"`) so nothing shows. Once with the real thing: the bundled
+plain copy opened with `open -n -a`, small in a corner, came to the front, signed in on the mock page, was detected,
+quit and verified in 10 s. **Not verified:** a real sign-in on any site (the cookie names above, Google's reaction to
+this window, the identity selectors, and how each site's sign-in page behaves when opened directly).
 
 ## Subscription fallback
 
@@ -442,6 +547,8 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_BASE_URL` | `http://127.0.0.1:4141` | where `usage` / `env` look for the proxy |
 | `PCORE_LOW_PCT` | `95` | subscription usage that counts as low |
 | `PCORE_CHATGPT_WEB` | unset | `1` turns the chatgpt-web provider on, `0` forces it off |
+| `PCORE_BROWSER_APP` | unset | the bundled browser to use: a Chrome for Testing `.app`, or the folder that holds one (Provenance.app's `Contents/Resources/browser`) |
+| `PCORE_BROWSER_DIR` | `<PCORE_HOME>/browser` | where the bundled browser is prepared |
 | `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `prune`) |
 
 Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLARE_API_TOKEN`, ...; see
@@ -460,3 +567,5 @@ Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLA
 page (`tests/mock_chatgpt.py`) in headless Chrome; those tests are skipped without Playwright and Google Chrome.
 The bundled-browser tests run the same mock page in the background-only browser (its window off screen); the
 Chrome for Testing one is skipped unless a copy is already prepared (`python -m provenance_core.browser_host`).
+`tests/test_web_setup.py` runs the sign-in flow against the mock page's sign-in page (`login: "cookie"`) with a
+headless window on scratch profiles.

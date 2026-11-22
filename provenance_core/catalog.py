@@ -145,6 +145,11 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
             type=str(p.get("type") or "openai"),
             options={**(p.get("web") or {}), **({"enabled": True} if p.get("enabled") else {})},
         )
+    # web accounts are global (one browser profile each, shared by every site): the catalog's `accounts:` lists,
+    # merged, plus the ones added or removed from the app (<PCORE_HOME>/web_accounts.json; see web_setup.py)
+    from .web_setup import apply_accounts
+
+    apply_accounts(providers)
     models = {}
     for m in data["models"]:
         lim = Limits(**(m.get("limits") or {}))
