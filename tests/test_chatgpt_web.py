@@ -1342,3 +1342,27 @@ def test_a_message_too_long_for_the_box_is_shortened_and_sent(mock, tmp_path):
     assert 4000 <= st["page_chars"] <= 9000
     assert len(mock.sent) == 1 and len(mock.sent[0]["prompt"]) <= 9000
     assert "and now the last question" in mock.sent[0]["prompt"]
+
+
+@browser
+def test_the_sites_too_long_error_is_seen_at_once_and_the_message_resent_shorter(mock, tmp_path):
+    """ChatGPT answers an over-long message with an error block in the turn ("The message you submitted was too
+    long ..."): the bridge does not wait out the reply timeout, it sends a shorter history in the same request."""
+    mock.replies = [
+        {"turn_error": "The message you submitted was too long, please edit it and resubmit."},
+        "<p>done</p>",
+    ]
+    old = [m for i in range(40) for m in ({"role": "user", "content": f"step {i} " + "x" * 400},
+                                          {"role": "assistant", "content": f"did {i} " + "y" * 400})]  # fmt: skip
+    body = {"messages": old + [{"role": "user", "content": "and now the last question"}]}
+
+    async def go(b):
+        t0 = time.time()
+        d = await b.complete("luna", body)
+        return d, b.load(), time.time() - t0
+
+    d, st, took = scenario(mock, tmp_path, go)
+    assert d["choices"][0]["message"]["content"] == "done" and took < 60
+    assert len(mock.sent) == 2 and len(mock.sent[1]["prompt"]) < 0.75 * len(mock.sent[0]["prompt"])
+    assert st["page_chars"] == int(len(mock.sent[0]["prompt"]) * 0.7)
+    assert "and now the last question" in mock.sent[1]["prompt"]

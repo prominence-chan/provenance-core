@@ -915,6 +915,14 @@ PROBE_JS = r"""(fresh) => {
   if (out.busy) { const at = text.indexOf(out.busy); out.busyContext = text.slice(Math.max(0, at - 220), at + out.busy.length + 120).replace(/\s+/g, ' ').trim(); }
   out.limit = out.busy ? null : m(/you(?:'|’)ve (?:reached|hit) (?:your|the|our)[^.\n]{0,80}limit|you(?:'|’)re out of[^.\n]{0,60}|too many requests|usage cap|limit reached/i);
   out.error = m(/something went wrong|error generating|network error|unable to load|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|conversation not found|an error occurred/i, scoped);
+  // the page's own error in place of a reply ("The message you submitted was too long, please edit it and
+  // resubmit." / "Something went wrong"): a block with a Retry button inside the turn, outside any message text
+  out.turnError = null;
+  if (!fresh) for (const b of document.querySelectorAll('main button')) {
+    if ((b.innerText || '').trim() !== 'Retry' || !vis(b) || b.closest('[data-message-author-role], .markdown')) continue;
+    let box = b; for (let i = 0; i < 4 && box.parentElement; i++) { box = box.parentElement; if ((box.innerText || '').trim().length > 12) break; }
+    out.turnError = (box.innerText || '').replace(/\bRetry\b/g, '').replace(/\s+/g, ' ').trim().slice(0, 200) || 'error';
+  }
   // "Context window full - Start a new chat with an automatic summary ...": shown beside the composer, not in a reply
   out.full = null;
   if (!fresh && document.body) {
@@ -2208,7 +2216,7 @@ class Bridge:
                 await box.press("Enter")
         t0 = time.time()
         timeout = float(self.o["reply_timeout_s"])
-        started, stable, last_len, empty = False, 0, -1, 0
+        started, stable, last_len, empty, bad = False, 0, -1, 0, 0
         said, tick = "", 0
         while True:
             tick += 1
@@ -2241,6 +2249,15 @@ class Bridge:
                     continue
             if p.get("error") and not p["stop"] and not new_reply:
                 raise WebError(f"ChatGPT showed an error: {p['error']}")
+            if p.get("turnError") and not p["stop"] and not new_reply:
+                bad = bad + 1
+                if bad >= 4:  # still there after two seconds: the page gave this instead of a reply
+                    await self._dump(page, p, "turn-error")
+                    if re.search(r"too long", p["turnError"], re.I):
+                        raise WebTooLong(f"ChatGPT refused the message: {p['turnError']}", int(len(text) * 0.7))
+                    raise WebError(f"ChatGPT showed an error: {p['turnError']}")
+            else:
+                bad = 0
             done = False
             if not p["stop"] and new_reply and p["lastLen"] > 0:
                 stable = stable + 1 if p["lastLen"] == last_len else 0
@@ -2513,14 +2530,24 @@ class Bridge:
                     try:
                         text, calls, extra = await self._guarded(run)
                     except WebTooLong as e:
-                        if reuse or e.limit < 4000:
+                        # the page takes less than this message. A new chat: remember the size it takes (for this
+                        # account) and send the history shortened to it, in the same request. A continued chat:
+                        # it has outgrown the page, so start a new one from the caller's history
+                        if not reuse and e.limit < 4000:
                             raise
-                        # this page's box is smaller than the message: remember its size (for this account) and
-                        # send the history shortened to it, in the same request
-                        self.save(page_chars=e.limit)
+                        if not reuse:
+                            self.save(page_chars=e.limit)
+                        reuse = False
                         prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
-                        text, calls, extra = await self._guarded(run)
-                        extra["shortened_to"] = e.limit
+                        try:
+                            text, calls, extra = await self._guarded(run)
+                        except WebTooLong as e2:  # still too long: once more, smaller again
+                            if e2.limit < 4000:
+                                raise
+                            self.save(page_chars=e2.limit)
+                            prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
+                            text, calls, extra = await self._guarded(run)
+                        extra["shortened_to"] = int(self.load().get("page_chars") or 0) or None
                 except WebUnsent as e:
                     if not reuse:
                         # a new chat that did not take the message (a page not quite ready just after the browser

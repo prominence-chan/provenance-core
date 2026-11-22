@@ -74,6 +74,9 @@ btn.onclick = async () => {
   btn.dataset.testid = 'stop-button'; btn.setAttribute('aria-label', 'Stop streaming'); btn.textContent = 'stop';
   const r = await (await fetch('/__send', {method: 'POST', body: JSON.stringify({prompt: text, temp, model})})).json();
   if (r.error) { const e = document.createElement('div'); e.setAttribute('role', 'alert'); e.textContent = r.error; $('banner').appendChild(e); }
+  else if (r.turn_error) {  // the page's own error where the reply would be, with a Retry button
+    const d = document.createElement('div'); d.innerHTML = '<div><div>' + r.turn_error + '</div><button>Retry</button></div>'; $('thread').appendChild(d);
+  }
   else {
     const art = add('assistant', '', r.slug);
     const md = art.querySelector('.markdown');
