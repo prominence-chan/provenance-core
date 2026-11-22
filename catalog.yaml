@@ -18,6 +18,9 @@ tiers:
 # History pruning (prune.py): repeated file reads, stale reads, bulky write feedback and long old outputs are cut
 # from the history. On for the web bridge (applied only to the prompt that starts a new chat); off for API models.
 prune: {web: true}
+# Context compaction (compact.py): when a new web chat cannot take the whole history, the old part becomes a brief
+# (the user's messages, changed files and their state, failures, the last plan) instead of being cut blindly.
+compact: {web: true}
 
 aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: spark, tier-1: nova, tier-2: solstice, tier-3: ember, tier-4: spark, auto: solstice, default: solstice}
 
