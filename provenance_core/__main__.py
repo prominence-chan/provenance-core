@@ -7,7 +7,8 @@ discover <provider>             list the provider's /models (to update the catal
 usage                           Claude Code / Codex subscription headroom (JSON)
 env claude|codex [--force]      shell exports that point the tool at provenance-core, if it's running low
 statusline-tee '<cmd>'          Claude Code status-line wrapper: records rate limits, then runs cmd
-weblogin                        chatgpt-web: open Chrome on its own profile so you can sign in to ChatGPT once
+weblogin [provider] [--account b]  sign in to a web chat (default: the first one, ChatGPT) in a window that
+                                closes by itself once you are in, then check it; through the server when it runs
 webstatus [--probe] [--boot]    chatgpt-web: enabled? signed in? today's count; --probe checks the page live,
                                 --boot is the quiet form for launchers (prints only when something needs you)"""
 
@@ -74,8 +75,21 @@ def main():
 
 def _web_boot(cat):
     """Server start: say where the chatgpt-web provider stands (from the last check; the page isn't opened)."""
+    from . import browser_host
     from .chatgpt_web import LOGIN_HINT, make_bridge, notify
 
+    # bundled / auto: have the bridge's own browser ready before the first request (a ~200 MB download the first
+    # time, in the background; its progress is in GET /web/accounts)
+    for p in cat.providers.values():
+        o = p.options
+        if (
+            p.type == "chatgpt_web"
+            and not o.get("share")
+            and str(o.get("browser") or "").lower() in ("bundled", "auto")
+        ):
+            if str(o.get("browser_source") or "cft").lower() == "cft":
+                browser_host.ensure_soon(make_bridge(p.base_url, o).profile)
+            break
     for p in cat.providers.values():
         if p.type != "chatgpt_web" or not p.usable:
             continue
@@ -108,7 +122,7 @@ def _web_cmd(a, cat):
     import sys
     import time
 
-    from .chatgpt_web import LOGIN_HINT, BridgePool, login_window, make_bridge, notify
+    from .chatgpt_web import LOGIN_HINT, make_bridge, notify
 
     name = next((n for n, p in cat.providers.items() if p.type == "chatgpt_web"), None)
     if not name:
@@ -125,17 +139,27 @@ def _web_cmd(a, cat):
             return None
 
     bridge = make_bridge(p.base_url, p.options)
-    if a.cmd == "weblogin":
-        acct = f"account={a.account}" if a.account else ""
-        try:
-            one = bridge.pick(a.account) if isinstance(bridge, BridgePool) else bridge
-        except KeyError as e:
-            sys.exit(str(e))
-        server("POST", "/chatgpt-web/release?" + acct)
-        code = login_window(one)
-        if code == 0:
-            server("POST", "/chatgpt-web/release?reset=1&" + acct)
-        sys.exit(code)
+    if a.cmd == "weblogin":  # the same sign-in flow as the app's (web_setup.py): through the server when it runs
+        from .web_setup import cli_login, local_call
+
+        prov = a.arg or name
+        if prov not in cat.providers or cat.providers[prov].type != "chatgpt_web":
+            sys.exit(
+                f"no web provider {prov!r} (one of: {', '.join(n for n, q in cat.providers.items() if q.type == 'chatgpt_web')})"
+            )
+
+        def call(method, path, body=None):
+            try:
+                r = httpx.request(method, base + path, headers=hdr, json=body, timeout=180)
+                return r.status_code, r.json()
+            except (httpx.HTTPError, ValueError):
+                return None, None
+
+        status, _ = call("GET", "/web/accounts")
+        sleep = time.sleep
+        if status != 200:  # no server (or an older one): the flow runs here
+            call, sleep = local_call(cat)
+        sys.exit(cli_login(call, prov, a.account, sleep=sleep))
     on = p.usable
     if a.boot and not on:
         return  # not turned on: nothing to say at boot

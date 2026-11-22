@@ -7,7 +7,8 @@ POST /v1/chat/completions   model = a tier name or alias (see catalog.yaml) | "a
 GET  /v1/models             the tier aliases plus every usable concrete model
 GET  /status                tiers, models, scores, headroom, health
 POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_api.py
-POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py"""
+POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py
+/web/*                      account setup for the web-chat bridge from the app, see web_setup.py"""
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import anthropic_api, responses_api
+from . import anthropic_api, responses_api, web_setup
 from .catalog import load
 from .router import NoCapacity, Router, estimate_tokens
 from .settings import env
@@ -215,6 +216,81 @@ def create_app(
             for m in web_models(name):
                 router.state.health.pop(m.id, None)
         return {"released": True, **b.status()}
+
+    # ---- account setup from the app: accounts, sign-in windows, the bundled browser (web_setup.py) -------------
+    setup = web_setup.WebSetup(router)
+    app.state.web_setup = setup
+    app.router.on_shutdown.append(setup.close)
+
+    def fail(e: Exception, state: str | None = None):
+        msg = str(e).strip("'\"")
+        if isinstance(e, KeyError):
+            return JSONResponse({"detail": msg}, status_code=404)
+        return JSONResponse({"detail": msg, "reason": msg, **({"state": state} if state else {})}, status_code=409)
+
+    async def body_of(request: Request) -> dict:
+        try:
+            b = await request.json()
+        except ValueError:
+            b = {}
+        return b if isinstance(b, dict) else {}
+
+    @app.get("/web/accounts")
+    async def web_accounts(authorization: str | None = Header(None)):
+        check(authorization)
+        return setup.view()
+
+    @app.post("/web/accounts")
+    async def web_account_add(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return await setup.add_account((await body_of(request)).get("account"))
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.delete("/web/accounts/{account}")
+    async def web_account_remove(account: str, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return await setup.remove_account(account)
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.post("/web/login")
+    async def web_login(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        b = await body_of(request)
+        try:
+            return await setup.start(str(b.get("provider") or ""), b.get("account"), b.get("bounds"))
+        except web_setup.SetupError as e:
+            return fail(e, setup.login_state(str(b.get("provider")), b.get("account"))["state"])
+        except KeyError as e:
+            return fail(e)
+
+    @app.get("/web/login")
+    async def web_login_state(provider: str, account: str | None = None, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return setup.login_state(provider, account)
+        except KeyError as e:
+            return fail(e)
+
+    @app.post("/web/login/cancel")
+    async def web_login_cancel(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        b = await body_of(request)
+        try:
+            return await setup.cancel(str(b.get("provider") or ""), b.get("account"))
+        except KeyError as e:
+            return fail(e)
+
+    @app.post("/web/browser/prepare")
+    async def web_browser_prepare(authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return setup.prepare_browser()
+        except web_setup.SetupError as e:
+            return fail(e)
 
     anthropic_api.register(app, router, token)
     responses_api.register(app, router, token)
