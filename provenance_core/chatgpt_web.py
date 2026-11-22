@@ -878,14 +878,28 @@ PROBE_JS = r"""(fresh) => {
 
 # The assistant messages after the last user message, turned back into markdown. Code blocks come back exactly
 # (their text content); the rest is rebuilt from the rendered elements.
-READ_JS = r"""() => {
+READ_JS = r"""(cfg) => {
   // both generations of markup (see PROBE_JS): everything the assistant wrote after the last user message
   const role = e => e.getAttribute('data-message-author-role') || (e.hasAttribute('data-response-body') || e.hasAttribute('data-dil-response') ? 'assistant' : 'user');
   const found = [...document.querySelectorAll('[data-message-author-role], [data-content-search-unit-key$=":user"], [data-response-body], [data-dil-response]')];
   const all = found.filter(e => role(e) !== 'assistant' || !found.some(o => o !== e && role(o) === 'assistant' && o.contains(e)));
   let lastUser = -1;
   all.forEach((e, i) => { if (role(e) === 'user') lastUser = i; });
-  const as = all.slice(lastUser + 1).filter(e => role(e) === 'assistant');
+  let as = all.slice(lastUser + 1).filter(e => role(e) === 'assistant');
+  if (cfg) {   // another chat site (see SITES): its own selectors for the messages
+    const us = [...document.querySelectorAll(cfg.user)], lu = us[us.length - 1];
+    as = [...document.querySelectorAll(cfg.assistant)].filter(e => !lu || (lu.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING));
+  }
+  const boxed = el => {   // a site's code block: a box with a language label, buttons, and the code in pre
+    const code = el.querySelector('pre code') || el.querySelector('pre');
+    const tagged = el.querySelector('[data-lang]');
+    let lang = tagged ? tagged.getAttribute('data-lang') || '' : ((el.querySelector('[class*="language-"]') || el).className.match(/language-([\w+#.-]+)/) || [])[1] || '';
+    if (/^(code|text|plain|plaintext)$/.test(lang)) lang = '';
+    const lines = code ? code.querySelectorAll(cfg.codeLine || '.never') : [];
+    const text = (lines.length ? [...lines].map(l => l.textContent.replace(/\n$/, '')).join('\n') : (code ? code.textContent : el.innerText)).replace(/\n$/, '');
+    const f = fence(text, 3);
+    return f + lang + '\n' + text + '\n' + f;
+  };
   const isWidget = n => n.nodeType === 1 && n.getAttribute('data-client-defined-widget') === 'code_block';
   const isMath = n => n.nodeType === 1 && n.getAttribute('data-d-component') === 'math';
   function widget(el) {   // the 2026-11 code block: an editor widget; the code itself is kept verbatim in an attribute
@@ -972,6 +986,8 @@ READ_JS = r"""() => {
       if (isMath(node)) { flush(); out.push('$$' + tex(node) + '$$'); continue; }
       if (isWidget(node)) { flush(); out.push(widget(node)); continue; }
       if (node.nodeType === 1 && node.getAttribute('data-d-component') === 'divider') { flush(); out.push('---'); continue; }
+      if (cfg && cfg.code && node.nodeType === 1 && node.matches(cfg.code)) { flush(); out.push(boxed(node)); continue; }
+      if (cfg && cfg.drop && node.nodeType === 1 && node.matches(cfg.drop)) continue;
       if (!BLOCK.has(t)) { buf += inl(node); continue; }
       flush();
       if (t === 'p') out.push(inl(node).trim());
@@ -988,11 +1004,67 @@ READ_JS = r"""() => {
   }
   const parts = [];
   for (const a of as) {
-    const roots = [...a.querySelectorAll('.markdown')].filter(r => !r.parentElement.closest('.markdown'));
+    const sel = cfg ? cfg.root : '.markdown';
+    const roots = [...a.querySelectorAll(sel)].filter(r => !r.parentElement.closest(sel));
     for (const r of (roots.length ? roots : [a])) parts.push(...blocks(r));
   }
   const last = as[as.length - 1];
   return {md: parts.join('\n\n'), n: as.length, slug: last ? last.getAttribute('data-message-model-slug') : null};
+}"""
+
+# Other chat sites, driven the same way (`web: {site: zai}` on a `type: chatgpt_web` provider). Each entry says where
+# the page keeps its composer, buttons and messages; SITE_PROBE_JS and READ_JS read the page through it.
+SITES = {
+    "zai": {  # chat.z.ai: works without an account (guest), so nothing is kept in any history
+        "name": "Z.ai",
+        "path": "/",
+        "composer": "textarea#chat-input",
+        "send": "#send-message-button",
+        "stop": 'button[aria-label="Stop"]',
+        "user": ".user-message",
+        "assistant": ".chat-assistant",
+        "root": ".chat-markdown:not(.not-prose .chat-markdown)",
+        "code": 'div:has(> div[class*="language-"] pre)',
+        "actions": 'button[aria-label="Regenerate"]',
+        "model": 'button[aria-label="Select a model"]',
+        "msg": '[id^="message-"]',
+        "login": None,
+    },
+}
+
+# The same facts PROBE_JS reports, for a site described in SITES.
+SITE_PROBE_JS = r"""([cfg, fresh]) => {
+  const vis = el => { if (!el) return false; const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+                      return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const first = sel => sel ? [...document.querySelectorAll(sel)].find(vis) || null : null;
+  const out = {url: location.href, title: document.title, temp: true, account: true, slug: null, lastState: null};
+  out.composer = !!first(cfg.composer);
+  out.login = !!first(cfg.login);
+  const scoped = [...document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"], [data-sonner-toast], [class*="toast" i], [class*="error" i]')]
+    .filter(vis).filter(el => !el.closest(cfg.user + ', ' + cfg.assistant)).map(el => el.innerText || '').join('\n');
+  const text = (fresh && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
+  const m = (re, s) => { const x = (s === undefined ? text : s).match(re); return x ? x[0] : null; };
+  out.challenge = m(/just a moment|verify (?:that )?you are (?:a )?human|unusual activity|suspicious activity|confirm you(?:'|’)re (?:not a robot|human)|are you a robot|complete the captcha|checking your browser|you have been blocked|access denied|slide to (?:verify|complete)/i);
+  out.busy = m(/try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|(?:high|heavy) (?:demand|traffic|load)|server (?:is )?busy|too many (?:requests|users)|rate limit/i, scoped);
+  out.limit = out.busy ? null : m(/(?:reached|hit|exceeded) (?:your|the|our)[^.\n]{0,80}(?:limit|quota)|(?:daily|usage) (?:limit|quota|cap)[^.\n]{0,60}|(?:log|sign) in to continue[^.\n]{0,60}/i, scoped);
+  out.error = m(/something went wrong|network error|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|an error occurred|failed to (?:send|fetch|generate)[^.\n]{0,40}/i, scoped);
+  out.full = m(/context (?:window|length)[^.\n]{0,30}(?:full|exceeded)|conversation (?:is|has gotten) too long|maximum (?:length|context)[^.\n]{0,40}/i, scoped);
+  out.stop = !!first(cfg.stop);
+  const send = first(cfg.send);
+  out.send = !!send;
+  out.sendEnabled = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+  const us = [...document.querySelectorAll(cfg.user)], as = [...document.querySelectorAll(cfg.assistant)];
+  out.users = us.length; out.assistants = as.length;
+  const lu = us[us.length - 1], last = as[as.length - 1];
+  const body = last ? last.querySelector(cfg.root) : null;
+  out.lastLen = body ? (body.innerText || '').length : 0;
+  const id = el => { const h = el && cfg.msg ? el.closest(cfg.msg) : null; return h ? h.id || null : null; };
+  out.lastUser = id(lu); out.lastAsst = id(last);
+  out.asstAfterUser = !!(last && lu && (lu.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING));
+  out.actions = cfg.actions ? [...document.querySelectorAll(cfg.actions)].length : 0;
+  const sw = first(cfg.model);
+  out.model = sw ? (sw.innerText || '').trim().replace(/\s+/g, ' ') : null;
+  return out;
 }"""
 
 COMPOSER = '#prompt-textarea, div[contenteditable][role="textbox"], textarea[name="prompt"], main textarea'
@@ -1037,6 +1109,7 @@ DEFAULTS = {
     "quiet": False,  # macOS: hide the window's Chrome right after it opens, so it never takes the screen or focus
     "notify": True,  # macOS notification when the provider goes unavailable
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
+    "site": None,  # another chat site from SITES (e.g. zai) instead of chatgpt.com
 }
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 LOGIN_HINT = "run `provenance-core weblogin` and sign in to ChatGPT in the window it opens"
@@ -1076,9 +1149,11 @@ class Bridge:
             self.o["driver"] = env("CHATGPT_WEB_DRIVER").strip()
         self.home = Path(home) if home else home_dir()
         tag = "" if account in (None, "", "main", "default") else "-" + re.sub(r"[^\w.-]", "_", account)
-        base = Path(self.o["profile"] or self.home / "chatgpt-web-profile").expanduser()
+        self.site = SITES[self.o["site"]] if self.o.get("site") else None
+        kind = self.o.get("site") or "chatgpt"
+        base = Path(self.o["profile"] or self.home / f"{kind}-web-profile").expanduser()
         self.profile = base.with_name(base.name + tag)
-        self.state_path = self.home / f"chatgpt_web{tag}.json"
+        self.state_path = self.home / f"{kind}_web{tag}.json"
         self.busy = 0  # requests in flight or queued on this account (the pool spreads by it)
         self.sleep, self.clock, self.rand = sleep, clock, rand
         self.lock = asyncio.Lock()
@@ -1304,12 +1379,20 @@ class Bridge:
     async def _probe(self, page, fresh: bool) -> dict:
         for _ in range(8):  # the page may navigate under the probe (a browser check passing, a redirect): look again
             try:
-                return await page.evaluate(PROBE_JS, fresh)
+                return await self._probe_once(page, fresh)
             except Exception as e:  # noqa: BLE001
                 if "context was destroyed" not in str(e) and "navigation" not in str(e):
                     raise
                 await asyncio.sleep(0.5)
+        return await self._probe_once(page, fresh)
+
+    async def _probe_once(self, page, fresh: bool) -> dict:
+        if self.site:
+            return await page.evaluate(SITE_PROBE_JS, [self.site, fresh])
         return await page.evaluate(PROBE_JS, fresh)
+
+    async def _read(self, page) -> dict:
+        return await page.evaluate(READ_JS, self.site)
 
     def _strike(self) -> float:
         """One more failure in a row -> how long to stay away now (doubles each time, up to backoff_max_s)."""
@@ -1319,7 +1402,8 @@ class Bridge:
 
     def _notices(self, p: dict):
         if p.get("busy") and not p.get("challenge"):
-            raise WebUnavailable(f"ChatGPT is turning chats away for now ({p['busy'][:120]!r})", self._strike(), "busy")
+            who = self.site["name"] if self.site else "ChatGPT"
+            raise WebUnavailable(f"{who} is turning chats away for now ({p['busy'][:120]!r})", self._strike(), "busy")
         """Anything on the page that means "stop": never interact with it, just report."""
         if p.get("challenge"):
             raise WebUnavailable(
@@ -1336,7 +1420,7 @@ class Bridge:
         """A fresh temporary chat, ready for typing. Raises WebUnavailable for anything a user would have to sort
         out by hand."""
         page = page or await self._ensure_page()
-        url = f"{self.base_url}/?temporary-chat=true"
+        url = f"{self.base_url}{self.site['path']}" if self.site else f"{self.base_url}/?temporary-chat=true"
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         except Exception as e:  # noqa: BLE001
@@ -1393,6 +1477,8 @@ class Bridge:
 
     async def _pick_model(self, page, model: str, p: dict) -> dict:
         want = model.lower()
+        if self.site:
+            return await self._pick_site_model(page, want, p)
 
         def auto_ok(shown):
             return bool(self.o["allow_auto_fallback"] and re.search(r"(?:^|\s)auto$", shown or "", re.I))
@@ -1402,7 +1488,7 @@ class Bridge:
         if p.get("model") is None:  # no model picker at all (the Free plan): the account has one model, and it answers
             return p
         try:
-            await page.locator(SWITCHER).first.click(timeout=4000)
+            await page.locator(self.site["model"] if self.site else SWITCHER).first.click(timeout=4000)
             item = (
                 page.locator('[role="menuitem"], [role="menuitemradio"], [role="option"]')
                 .filter(has_text=re.compile(re.escape(model), re.I))
@@ -1437,12 +1523,44 @@ class Bridge:
             )
         return p
 
+    async def _pick_site_model(self, page, want: str, p: dict) -> dict:
+        """SITES: the picker button shows the model's name first; its menu is opened with the keyboard (a hidden
+        window does not take clicks) and the entry with exactly that name is chosen."""
+
+        def shown(p):
+            return ((p.get("model") or "").split() or [""])[0].lower()
+
+        if shown(p) == want or p.get("model") is None:
+            return p
+        try:
+            await page.locator(self.site["model"]).first.focus(timeout=4000)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(1.0)
+            picked = await page.evaluate(
+                r"""(want) => { for (const e of document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button')) {
+                     if (((e.innerText || '').trim().split(/\s+/)[0] || '').toLowerCase() === want) { e.click(); return true; } } return false; }""",
+                want,
+            )
+            if not picked:
+                await page.keyboard.press("Escape")
+            await asyncio.sleep(0.8)
+        except Exception:  # noqa: BLE001
+            pass
+        p = await self._probe(page, True)
+        if shown(p) != want and self.o["strict_model"]:
+            raise WebUnavailable(
+                f"model {want!r} is not selectable on {self.site['name']} (the page shows {p.get('model')!r})",
+                float(self.o["cooldown_model_s"]),
+                "model",
+            )
+        return p
+
     async def _send(self, page, text: str, on_text=None) -> dict:
         """Type one message, send it, wait for the reply to finish. -> {md, slug}"""
         before = await self._probe(page, False)
         if before.get("full"):
             raise WebUnsent(f"this chat is full ({before['full']!r})")
-        box = page.locator(COMPOSER).first
+        box = page.locator(self.site["composer"] if self.site else COMPOSER).first
         try:  # a click waits for the element to hold still, which a hidden window may never report: focus is enough
             await box.click(timeout=2500)
         except Exception:  # noqa: BLE001
@@ -1460,7 +1578,7 @@ class Bridge:
         if typed < 0.9 * len(re.sub(r"\s+", "", text)):
             raise WebError(f"the composer took {typed} of {len(text)} characters (message too long for the page?)")
         self.save(count=self.load().get("count", 0) + 1)
-        send = page.locator(SEND).first
+        send = page.locator(self.site["send"] if self.site else SEND).first
         try:
             await send.click(timeout=3000)
         except Exception:  # noqa: BLE001 - hidden window (see above), or no recognisable send button
@@ -1522,7 +1640,7 @@ class Bridge:
             if on_text and new_reply and p["lastLen"] != last_len and tick % 2 == 0:
                 # whole paragraphs before the first code block are final: pass them on while the rest is written
                 try:
-                    md = (await page.evaluate(READ_JS)).get("md") or ""
+                    md = (await self._read(page)).get("md") or ""
                 except Exception:  # noqa: BLE001 - streaming is a nicety; the full read below is what counts
                     md = ""
                 cut = md.find("```")
@@ -1539,7 +1657,7 @@ class Bridge:
                 raise WebError(
                     f"no complete reply after {int(timeout)} s (page state saved in {self.home / 'chatgpt-web-debug'})"
                 )
-        r = await page.evaluate(READ_JS)
+        r = await self._read(page)
         if not (r.get("md") or "").strip():
             raise WebError("the reply was empty")
         if r.get("slug"):
@@ -1555,7 +1673,7 @@ class Bridge:
                 old.unlink()
             html = await page.evaluate("""() => { const t = [...document.querySelectorAll('[data-turn-key], [data-message-author-role], article')];
                 const e = t[t.length - 1] || document.querySelector('main') || document.body; return e.outerHTML.slice(0, 400000); }""")
-            read = await page.evaluate(READ_JS)
+            read = await self._read(page)
             read["page_tail"] = await page.evaluate("() => (document.body.innerText || '').slice(-1500)")
             (d / f"{time.strftime('%Y%m%d-%H%M%S')}-{why}.json").write_text(
                 json.dumps({"why": why, "probe": probe, "read": read, "last_turn_html": html}, indent=1)

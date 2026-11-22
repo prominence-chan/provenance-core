@@ -47,11 +47,19 @@ providers:
                       allow_auto_fallback: true, reuse_chat: true, max_chat_tabs: 6,
                       # daily_cap is per account. lean: a few lines instead of the harness's 18k base prompt.
                       lean: true, quiet: true, idle_close_s: 21600, accounts: [main, b, c]}}
+  # Z.ai web (chat.z.ai) through the same bridge (`site: zai`): no account, the guest page, which offers GLM-5.3-Flash
+  # only (GLM-5.3 and 5.2 need a signed-in account). Own Chrome profile ~/.tierlm/zai-web-profile.
+  zai-web: {type: chatgpt_web, base_url: "https://chat.z.ai", api_key_env: none,
+            web: {site: zai, daily_cap: 500, min_gap_s: 2, max_gap_s: 5, endpoints: [responses],
+                  reuse_chat: true, max_chat_tabs: 6, lean: true, quiet: true, idle_close_s: 21600}}
 
 models:
   # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
   # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
   - {provider: chatgpt-web, model: luna, score: 93, context: 64000}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
+  # Z.ai guest, measured 2026-11-21: 53 on the probe set (spark), and the page answers "Error code: 405, try again
+  # later" after about 20 messages in a few minutes. Left out of the pool until a signed-in account is tried.
+  # - {provider: zai-web, model: glm-5.3-flash, score: 53, context: 64000}
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}
