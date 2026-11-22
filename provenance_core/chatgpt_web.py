@@ -33,6 +33,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import prune
 from .settings import env
 
 
@@ -997,6 +998,9 @@ DEFAULTS = {
     "max_chat_tabs": 6,
     "lean": False,  # replace the harness's long base prompt with a few lines and drop tools a web chat never needs
     "lean_system_chars": 3000,  # a system message longer than this is the harness's base prompt
+    # prune.py's pass (true, or a dict of its options) on the history a fresh chat starts with; a continued chat is
+    # sent as is. Off unless set here, by `prune:` in the catalog, or by PCORE_PRUNE=1 / web
+    "prune": None,
     "accounts": None,  # e.g. [main, b, c]: one Chrome profile per signed-in account, requests spread across them
     "backoff_base_s": 60.0,  # a "temporary limit" / failed-to-load page: wait this long, doubling each time in a row
     "backoff_max_s": 900.0,
@@ -1551,6 +1555,7 @@ class Bridge:
                 and len(messages) > len(session["seen"])
                 and all(_message_shape(a) == _message_shape(b) for a, b in zip(messages, session["seen"], strict=False))
             )
+            pruned = None
             if reuse:
                 page = session["page"]
                 delta = messages[len(session["seen"]) :]
@@ -1564,9 +1569,17 @@ class Bridge:
                 else:
                     await self._guarded(self._ensure_page)
                     page = await self._new_page() if key and self._sessions else self._page
-                compacted = False
+                compacted, fresh = False, body
+                # Pruning happens only here, on the text a new chat starts with. Whether a later request continues
+                # this chat is decided on the messages as the client sent them (session["seen"] below), so the
+                # pass can never make a chat look changed, and a continued chat is typed exactly as sent.
+                popts = prune.config("web", self.o.get("prune"))
+                if popts:
+                    fresh, pruned = prune.prune_body(body, "fresh", popts)
+                    if pruned["saved"]:
+                        prompt, tools, rules = render_prompt(fresh)
                 if len(prompt) > int(self.o["fresh_prompt_chars"]):
-                    prompt, tools, rules, compacted = compact_initial_prompt(body, int(self.o["fresh_prompt_chars"]))
+                    prompt, tools, rules, compacted = compact_initial_prompt(fresh, int(self.o["fresh_prompt_chars"]))
             if len(prompt) > int(self.o["max_prompt_chars"]):
                 raise WebSkip(f"prompt is {len(prompt)} characters, over the bridge's {self.o['max_prompt_chars']}")
             self._page = page
@@ -1616,6 +1629,7 @@ class Bridge:
                         "sent_chars": len(prompt),
                         "account": self.account,
                         "compacted": False if reuse else compacted,
+                        "pruned": pruned,
                     },
                 )
 
