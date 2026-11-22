@@ -42,6 +42,14 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
 - `GET /v1/sources`: per tier, what it can be served from (each signed-in chat model, the API models as one "Token
   pool"), how much of each is left, whether it can be pinned, and `needs`: `keys` (the tier has API models but none
   with a key: the pool is listed rather than left out), `signin` (no account of that chat site signed in), else null
+- `GET /v1/pcore/usage?key=<thread>&turn=<turn>[&since&until]`: which models served a conversation's turn (the usage
+  ledger, `ledger.py`), and `context`: per flag, how many of the turn's Responses requests needed it to fit their
+  model (`context_signal.py`): `compacted` (an API model got a brief instead of the old history), `trimmed` (even
+  then the kept turns' tool output had to be cut), `summarised` / `shortened` (a web chat's fresh first message got a
+  brief / a cut history), `restarted` (a web chat was full and the request carried on in a new one), `over` (no
+  model of the tier takes the history at all: the request failed). `compacted` and `summarised` are normal for any
+  long thread; `trimmed`, `restarted` and `over` mean it no longer fits even compacted, and Provenance.app then
+  suggests continuing the thread in Codex or Claude Code
 - `GET /status`: tiers, scores, calibration, headroom, health, latency
 - `GET /health`: `{ok, service, version, pid, home, uptime_s, api: {providers, usable, models}, web: {providers,
   enabled}, tiers}`; cheap (nothing is opened or fetched), for the app that started the router and for telling
