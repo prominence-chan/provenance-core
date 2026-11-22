@@ -1276,7 +1276,10 @@ def test_browser_option_picks_the_browser(tmp_path, monkeypatch):
         assert cw.DEFAULTS["browser"] == "chrome" and await mk()._bundled_browser() is None
         assert await mk(browser="bundled")._bundled_browser() is rec
         assert await mk(browser="bundled", headless=True)._bundled_browser() is None  # headless: as before
-        assert await mk(browser="auto")._bundled_browser() is None  # not ready: chrome now, prepared meanwhile
+        # not ready: skipped while it is prepared (nothing that can show is opened instead), unless asked to
+        with pytest.raises((cw.WebSkip, cw.WebUnavailable)):
+            await mk(browser="auto")._bundled_browser()
+        assert await mk(browser="auto", browser_fallback="chrome")._bundled_browser() is None
         with pytest.raises(cw.WebUnavailable) as e:
             await mk(browser="firefox")._bundled_browser()
         assert e.value.kind == "setup"

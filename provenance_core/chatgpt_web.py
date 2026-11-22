@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import random
 import re
 import secrets
@@ -1031,6 +1030,8 @@ SITES = {
         "model": 'button[aria-label="Select a model"]',
         "msg": '[id^="message-"]',
         "login": None,
+        "login_url": "/auth",
+        "session": {"domains": ["chat.z.ai"], "names": ["token"]},  # not confirmed with a real sign-in
     },
     "qwen": {  # chat.qwen.ai, signed in; temporary chats, like ChatGPT's
         "name": "Qwen",
@@ -1046,6 +1047,8 @@ SITES = {
         "model": '[aria-label="Select Model"]',
         "msg": '[data-msg-id], [id^="chat-response-message-"]',
         "login": 'button[aria-label="Log in"], a[href*="/auth"]',
+        "login_url": "/auth",
+        "session": {"domains": ["chat.qwen.ai"], "names": ["token"]},  # not confirmed with a real sign-in
         # code blocks are an editor widget that only draws the lines in view, so the finished reply is taken from
         # the page's own Copy button (the reply's markdown, as written) instead of from the elements
         "copy": 'button[aria-label="Copy"]',
@@ -1067,9 +1070,40 @@ SITES = {
         "model": '[data-test-id="bard-mode-menu-button"]',
         "msg": ".conversation-container[id]",
         "login": 'a[href*="accounts.google.com/ServiceLogin"], a[aria-label="Sign in"]',
+        "login_url": "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fgemini.google.com%2Fapp",
+        # the Google account's own session cookies (a Google sign-in made in this profile for another site counts)
+        "session": {"domains": ["google.com"], "names": ["SID", "__Secure-1PSID", "__Secure-3PSID"]},
+        "identity": 'a[aria-label^="Google Account"]',
         "copy": 'button[aria-label="Copy"]',
     },
 }
+
+# chatgpt.com itself (no `site:`), for the sign-in flow (web_setup.py): its name, its sign-in page, and the cookie
+# that exists once an account is signed in. SITES entries carry the same keys: "login_url" (a path on the site, or a
+# full URL) and "session" (cookie names, where a trailing * matches any suffix, on these domains and their
+# subdomains). Only the names and dates of those cookies are ever read, never their values.
+CHATGPT_SITE = {
+    "name": "ChatGPT",
+    "login_url": "/auth/login",
+    "session": {"domains": ["chatgpt.com"], "names": ["__Secure-next-auth.session-token*"]},
+}
+
+# Which identity is signed in, read from the page as it is (after a check opened it; nothing is clicked or fetched):
+# the e-mail address in the data chatgpt.com serves with the page (#client-bootstrap), else in the site's account
+# button (`identity` in SITES: Google's says "Google Account: <name> (<e-mail>)"), else in any account or profile
+# button's label. null when the page does not show one. Not confirmed on the real sites with a signed-in account.
+IDENTITY_JS = r"""(sel) => {
+  const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+  const boot = document.getElementById('client-bootstrap');
+  if (boot) { try { const j = JSON.parse(boot.textContent); const u = (j.session && j.session.user) || j.user;
+                    if (u && typeof u.email === 'string' && EMAIL.test(u.email)) return u.email; } catch (e) {} }
+  const texts = [];
+  const add = el => texts.push(el.getAttribute('aria-label') || '', el.getAttribute('title') || '');
+  if (sel) document.querySelectorAll(sel).forEach(el => { add(el); texts.push(el.innerText || ''); });
+  document.querySelectorAll('[aria-label*="account" i], [aria-label*="profile" i], [data-testid*="profile" i]').forEach(add);
+  for (const t of texts) { const m = t.match(EMAIL); if (m) return m[0]; }
+  return null;
+}"""
 
 # Runs in the page's own script world: keep what the page's Copy button would put on the clipboard.
 CAPTURE_JS = r"""() => {
@@ -1169,9 +1203,18 @@ DEFAULTS = {
     # which browser runs the window. chrome: the installed Google Chrome (as always). bundled: the bridge's own
     # Chrome for Testing copy under <PCORE_HOME>/browser, a background-only app (no Dock icon, never takes focus) whose
     # window is created off screen; prepared (downloaded once, ~190 MB) on first use, the installed Chrome if that
-    # fails. auto: the bundled one when it is ready, else chrome while it is prepared in the background.
-    # Same profile either way; `weblogin` always opens a normal window. See browser_host.py
+    # fails. auto: the bundled one when it is ready; while it is prepared in the background, requests skip the
+    # bridge (nothing is opened instead). Same profile either way; signing in always opens a normal window
+    # (web_setup.py). See browser_host.py
     "browser": "chrome",
+    # auto: "chrome" = use the installed Chrome (a window that can show) while the bundled one is missing, as
+    # before; unset = never, skip the bridge until the bundled one is ready
+    "browser_fallback": None,
+    "browser_watch_s": 2.0,  # bundled: how often to check that every window is still off screen (and put it back)
+    "login_timeout_s": 900.0,  # a sign-in window left open this long is closed (then the account is checked)
+    "name": None,  # what the app calls this provider; default: the site's name ("ChatGPT", "Gemini", ...)
+    "login_url": None,  # where the sign-in window opens; default: the site's sign-in page
+    "session_cookies": None,  # {domains, names}: the cookie that means "signed in"; default: the site's
     "browser_trim": True,  # bundled: also pass the trimmed switch set (browser_host.TRIM_ARGS / TRIM_FEATURES)
     # bundled: cft (Chrome for Testing, what Provenance.app can ship) or chrome (a background-only clone of the
     # installed Google Chrome: the same build, so the same "Google Chrome" brand to sites; this Mac only)
@@ -1208,7 +1251,7 @@ class Bridge:
         clock=time.time,
         rand=random.uniform,
         account: str | None = None,
-        host: "Bridge | None" = None,
+        host: Bridge | None = None,
     ):
         self.account = account
         self.host = host  # another Bridge whose Chrome this one works in, as extra tabs (`share:` in the catalog)
@@ -1241,6 +1284,32 @@ class Bridge:
         self._idle: asyncio.Task | None = None
         self._notified: str | None = None
         self._sessions: dict[str, dict] = {}
+        # a sign-in window holds this account's profile (web_setup.py): requests skip the account meanwhile and
+        # its background browser is not started
+        self.signin: str | None = None
+        self._parker: asyncio.Task | None = None  # bundled: keeps every window of the browser off screen
+        self._repark: asyncio.Event | None = None
+
+    # ---- what the app shows, and the sign-in flow uses --------------------------------------------------------
+    @property
+    def site_info(self) -> dict:
+        return self.site or CHATGPT_SITE
+
+    @property
+    def display_name(self) -> str:
+        return str(self.o.get("name") or self.site_info.get("name") or "ChatGPT")
+
+    @property
+    def login_url(self) -> str:
+        u = self.o.get("login_url") or self.site_info.get("login_url") or "/"
+        return u if re.match(r"https?://", u) else self.base_url + "/" + u.lstrip("/")
+
+    @property
+    def session_spec(self) -> dict | None:
+        return self.o.get("session_cookies") or self.site_info.get("session")
+
+    def signing_in(self) -> bool:
+        return bool(self.signin or (self.host and self.host.signin))
 
     # ---- persisted state: today's count, the last login check, why it's blocked -------------------------------
     def load(self) -> dict:
@@ -1274,8 +1343,10 @@ class Bridge:
             "reason": s.get("reason") if left > 0 else None,
             "kind": s.get("kind") if left > 0 else None,
             "model_seen": s.get("model_seen"),
+            "email": s.get("identity"),
             "window_open": self._page is not None,
             "browser": self.browser_in_use(),
+            "signing_in": self.signing_in(),
             "profile": str(self.profile),
             **({"account": self.account} if self.account else {}),
         }
@@ -1290,8 +1361,9 @@ class Bridge:
     def capacity(self, accounts=None) -> dict:
         s = self.status()
         cap = int(self.o["daily_cap"])
-        left = 0.0 if s["blocked"] or not cap else max(0, cap - s["today"]) / cap
-        return {"remaining": left, "busy": self.busy, "accounts": 0 if s["blocked"] else 1, "available": left > 0}
+        out = s["blocked"] or s["signing_in"]
+        left = 0.0 if out or not cap else max(0, cap - s["today"]) / cap
+        return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0}
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
@@ -1302,13 +1374,15 @@ class Bridge:
     def _block(self, e: WebUnavailable):
         ch = {"blocked_until": self.clock() + e.cooldown, "reason": e.reason, "kind": e.kind}
         if e.kind == "login":
-            ch.update(signed_in=False, checked_at=int(self.clock()))
+            ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
         self.save(**ch)
         if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy"):
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
 
     def _precheck(self):
+        if self.signing_in():
+            raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
         s = self.load()
         left = (s.get("blocked_until") or 0) - self.clock()
         if left > 0:
@@ -1320,6 +1394,8 @@ class Bridge:
 
     # ---- the browser ---------------------------------------------------------------------------------------------
     async def _ensure_page(self):
+        if self.signing_in():  # the profile is open in the sign-in window: a second browser cannot open it
+            raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
         if not self.host:
             async with self._launch:
                 return await self._ensure_own_page()
@@ -1368,7 +1444,7 @@ class Bridge:
                 return await self._watch_page()
             except Exception as e:  # noqa: BLE001 - profile in use, the copy broken, ...
                 await self._shutdown()
-                if str(self.o.get("browser")).lower() != "auto":
+                if str(self.o.get("browser")).lower() != "auto" or self.o.get("browser_fallback") != "chrome":
                     raise WebUnavailable(
                         f"could not open the bundled browser on the profile: {str(e).splitlines()[0][:160]}",
                         120,
@@ -1452,7 +1528,19 @@ class Bridge:
             raise WebUnavailable(f"unknown chatgpt-web browser_source {source!r} (cft or chrome)", 3600, "setup")
         if mode == "bundled":  # wait for it (a download, the first time)
             return await asyncio.to_thread(browser_host.ensure, self.profile)
-        return browser_host.ensure_soon(self.profile)  # auto: what is ready now; prepared meanwhile otherwise
+        rec = browser_host.ensure_soon(self.profile)  # auto: what is ready now; prepared meanwhile otherwise
+        if rec or self.o.get("browser_fallback") == "chrome":
+            return rec  # None: the installed Chrome meanwhile, as asked
+        # never a window that can show instead: skip the bridge (no penalty) until the bundled one is ready
+        st = browser_host.prep_status()
+        if st["preparing"]:
+            pct = f", {st['progress']:.0%}" if st.get("progress") is not None else ""
+            raise WebSkip(f"the bridge's browser is being prepared ({st.get('stage') or 'starting'}{pct})")
+        raise WebUnavailable(
+            f"the bridge's browser could not be prepared: {st.get('error') or 'unknown error'}",
+            browser_host.RETRY_S,
+            "browser",
+        )
 
     async def _launch_bundled(self, rec: dict, driver: str):
         """Start the bundled browser on the profile with no window, attach over its debugging port, and open the
@@ -1485,7 +1573,37 @@ class Bridge:
             raise RuntimeError("it did not open its debugging port within 30 s")
         browser = await self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=30000)
         self._ctx = browser.contexts[0]
-        return await self._parked_page(window=True)
+        page = await self._parked_page(window=True)
+        self._start_parker()
+        return page
+
+    def _start_parker(self):
+        """bundled: every window of this browser stays off screen. Windows are created there, but macOS moves a
+        window onto a display when the displays change (one is unplugged, a lid opens, the Mac wakes with another
+        layout, the bridge started with no display at all) and a page may open a popup window of its own: each
+        window's position is checked every `browser_watch_s` seconds, and at once when a page opens, and put back."""
+        self._repark = asyncio.Event()
+        self._ctx.on("page", lambda _p: self._repark and self._repark.set())
+        self._parker = asyncio.get_running_loop().create_task(self._keep_parked(self._ctx))
+
+    async def _keep_parked(self, ctx):
+        parked: dict[int, tuple] = {}  # windowId -> its bounds right after it was parked
+        cdp = None
+        while self._ctx is ctx:
+            try:
+                if cdp is None:
+                    cdp = await ctx.browser.new_browser_cdp_session()
+                parked = await park_windows(cdp, parked)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the browser is going away, or a window closed between two calls
+                cdp = None
+            try:
+                await asyncio.wait_for(self._repark.wait(), float(self.o.get("browser_watch_s") or 2.0))
+                await asyncio.sleep(0.05)  # let the new window be created before looking
+            except TimeoutError:
+                pass
+            self._repark.clear()
 
     async def _parked_page(self, window: bool):
         """bundled: a new page created in the background, as a tab of the existing window or (window=True) in a
@@ -1589,6 +1707,9 @@ class Bridge:
             return
         self._sessions.clear()
         ctx, pw, self._ctx, self._pw, self._page = self._ctx, self._pw, None, None, None
+        if self._parker:
+            self._parker.cancel()
+            self._parker = None
         proc, watch, bundled = self._proc, self._watch, self._bundled
         self._proc = self._watch = self._bundled = None
         try:
@@ -1985,6 +2106,10 @@ class Bridge:
         except WebError:
             raise
         except Exception as e:  # noqa: BLE001
+            if self.signing_in():  # the browser was closed under this request to open a sign-in window: no penalty
+                self._gone = False
+                await self._shutdown()
+                raise WebSkip("this account's browser was closed for a sign-in") from None
             if self._gone or self._page is None or self._page.is_closed() or "closed" in str(e).lower():
                 self._gone = False
                 await self._shutdown()
@@ -2178,6 +2303,15 @@ class Bridge:
             self.busy -= 1
             self.lock.release()
 
+    async def _read_identity(self, page):
+        """Who is signed in, as the open page itself shows it (IDENTITY_JS; nothing is clicked, sent or fetched).
+        Kept with the account's state; None when the page does not show it."""
+        try:
+            who = await page.evaluate(IDENTITY_JS, self.site_info.get("identity"))
+        except Exception:  # noqa: BLE001
+            who = None
+        self.save(identity=who if isinstance(who, str) and who.strip() else None)
+
     async def check(self, model: str = "auto", close: bool = False) -> dict:
         """Open a fresh temporary chat without sending anything: is the login there, is temporary chat there?"""
         await self._acquire(None)
@@ -2190,6 +2324,7 @@ class Bridge:
                     probe_page = await self._new_page()
                 p = await self._guarded(lambda: self._open_chat(model, probe_page))
                 self.reset()
+                await self._read_identity(probe_page or self._page)
                 return {**self.status(), "ok": True, "page_model": p.get("model")}
             except WebUnavailable as e:
                 return {**self.status(), "ok": False, "reason": e.reason, "kind": e.kind}
@@ -2217,12 +2352,25 @@ class BridgePool:
 
     def __init__(self, base_url: str = "https://chatgpt.com", options: dict | None = None, hosts=None, **kw):
         names = [str(n) for n in (options or {}).get("accounts") or ["main"]]
+        self.options, self.kw = dict(options or {}), kw
         self.bridges = {
             n: Bridge(base_url, options, account=n, host=(hosts or {}).get(n), **kw) for n in dict.fromkeys(names)
         }
         first = next(iter(self.bridges.values()))
         self.o, self.profile, self.base_url = first.o, first.profile, first.base_url
         self._turn = 0
+
+    def add(self, account: str, host: Bridge | None = None) -> Bridge:
+        """One more account (POST /web/accounts): its own profile, state and window, made on first use."""
+        if account not in self.bridges:
+            self.bridges[account] = Bridge(self.base_url, self.options, account=account, host=host, **self.kw)
+        return self.bridges[account]
+
+    async def remove(self, account: str):
+        """Drop an account: its window is closed; its profile directory and state file stay on disk."""
+        b = self.bridges.pop(account, None)
+        if b:
+            await b.release()
 
     def pick(self, account: str | None = None) -> Bridge:
         if account and account not in self.bridges:
@@ -2233,7 +2381,7 @@ class BridgePool:
         """What is left today on these accounts (all of them by default) and how busy they are; the router shares
         requests out between sources by it."""
         bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
-        open_ = [b for b in bs if not b.status()["blocked"]]
+        open_ = [b for b in bs if not b.status()["blocked"] and not b.signing_in()]
         cap = sum(int(b.o["daily_cap"]) for b in open_)
         used = sum(min(b.load().get("count", 0), int(b.o["daily_cap"])) for b in open_)
         return {
@@ -2247,7 +2395,9 @@ class BridgePool:
         lean = lean_body(body, int(self.o["lean_system_chars"])) if self.o["lean"] else body
         key = continuation_key(lean, model)
         self._turn += 1
-        bs = [b for n, b in self.bridges.items() if not accounts or n in accounts] or list(self.bridges.values())
+        bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
+        if accounts is None and not bs:
+            bs = list(self.bridges.values())
         rot = {id(b): (i - self._turn) % len(bs) for i, b in enumerate(bs)}  # ties go round-robin
         return sorted(bs, key=lambda b: (key not in b._sessions, b.busy, b.load().get("count", 0) // 10, rot[id(b)]))
 
@@ -2274,7 +2424,7 @@ class BridgePool:
                 last = e
                 if said:  # part of a reply already went out: another account would say it twice
                     break
-        raise last
+        raise last or WebSkip("none of this provider's accounts has this model")
 
     def status(self) -> dict:
         per = {n: b.status() for n, b in self.bridges.items()}
@@ -2328,6 +2478,38 @@ def make_bridge(base_url: str, options: dict | None = None, host=None):
     if (options or {}).get("accounts"):
         return BridgePool(base_url, options, hosts=hosts)
     return Bridge(base_url, options, host=next(iter(hosts.values()), None))
+
+
+PARK = {"left": 20000, "top": 20000}  # past the bottom right corner; macOS keeps a 40x41 px corner on the display
+
+
+async def park_windows(cdp, parked: dict) -> dict:
+    """Put every window of the browser behind `cdp` (a browser-level CDP session) back off screen when it is not
+    where it was last parked: moved by macOS, or new. Only the browser's own Browser/Target domains are used:
+    nothing is attached to or run in any page. A minimized window is left alone (nothing shows), a maximized or
+    full-screen one is made normal first. Returns {windowId: bounds after parking} for the windows that exist."""
+    infos = (await cdp.send("Target.getTargets")).get("targetInfos") or []
+    out: dict[int, tuple] = {}
+    for t in infos:
+        if t.get("type") != "page":
+            continue
+        try:
+            w = await cdp.send("Browser.getWindowForTarget", {"targetId": t["targetId"]})
+        except Exception:  # noqa: BLE001 - closed meanwhile
+            continue
+        wid, b = w["windowId"], w["bounds"]
+        if wid in out:
+            continue
+        key = (b.get("left"), b.get("top"), b.get("width"), b.get("height"), b.get("windowState"))
+        if b.get("windowState") == "minimized" or parked.get(wid) == key:
+            out[wid] = key
+            continue
+        if b.get("windowState") in ("maximized", "fullscreen"):
+            await cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {"windowState": "normal"}})
+        await cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": dict(PARK)})
+        nb = (await cdp.send("Browser.getWindowBounds", {"windowId": wid}))["bounds"]
+        out[wid] = (nb.get("left"), nb.get("top"), nb.get("width"), nb.get("height"), nb.get("windowState"))
+    return out
 
 
 def watchdog(pid: int):
@@ -2392,65 +2574,3 @@ def notify(text: str):
         )
     except OSError:
         pass
-
-
-# ---- the one-time sign-in ---------------------------------------------------------------------------------------------
-def login_window(bridge: Bridge, wait_min: float = 45) -> int:
-    """`provenance-core weblogin`: an ordinary Chrome window on the dedicated profile, not driven by anything. You
-    sign in by hand and quit that Chrome (Cmd+Q); then the profile is checked once. Always a normal window (a
-    background-only browser cannot take the keyboard): the installed Chrome, or, when the bundled browser has
-    already written the profile with a newer version than that Chrome, the bundled build's plain (normal) copy."""
-    from . import browser_host
-
-    plain = browser_host.login_app(bridge.profile)
-    exe = str(browser_host.app_exe(plain)) if plain else CHROME
-    if not os.path.exists(exe):
-        print(f"Google Chrome not found at {exe}")
-        return 2
-    bridge.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # the same key-storage switches Playwright's Chrome uses, so both read the same cookie jar
-    cmd = [
-        exe,
-        f"--user-data-dir={bridge.profile}",
-        "--use-mock-keychain",
-        "--password-store=basic",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=1180,860",
-        bridge.base_url + "/",
-    ]
-    print(
-        "Opening Chrome on the chatgpt-web profile.\n"
-        "  1. sign in to ChatGPT in that window (your password goes to OpenAI only)\n"
-        "  2. quit that Chrome when you're in (Cmd+Q on the window that just opened)",
-        flush=True,
-    )
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:  # the bridge's own Chromes are hidden: put this one in front so it is the one you see
-        time.sleep(1.5)
-        subprocess.Popen(
-            [
-                "osascript",
-                "-e",
-                f'tell application "System Events" to set frontmost of (first process whose unix id is {proc.pid}) to true',
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=wait_min * 60)
-    except subprocess.TimeoutExpired:
-        print(f"still open after {wait_min:g} min; checking anyway once you quit it")
-        proc.wait()
-    print("checking the sign-in...", flush=True)
-    r = asyncio.run(bridge.check(close=True))
-    if r["ok"]:
-        print(
-            "signed in, temporary chat works. chatgpt-web is ready"
-            + ("" if enabled(bridge.o) else " (still off: set PCORE_CHATGPT_WEB=1 to use it)")
-        )
-        return 0
-    print(f"not ready: {r.get('reason')}")
-    return 1

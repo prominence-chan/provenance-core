@@ -11,8 +11,9 @@ Measured on macOS 26 (docs/TECHNICAL.md, "Bundled browser"):
   re-signed ad hoc. The copy is an APFS clone of the original (cp -c), so it costs no disk and is near instant
 - a background-only app cannot take the keyboard: `weblogin` keeps using a normal window
 
-Where the build comes from, in order: an app shipped inside Provenance.app (Contents/Resources/browser/*.app) or
-named by PCORE_BROWSER_APP; one already prepared here; Playwright's cache; a download from Google's Chrome for
+Where the build comes from, in order: the app (or folder of apps) named by PCORE_BROWSER_APP, which is how
+Provenance.app, run from anywhere, points at its own Contents/Resources/browser; an app shipped inside a
+Provenance.app in /Applications or ~/Applications; one already prepared here; Playwright's cache; a download from Google's Chrome for
 Testing bucket (~190 MB zip, ~370 MB unpacked). It must be at least as new as the installed Chrome's major version
 and as the version that last wrote the profile ("Last Version"): an older browser must not open a newer profile.
 Among the builds that qualify, the one closest to that major version is chosen, so that `weblogin` (the installed
@@ -153,6 +154,9 @@ def launch_args(profile, driver: str = "patchright", trim: bool = True, window=(
         "--remote-debugging-port=0",  # a free port, written to <profile>/DevToolsActivePort; 127.0.0.1 only
         "--no-startup-window",
         f"--window-size={window[0]},{window[1]}",
+        # after a crash (or the watchdog's kill) Chrome offers to restore the last session in a bubble; nothing must
+        # ever be drawn, and no page can tell this switch is there
+        "--hide-crash-restore-bubble",
         *args,
         "--disable-features=" + ",".join(dict.fromkeys(feats)),
         "--enable-features=" + ",".join(ENABLE_FEATURES[driver]),
@@ -272,8 +276,9 @@ def _apps_in(d: Path) -> list[Path]:
 def local_sources() -> list[Path]:
     """Chromium-family apps already on this Mac that a copy can be made from (never the installed Google Chrome)."""
     out = []
-    if env("BROWSER_APP"):
-        out.append(Path(env("BROWSER_APP")).expanduser())
+    if env("BROWSER_APP"):  # an .app, or the folder that holds one (Provenance.app passes its Resources/browser)
+        given = Path(env("BROWSER_APP")).expanduser()
+        out += [given] if given.suffix == ".app" else _apps_in(given)
     for d in SHIPPED:
         out += _apps_in(d)
     for d in sorted(PLAYWRIGHT_CACHE.glob("chromium-*")) if PLAYWRIGHT_CACHE.exists() else []:
@@ -327,11 +332,20 @@ def _download(url: str, dest: Path) -> Path:
         for h in r.headers.get_all("x-goog-hash") or []:
             if h.startswith("md5="):
                 want = base64.b64decode(h[4:]).hex()
+        try:
+            total = int(r.headers.get("Content-Length") or 0) or None
+        except ValueError:
+            total = None
+        _progress(stage="download", done=0, total=total)
+        done = 0
         while chunk := r.read(1 << 20):
             md5.update(chunk)
             f.write(chunk)
+            done += len(chunk)
+            _progress(done=done)
     if want and md5.hexdigest() != want:
         raise OSError("download corrupted (md5 mismatch)")
+    _progress(stage="unpack")
     out = dest / "unpacked"
     r = _run(["ditto", "-x", "-k", str(zpath), str(out)])  # ditto keeps the framework symlinks a zipfile would lose
     zpath.unlink(missing_ok=True)
@@ -427,26 +441,48 @@ def ensure(profile=None, root=None, download: bool = True, index: dict | None = 
         rec = current(root, need)  # another bridge may have just prepared it
         if good(rec):
             return rec
+        _progress(preparing=True, stage="look", done=0, total=None, error=None, need=need, started_at=time.time())
         try:
-            local = {v: a for a in local_sources() if (v := app_version(a))}
-            v = choose(list(local), need)
-            if v and (major(v) == need or not need):
-                return _prepare_from(local[v], root, f"local:{local[v]}")
-            hit = cft_download_url(need, plat, index) if download else None
-            if hit and (major(hit[0]) == need or not rec):
-                with tempfile.TemporaryDirectory(dir=root, prefix=".dl-") as tmp:
-                    app = _download(hit[1], Path(tmp))
-                    dst = root / hit[0] / "plain" / app.name
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if dst.exists():
-                        shutil.rmtree(dst)
-                    shutil.move(str(app), str(dst))
-                return _prepare_from(dst, root, f"download:{hit[1]}")
-            if v and not rec:  # only newer majors around: still better than nothing
-                return _prepare_from(local[v], root, f"local:{local[v]}")
+            out = _ensure_locked(root, need, plat, rec, download, index)
+            if not out:
+                _progress(error="No browser for this Mac could be found to download. It will be tried again later.")
+            return out
         except (OSError, ValueError, subprocess.SubprocessError) as e:
             print(f"bundled browser: could not prepare one ({e})", file=sys.stderr)
-        return rec  # new enough but of a newer major, or None
+            downloading = PROGRESS.get("stage") in ("look", "download")
+            _progress(
+                error="The browser could not be downloaded. Check your internet connection; it will be tried again."
+                if downloading
+                else "The browser could not be set up on this Mac. It will be tried again later.",
+                error_detail=str(e)[:300],
+            )
+            return rec  # new enough but of a newer major, or None
+        finally:
+            _progress(preparing=False, stage=None, finished_at=time.time())
+
+
+def _ensure_locked(root: Path, need: int, plat: str, rec, download: bool, index) -> dict | None:
+    local = {v: a for a in local_sources() if (v := app_version(a))}
+    v = choose(list(local), need)
+    if v and (major(v) == need or not need):
+        _progress(stage="copy", version=v)
+        return _prepare_from(local[v], root, f"local:{local[v]}")
+    hit = cft_download_url(need, plat, index) if download else None
+    if hit and (major(hit[0]) == need or not rec):
+        _progress(version=hit[0])
+        with tempfile.TemporaryDirectory(dir=root, prefix=".dl-") as tmp:
+            app = _download(hit[1], Path(tmp))
+            dst = root / hit[0] / "plain" / app.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.move(str(app), str(dst))
+        _progress(stage="copy")
+        return _prepare_from(dst, root, f"download:{hit[1]}")
+    if v and not rec:  # only newer majors around: still better than nothing
+        _progress(stage="copy", version=v)
+        return _prepare_from(local[v], root, f"local:{local[v]}")
+    return rec
 
 
 def ensure_chrome_clone(profile=None, root=None) -> dict | None:
@@ -481,17 +517,77 @@ def ensure_chrome_clone(profile=None, root=None) -> dict | None:
 
 
 _bg: threading.Thread | None = None
+RETRY_S = 300.0  # after a failed preparation, wait this long before ensure_soon tries again (prepare() always does)
+# What the last or current preparation is doing, for GET /web/accounts: stage look | download | unpack | copy,
+# bytes done / total while downloading, and the last error a user can read.
+PROGRESS: dict = {"preparing": False, "stage": None, "done": 0, "total": None, "error": None, "version": None}
+
+
+def _progress(**changes):
+    PROGRESS.update(changes)
+
+
+def preparing() -> bool:
+    return bool(_bg and _bg.is_alive()) or bool(PROGRESS.get("preparing"))
+
+
+def prep_status() -> dict:
+    """The preparation's progress: {preparing, stage, progress (0-1 while downloading, else null), done, total,
+    error, version}."""
+    p = dict(PROGRESS)
+    p["preparing"] = preparing()
+    total = p.get("total")
+    p["progress"] = round(min(1.0, p["done"] / total), 3) if p["preparing"] and total else None
+    return p
+
+
+def prepare(profile=None, root=None) -> bool:
+    """Start preparing one in a background thread unless that is already happening. False when this Mac cannot
+    run one (not macOS)."""
+    global _bg
+    if not platform_key():
+        return False
+    if not (_bg and _bg.is_alive()):
+        PROGRESS.update(error=None)
+        _bg = threading.Thread(target=ensure, args=(profile, root), daemon=True, name="bundled-browser")
+        _bg.start()
+    return True
 
 
 def ensure_soon(profile=None, root=None) -> dict | None:
-    """What is ready now (no waiting); prepares one in a background thread when it is missing or too old."""
-    global _bg
+    """What is ready now (no waiting); prepares one in a background thread when it is missing or too old (not again
+    within RETRY_S of a failed attempt: a request must not start a 200 MB download every time)."""
     rec = current(Path(root) if root else None, required_major(profile))
     if rec:
         return rec
-    if platform_key() and not (_bg and _bg.is_alive()):
-        _bg = threading.Thread(target=ensure, args=(profile, root), daemon=True, name="bundled-browser")
-        _bg.start()
+    failed = PROGRESS.get("error") and time.time() - (PROGRESS.get("finished_at") or 0) < RETRY_S
+    if not failed:
+        prepare(profile, root)
+    return None
+
+
+def signin_app(profile, mode: str = "chrome", source: str = "cft", fallback: bool = True) -> Path | None:
+    """The app to open a normal, visible sign-in window with on `profile`: the same build the bridge runs there in
+    the background, as a normal app, so the profile is read and written by one binary. bundled / auto: the bundled
+    build's plain copy (or, for browser_source chrome, the installed Chrome it is a clone of). chrome: the installed
+    Chrome, unless the bundled build has written the profile with a newer version (login_app). The installed
+    Chrome is the `fallback` when no bundled build is prepared. Never an app older than the profile's Last
+    Version. None when nothing suitable is there (yet)."""
+    need = major(profile_version(profile))
+    cands = []
+    if mode in ("bundled", "auto") and source != "chrome":
+        rec = current(need=required_major(profile))
+        if rec and rec.get("plain_app"):
+            cands.append(Path(rec["plain_app"]))
+        if fallback:
+            cands.append(CHROME_APP)
+    elif mode in ("bundled", "auto"):
+        cands.append(CHROME_APP)
+    else:
+        cands += [p for p in [login_app(profile), CHROME_APP] if p]
+    for app in cands:
+        if app_exe(app) and app_exe(app).exists() and major(app_version(app)) >= need:
+            return app
     return None
 
 
@@ -504,6 +600,23 @@ def login_app(profile) -> Path | None:
         return None
     rec = current(need=major(pv))
     return Path(rec["plain_app"]) if rec and Path(rec["plain_app"]).exists() else None
+
+
+def window_pid(profile) -> int | None:
+    """The browser process that has `profile` open, from the lock Chrome keeps in it (<profile>/SingletonLock, a
+    symlink to "<host>-<pid>"); None when no live process holds it."""
+    try:
+        target = os.readlink(Path(profile) / "SingletonLock")
+        pid = int(target.rsplit("-", 1)[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return pid
 
 
 def disk_usage(root=None) -> int:
