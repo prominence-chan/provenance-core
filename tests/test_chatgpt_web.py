@@ -366,6 +366,9 @@ class FakeBridge:
     def __init__(self):
         self.calls, self.fail = [], None
 
+    def capacity(self, accounts=None):
+        return {"remaining": 1.0, "busy": 0, "accounts": 1, "available": True}
+
     async def complete(self, model, body, model_id=None, wait=None, on_text=None):
         self.calls.append(body)
         if self.fail:
@@ -938,7 +941,7 @@ def test_page_end_to_end_through_the_responses_api(mock, tmp_path, monkeypatch):
         assert "<<<tool result: shell>>>\na.py\nb.py" in mock.sent[1]["prompt"]
         assert c.get("/chatgpt-web/status").json()["today"] == 2
         mock.state["login"] = False  # the login expires: the request is served by the pool
-        r = c.post("/v1/responses", json={"model": "nova", "input": "hi"})
+        r = c.post("/v1/responses", json={"model": "luna/nova", "input": "hi"})
         assert r.headers["x-pcore-model"] == "a/big" and r.json()["output"][0]["content"][0]["text"] == "from the pool"
         st = c.get("/chatgpt-web/status").json()
         assert st["blocked"] and st["kind"] == "login" and st["models"][0]["available"] is False
