@@ -92,6 +92,8 @@ class Catalog:
     models: dict[str, Model]
     tiers: list[tuple[str, float]]  # (name, minimum score), strongest first
     aliases: dict[str, str] = field(default_factory=dict)  # e.g. tier-1 -> nova, auto -> solstice
+    # history pruning (prune.py): `prune: true`, a dict of its options, or {api: ..., web: ...}; off when absent
+    prune: object = None
 
     def resolve_tier(self, name: str) -> str | None:
         """A tier name, or an alias of one; None if it's neither (a concrete model id, or unknown)."""
@@ -170,4 +172,10 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
                 models[mid].score = float(s["score"] if isinstance(s, dict) else s)
                 models[mid].calibrated = True
     tiers = sorted(((t["name"], float(t["min_score"])) for t in data["tiers"]), key=lambda t: -t[1])
-    return Catalog(providers=providers, models=models, tiers=tiers, aliases=dict(data.get("aliases") or {}))
+    return Catalog(
+        providers=providers,
+        models=models,
+        tiers=tiers,
+        aliases=dict(data.get("aliases") or {}),
+        prune=data.get("prune"),
+    )

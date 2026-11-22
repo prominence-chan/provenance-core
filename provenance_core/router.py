@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from . import prune
 from .catalog import Catalog, Model
 from .state import State
 
@@ -49,6 +50,7 @@ class Router:
         self.client = client or httpx.AsyncClient(timeout=timeout)
         self.bridges: dict = {}  # provider name -> chatgpt_web.Bridge (made on first use)
         self.inflight: dict[str, int] = {}  # model id -> requests being served right now
+        self._view: tuple | None = None  # the last api_view: (body, pruned body, report)
 
     # ---- selection -------------------------------------------------------------------------------------------
     def tiers_for(self, tier: str, fallback: str) -> list[str]:
@@ -65,8 +67,9 @@ class Router:
 
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
-            share = (p.options or {}).get("share")  # work inside another web provider's Chrome windows
-            self.bridges[provider] = make_bridge(p.base_url, p.options, self.bridge(share) if share else None)
+            opts = p.options if "prune" in p.options else {**p.options, "prune": self.catalog.prune}
+            share = opts.get("share")  # work inside another web provider's Chrome windows
+            self.bridges[provider] = make_bridge(p.base_url, opts, self.bridge(share) if share else None)
         return self.bridges[provider]
 
     def web_ok(self, endpoint: str) -> bool:
@@ -173,10 +176,27 @@ class Router:
         return out
 
     # ---- calling ---------------------------------------------------------------------------------------------
+    def api_view(self, body: dict) -> tuple[dict, dict | None]:
+        """(the body as an API model gets it, what pruning removed or None). With `prune` on for "api" the history is
+        pruned in prune.py's stable mode: only the part before an epoch boundary that moves every `step` assistant
+        turns, judged on that part alone, so consecutive requests still share their prefix byte for byte and provider
+        prompt caches keep hitting. The web bridge always gets the body as sent (it prunes its own fresh prompts)."""
+        opts = prune.config("api", self.catalog.prune)
+        if not opts:
+            return body, None
+        if self._view and self._view[0] is body:
+            return self._view[1], self._view[2]
+        pruned, report = prune.prune_body(body, "stable", opts)
+        self._view = (body, pruned, report)
+        return pruned, report
+
     async def call(self, m: Model, body: dict, stream: bool = False):
         p = self.catalog.providers[m.provider]
         if p.type == "chatgpt_web":
             return await self._web_call(m, body, stream)
+        body, pruned = self.api_view(body)
+        if pruned and pruned["saved"]:
+            print(f"prune: {m.id} history {prune.summary(pruned)}", flush=True)
         payload = {**{k: v for k, v in body.items() if not k.startswith("_")}, "model": m.model, "stream": stream}
         headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
         t0 = time.time()
@@ -197,6 +217,8 @@ class Router:
         if stream:
             return resp, t0
         data = resp.json()
+        if pruned and pruned["saved"]:
+            data.setdefault("pcore", {})["prune"] = pruned
         self.state.success(m, (time.time() - t0) * 1000)
         used = (data.get("usage") or {}).get("total_tokens") or estimate_tokens(body)
         self.state.record(m, used)
@@ -222,6 +244,7 @@ class Router:
                 + (", nudged" if web.get("nudged") else "")
                 + (", continued chat" if web.get("continued") else ", new chat")
                 + (", previous chat was full" if web.get("restarted") else "")
+                + (f", history {prune.summary(web['pruned'])}" if (web.get("pruned") or {}).get("saved") else "")
                 + (", history shortened" if web.get("compacted") else "")
                 + f", {web.get('sent_chars', '?')} chars typed"
                 + (f", account {web['account']}" if web.get("account") else "")
@@ -266,7 +289,7 @@ class Router:
         web: bool = False,
         source: str | None = None,
     ) -> tuple[dict, Model]:
-        tokens = estimate_tokens(body)
+        tokens = estimate_tokens(self.api_view(body)[0])  # the size an API model would be sent
         errors = []
         for m in self.candidates(tier, tokens, session, fallback, web, source)[:attempts]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
@@ -289,7 +312,7 @@ class Router:
         web: bool = False,
         source: str | None = None,
     ):
-        tokens = estimate_tokens(body)
+        tokens = estimate_tokens(self.api_view(body)[0])
         errors = []
         for m in self.candidates(tier, tokens, session, fallback, web, source)[:4]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1

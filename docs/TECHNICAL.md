@@ -58,6 +58,7 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
 - **models**: provider model name, prior score, context, free-tier limits, optional `id` (default
   `<provider>/<model>`).
 - **tiers** and **aliases**.
+- **prune** (optional, off when absent): history pruning, see "History pruning" below.
 
 A provider without its key (or with an unset `${VAR}`) is skipped. Free-tier lineups change weekly:
 `python -m provenance_core discover <provider>` lists a provider's current models; re-run `calibrate` afterwards.
@@ -99,6 +100,59 @@ with one `input` string, answered with `custom_tool_call` items), and keeps a sm
 `previous_response_id` and `GET /v1/responses/{id}` work. Not translated: extended thinking requests, prompt caching,
 server-side tools (web search, file search, MCP, computer use), PDF documents.
 
+## History pruning
+
+Agents resend their whole conversation on every request, and much of it is dead weight by then: a file read that
+was read again later, the same `git status` twice, a file written whole and then rewritten, the bookkeeping lines on
+every command result. `provenance_core/prune.py` is a rule-based pass (no model calls, a few milliseconds on a
+500,000-character history) that shrinks that without changing what the model needs to know. It is **off by
+default**.
+
+```yaml
+prune: true                      # top level of catalog.yaml: on for API models and for the web bridge
+prune: {api: true}               # or one of them; each value may be a dict of options instead of true
+prune: {web: {keep_turns: 6}}
+```
+
+`PCORE_PRUNE` overrides it: `1` / `all` (both), `api`, `web`, `0` (off). A chatgpt_web provider's own `web:` block
+may also set `prune:` for that bridge.
+
+**Rules**, applied only to messages older than the last `keep_turns` (4) assistant turns; user messages are never
+changed, nor are tool call ids, names, or the number, order and roles of messages (every call keeps its result,
+only contents shrink):
+
+| rule | what goes |
+|---|---|
+| `dup_system` | a block of instructions repeated in the system/developer text (Codex can send the same developer message every turn); the first copy stays |
+| `exec_header` | `Chunk ID` / `Wall time` / `Original token count` / `Output:` on old command results, down to `Exit code: N` (a running process keeps its session id) |
+| `stale_read` | an old read of one file, when the file was changed afterwards by a call that succeeded and its new text is shown later (read whole again, or written whole) |
+| `dup_output` | an old result identical to a later one: a stub that says so |
+| `repeated_lines` | runs of lines (matched in 4-line windows, at least 200 characters) that appear again in a later result: the same file or slice read twice, a superset read later |
+| `old_write` | the file text in an old whole-file write (`cat > f <<EOF`, apply_patch "Add File", a Write tool) when that file was written or read whole again later; the call and its path stay |
+| `write_echo` | bulky success output of an old write/patch: the summary lines stay |
+| `long_output` | an old result over `long_chars` (6000) of a command that shows no file (logs, test runs, listings, search, curl): the first `long_head` (2500) and last `long_tail` (1500) characters stay |
+| `filler` | old one-line narration on a tool-calling turn ("Let me look at the tests."), only without any reason, finding or question in it |
+
+"Appears again later" is only judged against content that is itself kept, so every stub points at something the
+model can still read. Options: `keep_turns`, `step`, `min_dup_chars`, `run_lines`, `min_run_chars`, `long_chars`,
+`long_head`, `long_tail`, `rules` (the list of rules to run).
+
+**Where it runs, and why that is safe for continued chats and prompt caches**
+
+- *Web bridge:* only on the prompt that starts a new chat, before the `fresh_prompt_chars` cut (which then has less
+  to cut). Whether a later request continues that chat is still decided on the messages exactly as the client sent
+  them (the session remembers those, not the pruned ones), and a continued chat is typed exactly as sent, so pruning
+  can never make a chat look changed or lose its place. Mode `fresh`: the whole history is evidence.
+- *API models:* mode `stable`. Only the history before a boundary is pruned, judged on that part alone; the boundary
+  sits on every `step`-th (8) assistant turn and moves only after 8 more turns. Between moves, every request starts
+  with byte-identical pruned history followed by the raw newer turns, so a provider's prefix cache keeps matching;
+  when the boundary moves, the prefix changes once, from the first message the new evidence touches. The router also
+  uses the pruned size to decide which models' context windows the request fits.
+
+Each request records what was removed (per rule: count and characters saved): the bridge's log line (`history saved
+N of M chars (rule count/chars, ...)`), `pcore.web.pruned` in its completion, and for API models a `prune:` log line
+and `pcore.prune` in the response.
+
 ## ChatGPT web provider
 
 `type: chatgpt_web` in `catalog.yaml` (`provenance_core/chatgpt_web.py`): your own signed-in chatgpt.com chat as a
@@ -137,7 +191,8 @@ request at a time, the pauses, the daily cap, and stopping at any challenge that
 **What it does per request**
 
 1. Renders the initial chat request (system prompt, tools, and conversation) into one message. Long first messages
-   keep the task and recent evidence while shortening old tool output and actions to `fresh_prompt_chars`. If a later
+   keep the task and recent evidence while shortening old tool output and actions to `fresh_prompt_chars` (with
+   `prune` on, the history is pruned first; see "History pruning"). If a later
    request extends the same transcript, it sends only the new harness events in that chat's tab. A changed transcript
    or tool setup starts fresh with the whole request. At most `max_chat_tabs` tabs stay open.
 2. Opens `https://chatgpt.com/?temporary-chat=true` in its Chrome window for a new conversation and checks what a user would see: signed
@@ -271,6 +326,7 @@ page is fine again.
 | `idle_close_s` | 900 | close the window after this long without a request |
 | `max_prompt_chars` | 120000 | larger requests skip the bridge |
 | `fresh_prompt_chars` | 60000 | target size for a new tab's first prompt; older history is shortened if needed |
+| `prune` | unset | history pruning for a new tab's first prompt (true or options; see "History pruning"); unset: the catalog's top-level `prune` |
 | `strict_model` | true | fail rather than answer with a different model than the one named |
 | `allow_auto_fallback` | false | allow a named model request to use the page's Auto selection when that name disappears |
 | `reuse_chat`, `max_chat_tabs` | false, 6 | reuse a matching agent's temporary chat and cap open tabs |
@@ -324,6 +380,7 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_BASE_URL` | `http://127.0.0.1:4141` | where `usage` / `env` look for the proxy |
 | `PCORE_LOW_PCT` | `95` | subscription usage that counts as low |
 | `PCORE_CHATGPT_WEB` | unset | `1` turns the chatgpt-web provider on, `0` forces it off |
+| `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `prune`) |
 
 Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLARE_API_TOKEN`, ...; see
 `catalog.yaml`).
