@@ -1216,7 +1216,22 @@ class Bridge:
         return self._page
 
     async def _new_page(self):
-        page = await self._ctx.new_page()
+        page = None
+        if self.o["quiet"] and not self.o["headless"]:
+            # an ordinary new tab brings the hidden Chrome back on screen and takes the keyboard; a background tab
+            # does not take the keyboard, and hiding again right after keeps the window off screen
+            try:
+                cdp = await self._ctx.new_cdp_session(self._ctx.pages[0])
+                async with self._ctx.expect_page(timeout=10000) as info:
+                    await cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
+                page = await info.value
+                await cdp.detach()
+            except Exception:  # noqa: BLE001 - fall back to the ordinary way
+                page = None
+        if page is None:
+            page = await self._ctx.new_page()
+        if self.o["quiet"] and not self.o["headless"]:
+            hide_chrome(self.profile)
 
         def closed(*_):
             if not self._closing:
