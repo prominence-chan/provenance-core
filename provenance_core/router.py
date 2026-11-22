@@ -69,7 +69,8 @@ class Router:
         if fallback == "any":
             return names[i:]
         if fallback == "down1":
-            return names[i : i + 2]
+            # the lowest tier has nothing below it: its last resort is the tier above, sooner than no answer
+            return names[i : i + 2] if i + 1 < len(names) or i == 0 else [tier, names[i - 1]]
         return [tier]
 
     def bridge(self, provider: str):
@@ -107,7 +108,7 @@ class Router:
         busy = sum(self.inflight.get(m.id, 0) for m in models)
         if self.catalog.is_web(models[0]):
             m = models[0]
-            c = self.bridge(m.provider).capacity(m.accounts)
+            c = self.bridge(m.provider).capacity(m.accounts, model=m.model)
             ok = c["available"] and self.state.available(m)
             return {
                 "remaining": c["remaining"] if ok else 0.0,

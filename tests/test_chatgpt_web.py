@@ -366,7 +366,7 @@ class FakeBridge:
     def __init__(self):
         self.calls, self.fail = [], None
 
-    def capacity(self, accounts=None):
+    def capacity(self, accounts=None, model=None):
         return {"remaining": 1.0, "busy": 0, "accounts": 1, "available": True}
 
     async def complete(self, model, body, model_id=None, wait=None, on_text=None):
@@ -1290,3 +1290,55 @@ def test_browser_option_picks_the_browser(tmp_path, monkeypatch):
         assert e.value.kind == "browser" and "bundled" in e.value.reason and b._proc is None and b._pw is None
 
     run(go())
+
+
+def test_model_allowance_is_learned_from_the_limit_notice(tmp_path):
+    """A model with its own small allowance: capacity follows what was used, the count reached when the site says
+    the limit is hit becomes the allowance, only that model stops, and a new window starts a day later."""
+    now = [1_000_000.0]
+    b = cw.Bridge("http://x", {"notify": False, "daily_cap": 300, "model_caps": {"max": 6}}, home=tmp_path,
+                  clock=lambda: now[0])  # fmt: skip
+    b.site = {"name": "Site"}
+    assert b.capacity(model="max")["remaining"] == 1.0
+    assert b.capacity(model="other")["remaining"] == 1.0
+    for _ in range(3):
+        b._model_replied("max")
+    assert b.capacity(model="max")["remaining"] == 0.5
+    b._model_limited("max", cw.WebUnavailable("limit", 3600, "limit"))
+    assert b.model_usage("max")["cap"] == 3 and b.model_usage("max")["learned"]
+    assert b.capacity(model="max")["available"] is False
+    assert b.capacity(model="other")["available"] is True  # the account itself is not blocked
+    with pytest.raises(cw.WebUnavailable):
+        b._precheck("max")
+    b._precheck("other")
+    now[0] += 3601  # tried again, still limited: the allowance learned is kept, not replaced by 0
+    b._model_limited("max", cw.WebUnavailable("limit", 3600, "limit"))
+    assert b.model_usage("max")["cap"] == 3
+    now[0] += 90000  # a day on: a new window
+    u = b.model_usage("max")
+    assert u["used"] == 0 and u["cap"] == 3 and not u["limited_for_s"]
+    assert b.capacity(model="max")["remaining"] == 1.0
+    for _ in range(5):  # the site allowed more than was learned: the allowance grows with it
+        b._model_replied("max")
+    assert b.model_usage("max")["cap"] == 6 and 0 < b.capacity(model="max")["remaining"] < 0.2
+
+
+@browser
+def test_a_message_too_long_for_the_box_is_shortened_and_sent(mock, tmp_path):
+    """The page's box holds less than the message: the bridge learns the size, shortens the history to it and
+    sends in the same request; the next fresh chat on this account starts at that size."""
+    mock.state["box_max"] = 9000
+    mock.replies = ["<p>done</p>"]
+    old = [m for i in range(40) for m in ({"role": "user", "content": f"step {i} " + "x" * 400},
+                                          {"role": "assistant", "content": f"did {i} " + "y" * 400})]  # fmt: skip
+    body = {"messages": old + [{"role": "user", "content": "and now the last question"}]}
+
+    async def go(b):
+        d = await b.complete("luna", body)
+        return d, b.load()
+
+    d, st = scenario(mock, tmp_path, go)
+    assert d["choices"][0]["message"]["content"] == "done"
+    assert 4000 <= st["page_chars"] <= 9000
+    assert len(mock.sent) == 1 and len(mock.sent[0]["prompt"]) <= 9000
+    assert "and now the last question" in mock.sent[0]["prompt"]

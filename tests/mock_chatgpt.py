@@ -50,6 +50,8 @@ $('sw').onclick = () => {
     b.onclick = () => { model = name; m.style.display = 'none'; chrome(); }; m.appendChild(b); }
 };
 chrome();
+if (S.box_max) $('prompt-textarea').addEventListener('input', e => {  // a box that holds only so much
+  if (e.target.value.length > S.box_max) e.target.value = e.target.value.slice(0, S.box_max); });
 const btn = $('composer-submit-button');
 function isFull() {  // S.full_after user messages fill the chat: a notice appears and sending does nothing
   const full = S.full_after && document.querySelectorAll('[data-message-author-role="user"]').length >= S.full_after;
@@ -132,6 +134,7 @@ class Mock:
             "models": ["Luna", "Nimbus"],
             "delay": 150,
             "full_after": 0,  # this many user messages fill a chat (0 = never)
+            "box_max": 0,  # the message box holds this many characters (0 = any)
             # login: True / False, or "cookie": signed in when the browser sends SESSION (set by the sign-in page)
             "signin_auto": False,  # the sign-in page signs itself in
             "signin_after_ms": 300,

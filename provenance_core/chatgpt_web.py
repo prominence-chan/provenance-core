@@ -45,6 +45,14 @@ class WebSkip(WebError):
     """The bridge can't take this request (busy, prompt too long, images): no health penalty."""
 
 
+class WebTooLong(WebError):
+    """The page's message box took only part of the message; `limit` is a length it would take."""
+
+    def __init__(self, msg: str, limit: int):
+        super().__init__(msg)
+        self.limit = limit
+
+
 class WebUnsent(WebError):
     """The chat would not take the message (its context window is full, or the page ignored the send). Nothing was
     sent, so the same request can go to a fresh chat."""
@@ -1262,6 +1270,10 @@ SWITCHER = (
 
 DEFAULTS = {
     "daily_cap": 200,  # requests per local day; then unavailable until midnight
+    # a model with a small allowance of its own on the site (Qwen4-Max): a first guess at replies per account per
+    # window, e.g. {qwen4-max: 6}. The real figure is learned each time the site says the limit is reached.
+    "model_caps": None,
+    "model_window_s": 86400.0,  # a model's count starts again this long after its first reply
     "min_gap_s": 4.0,  # pause between requests: a random time in [min_gap_s, max_gap_s]
     "max_gap_s": 9.0,
     "queue_wait_s": 45.0,  # a request waits this long for the one in flight, then goes to the normal pool
@@ -1464,6 +1476,9 @@ class Bridge:
             "reason": s.get("reason") if left > 0 else None,
             "kind": s.get("kind") if left > 0 else None,
             "model_seen": s.get("model_seen"),
+            "models": {
+                m: self.model_usage(m, s) for m in {**(self.o.get("model_caps") or {}), **(s.get("models") or {})}
+            },
             "email": s.get("identity"),
             "window_open": self._page is not None,
             "browser": self.browser_in_use(),
@@ -1479,12 +1494,65 @@ class Bridge:
             return None
         return f"bundled {owner._bundled}" if owner._bundled else "chrome"
 
-    def capacity(self, accounts=None) -> dict:
-        s = self.status()
+    # ---- a model's own allowance (replies per window), learned from the site's limit notice ------------------
+    def model_usage(self, model: str | None, s: dict | None = None) -> dict | None:
+        """{cap, used, limited_for_s} for a model with an allowance of its own, else None."""
+        if not model:
+            return None
+        m = dict(((s or self.load()).get("models") or {}).get(model) or {})
+        guess = (self.o.get("model_caps") or {}).get(model)
+        if not m and not guess:
+            return None
+        now = self.clock()
+        if m.get("since") and now - m["since"] > float(self.o["model_window_s"]) and (m.get("until") or 0) <= now:
+            m["used"], m["since"] = 0, None  # a new window
+        cap, used = int(m.get("cap") or guess or 0), int(m.get("used") or 0)
+        if not cap:
+            return None
+        limited = max(0.0, (m.get("until") or 0) - now)
+        return {"cap": max(cap, used + (0 if limited else 1)), "used": used, "limited_for_s": limited,
+                "learned": bool(m.get("cap")), "since": m.get("since")}  # fmt: skip
+
+    def _model_save(self, model: str, **changes):
+        s = self.load()
+        models = dict(s.get("models") or {})
+        models[model] = {**(models.get(model) or {}), **changes}
+        self.save(models=models)
+
+    def _model_replied(self, model: str):
+        u = self.model_usage(model)
+        if u is None:
+            return
+        self._model_save(model, used=u["used"] + 1, since=u["since"] or self.clock(), until=0)
+
+    def _model_limited(self, model: str, e: WebUnavailable):
+        """The site says this model's allowance is used up: what was sent since the window began is the allowance."""
+        u = self.model_usage(model) or {"used": 0, "limited_for_s": 0}
+        ch = {"until": self.clock() + e.cooldown, "reason": e.reason}
+        if u["used"] > 0 and not u["limited_for_s"]:
+            ch["cap"] = u["used"]
+        self._model_save(model, **ch)
+
+    def _left(self, model: str | None = None) -> tuple[int, int]:
+        """(cap, used) on this account for the model: the day's request cap, or the model's own allowance when
+        that leaves a smaller share."""
+        s = self.load()
         cap = int(self.o["daily_cap"])
+        used = min(int(s.get("count", 0)), cap)
+        u = self.model_usage(model, s)
+        if u:
+            if u["limited_for_s"]:
+                return u["cap"], u["cap"]
+            if not cap or (u["cap"] - u["used"]) / u["cap"] < (cap - used) / cap:
+                return u["cap"], u["used"]
+        return cap, used
+
+    def capacity(self, accounts=None, model: str | None = None) -> dict:
+        s = self.status()
+        cap, used = self._left(model)
         unchecked = bool(self.o.get("skip_unchecked")) and s["signed_in"] is None
         out = s["blocked"] or s["signing_in"] or unchecked
-        left = 0.0 if out or not cap else max(0, cap - s["today"]) / cap
+        left = 0.0 if out or not cap else max(0, cap - used) / cap
         return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0,
                 "signed_in": s["signed_in"] is True}  # fmt: skip
 
@@ -1503,7 +1571,12 @@ class Bridge:
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
 
-    def _precheck(self):
+    def _precheck(self, model: str | None = None):
+        u = self.model_usage(model)
+        if u and u["limited_for_s"]:
+            raise WebUnavailable(
+                f"{model} has reached its limit on this account ({self.account or 'main'})", u["limited_for_s"], "limit"
+            )
         if self.signing_in():
             raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
         s = self.load()
@@ -2118,8 +2191,12 @@ class Bridge:
                 break
             await asyncio.sleep(1.5)
             await box.focus(timeout=10000)
-        if typed < 0.9 * len(re.sub(r"\s+", "", text)):
-            raise WebError(f"the composer took {typed} of {len(text)} characters (message too long for the page?)")
+        if typed < 0.9 * want:
+            # the page's box holds less than this message (free Gemini stops near 25k characters)
+            raise WebTooLong(
+                f"the composer took {typed} of {len(text)} characters (message too long for the page?)",
+                int(len(text) * typed / max(1, want) * 0.9),
+            )
         self.save(count=self.load().get("count", 0) + 1)
         send = page.locator(self.site["send"] if self.site else SEND).first
         try:
@@ -2234,7 +2311,10 @@ class Bridge:
         try:
             return await fn()
         except WebUnavailable as e:
-            if e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy"):
+            model = getattr(self, "_model", None)
+            if e.kind == "limit" and self.site and model and self.model_usage(model) is not None:
+                self._model_limited(model, e)  # this model's allowance only: the account's other models go on
+            elif e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy"):
                 self._block(e)
             raise
         except WebError:
@@ -2267,7 +2347,7 @@ class Bridge:
         """The whole request as one message for a new chat: pruned (`prune`), then, when it is still over
         `fresh_prompt_chars`, summarised (`compact`) or else cut (the blunt cut). -> (prompt, tools, rules, whether
         the history was shortened, {"pruned": prune's record, "compaction": compaction's record})."""
-        limit = int(self.o["fresh_prompt_chars"])
+        limit = min(int(self.o["fresh_prompt_chars"]), int(self.load().get("page_chars") or 10**9))
         prompt, tools, rules = render_prompt(body)
         fresh, pruned = self._pruned(body)
         info = {"pruned": pruned, "compaction": None}
@@ -2313,7 +2393,7 @@ class Bridge:
         if self.o["lean"]:
             body = lean_body(body, int(self.o["lean_system_chars"]))
         prompt, tools, rules = render_prompt(body)
-        self._precheck()
+        self._precheck(model)
         key = continuation_key(body, model) if self.o["reuse_chat"] else None
         messages = [m for m in body.get("messages") or [] if m.get("role") not in ("system", "developer")]
         setup = json.dumps(
@@ -2349,7 +2429,8 @@ class Bridge:
             self.busy -= 1
             raise
         try:
-            self._precheck()
+            self._precheck(model)
+            self._model = model
             await self._gap()
 
             session = self._sessions.get(key) if key else None
@@ -2429,7 +2510,17 @@ class Bridge:
 
             try:
                 try:
-                    text, calls, extra = await self._guarded(run)
+                    try:
+                        text, calls, extra = await self._guarded(run)
+                    except WebTooLong as e:
+                        if reuse or e.limit < 4000:
+                            raise
+                        # this page's box is smaller than the message: remember its size (for this account) and
+                        # send the history shortened to it, in the same request
+                        self.save(page_chars=e.limit)
+                        prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
+                        text, calls, extra = await self._guarded(run)
+                        extra["shortened_to"] = e.limit
                 except WebUnsent as e:
                     if not reuse:
                         # a new chat that did not take the message (a page not quite ready just after the browser
@@ -2460,6 +2551,7 @@ class Bridge:
                 raise
             if self.load().get("strikes"):
                 self.save(strikes=0)
+            self._model_replied(model)
             fmt = (body.get("response_format") or {}).get("type")
             if fmt in ("json_schema", "json_object") and not calls:
                 text = re.sub(r"^```\w*\n|\n```$", "", text.strip())
@@ -2561,13 +2653,13 @@ class BridgePool:
             raise KeyError(f"no account {account!r} (accounts: {', '.join(self.bridges)})")
         return self.bridges[account] if account else next(iter(self.bridges.values()))
 
-    def capacity(self, accounts=None) -> dict:
+    def capacity(self, accounts=None, model: str | None = None) -> dict:
         """What is left today on these accounts (all of them by default) and how busy they are; the router shares
-        requests out between sources by it."""
+        requests out between sources by it. With `model`, that model's own allowance counts where it has one."""
         bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
         open_ = [b for b in bs if b.capacity()["accounts"]]
-        cap = sum(int(b.o["daily_cap"]) for b in open_)
-        used = sum(min(b.load().get("count", 0), int(b.o["daily_cap"])) for b in open_)
+        left = [b._left(model) for b in open_]
+        cap, used = sum(c for c, _ in left), sum(u for _, u in left)
         return {
             "remaining": (cap - used) / cap if cap else 0.0,
             "busy": sum(b.busy for b in bs),

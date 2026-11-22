@@ -50,7 +50,7 @@ providers:
   # `driver: patchright` under web: (or PCORE_CHATGPT_WEB_DRIVER=patchright) gets past the site's automatic browser
   # check by not announcing the automation; the default `playwright` driver is stopped by it.
   chatgpt-web: {type: chatgpt_web, base_url: "https://chatgpt.com", api_key_env: none,
-                web: {daily_cap: 500, min_gap_s: 4, max_gap_s: 9, endpoints: [responses],
+                web: {daily_cap: 1000, min_gap_s: 4, max_gap_s: 9, endpoints: [responses],
                       allow_auto_fallback: true, reuse_chat: true, max_chat_tabs: 6,
                       # daily_cap is per account. lean: a few lines instead of the harness's 18k base prompt.
                       lean: true, quiet: true, idle_close_s: 21600, accounts: [main, b, c],
@@ -65,7 +65,10 @@ providers:
   # Qwen web (chat.qwen.ai, signed in, temporary chats), also as tabs in the chatgpt-web accounts' windows.
   qwen-web: {type: chatgpt_web, base_url: "https://chat.qwen.ai", api_key_env: none,
              web: {site: qwen, share: chatgpt-web, accounts: [main, b, c], daily_cap: 300, min_gap_s: 3, max_gap_s: 7,
-                   endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true, quiet: true}}
+                   endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true, quiet: true,
+                   # Qwen4-Max has a small allowance per free account: 6 is a first guess, replaced by the count
+                   # reached each time the site says "You've reached today's Qwen4-Max limit"
+                   model_caps: {qwen4-max: 6}}}
   # Gemini web (gemini.google.com, signed in, temporary chats), also as tabs in the same windows. `main` is a Pro
   # account (Hydrogen, Neon); `b` and `c` are free accounts with Auto only: see `accounts:` on the models.
   gemini-web: {type: chatgpt_web, base_url: "https://gemini.google.com", api_key_env: none,

@@ -169,7 +169,7 @@ class FakeWeb:
     def __init__(self, remaining, busy=0):
         self.remaining, self.busy = remaining, busy
 
-    def capacity(self, accounts=None):
+    def capacity(self, accounts=None, model=None):
         return {"remaining": self.remaining, "busy": self.busy, "accounts": 3, "available": self.remaining > 0}
 
 
@@ -219,3 +219,11 @@ def test_pinned_model_names_resolve(tmp_path, monkeypatch):
     assert resolve_target(router, "pool/tier-1", "none").source == "pool"
     assert resolve_target(router, "nosuch/tier-1", "none").source is None
     assert resolve_target(router, "gpt/Luna", "none").concrete == "gpt/Luna"
+
+
+def test_the_lowest_tier_falls_back_to_the_tier_above(setup):
+    router, *_ = setup
+    names = [t for t, _ in router.catalog.tiers]
+    assert router.tiers_for(names[-1], "down1") == [names[-1], names[-2]]
+    assert router.tiers_for(names[0], "down1") == names[:2]
+    assert router.tiers_for(names[-1], "none") == [names[-1]]
