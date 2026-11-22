@@ -26,9 +26,9 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .settings import env
+from .settings import env, home_dir
 
-DEFAULT_PATH = Path.home() / ".tierlm" / "usage-ledger.jsonl"
+DEFAULT_PATH = Path.home() / ".tierlm" / "usage-ledger.jsonl"  # where it is when PCORE_HOME is not set
 
 
 def request_keys(req: dict, session: str) -> tuple[str, str | None]:
@@ -42,7 +42,8 @@ class Ledger:
     def __init__(self, path: str | Path | None = None, cap: int | None = None):
         self.cap = cap or int(env("USAGE_LEDGER_MAX", "20000"))
         self.entries: deque[dict] = deque(maxlen=self.cap)
-        p = env("USAGE_LEDGER", str(DEFAULT_PATH)) if path is None else str(path)
+        # in the router's own home (PCORE_HOME), so a second router (the app's, a test's) keeps its own ledger
+        p = env("USAGE_LEDGER", str(home_dir() / "usage-ledger.jsonl")) if path is None else str(path)
         self.path = Path(p).expanduser() if p else None
         self.lock = threading.Lock()
         self._lines = 0
