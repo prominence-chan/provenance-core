@@ -129,8 +129,51 @@ class Catalog:
         return sorted(out, key=lambda m: -m.score)
 
 
+def model_key(m: dict) -> str:
+    return str(m.get("id") or f"{m.get('provider')}/{m.get('model')}")
+
+
+def overlay(base: dict, over: dict) -> dict:
+    """`over` laid over `base` (a catalog that says `extends:`): mappings merge key by key; a provider (or any
+    mapping entry) with `remove: true` is dropped; `models` entries are matched to the base's by id (`id`, else
+    provider/model) and merged into them, `remove: true` drops one, new ones are added at the end; any other value,
+    lists included, replaces the base's."""
+    out = dict(base)
+    for k, v in over.items():
+        if k == "models" and isinstance(v, list):
+            models = [dict(m) for m in base.get("models") or []]
+            index = {model_key(m): i for i, m in enumerate(models)}
+            for m in v:
+                i = index.get(model_key(m))
+                if i is None:
+                    models.append(dict(m))
+                else:
+                    models[i] = {**models[i], **m}
+            out[k] = [m for m in models if not m.get("remove")]
+        elif isinstance(v, dict) and v.get("remove") is True:
+            out.pop(k, None)
+        elif isinstance(v, dict) and isinstance(base.get(k), dict):
+            out[k] = overlay(base[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def read(path: str | Path, _seen: tuple = ()) -> dict:
+    """The catalog as data. `extends: <file>` (relative to this one) loads that catalog first and lays this one over
+    it (see overlay): how Provenance.app's catalog.app.yaml changes only what a new user needs different."""
+    path = Path(path).resolve()
+    if path in _seen:
+        raise ValueError(f"catalog {path} extends itself")
+    data = yaml.safe_load(path.read_text()) or {}
+    parent = data.pop("extends", None)
+    if not parent:
+        return data
+    return overlay(read(path.parent / str(parent), _seen + (path,)), data)
+
+
 def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
-    data = yaml.safe_load(Path(path).read_text())
+    data = read(path)
     providers = {}
     for name, p in data["providers"].items():
         key_env = p.get("api_key_env")
