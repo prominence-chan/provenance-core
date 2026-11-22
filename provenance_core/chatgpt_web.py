@@ -1195,6 +1195,7 @@ class Bridge:
                 ),
             )
             if self.o["quiet"] and not self.o["headless"]:
+                await self._park()
                 hide_chrome(self.profile)
         except Exception as e:  # noqa: BLE001 - profile in use (weblogin still open), Chrome missing, ...
             await self._shutdown()
@@ -1215,6 +1216,19 @@ class Bridge:
         self._ctx.on("close", closed)
         return self._page
 
+    async def _park(self):
+        """quiet: push the window past the bottom right corner of the screen (macOS keeps a 40 pixel corner of it
+        there), so that nothing shows even in the moments when Chrome un-hides itself."""
+        try:
+            cdp = await self._ctx.new_cdp_session(self._ctx.pages[0])
+            win = await cdp.send("Browser.getWindowForTarget")
+            await cdp.send(
+                "Browser.setWindowBounds", {"windowId": win["windowId"], "bounds": {"left": 20000, "top": 20000}}
+            )
+            await cdp.detach()
+        except Exception:  # noqa: BLE001 - best effort; hiding still applies
+            pass
+
     async def _new_page(self):
         page = None
         if self.o["quiet"] and not self.o["headless"]:
@@ -1231,6 +1245,7 @@ class Bridge:
         if page is None:
             page = await self._ctx.new_page()
         if self.o["quiet"] and not self.o["headless"]:
+            await self._park()
             hide_chrome(self.profile)
 
         def closed(*_):

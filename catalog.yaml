@@ -46,7 +46,7 @@ providers:
                 web: {daily_cap: 500, min_gap_s: 4, max_gap_s: 9, endpoints: [responses],
                       allow_auto_fallback: true, reuse_chat: true, max_chat_tabs: 6,
                       # daily_cap is per account. lean: a few lines instead of the harness's 18k base prompt.
-                      lean: true, quiet: true, accounts: [main, b, c]}}
+                      lean: true, quiet: true, idle_close_s: 21600, accounts: [main, b, c]}}
 
 models:
   # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
