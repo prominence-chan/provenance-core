@@ -83,6 +83,8 @@ wire_api = "responses"
 <summary><b>Provenance</b> and any other OpenAI client</summary>
 
 [Provenance](https://github.com/prominence-chan/provenance) (the Codex fork) uses provenance-core out of the box.
+Provenance.app carries its own copy and runs it (with `catalog.app.yaml`) when no router answers on :4141; sign-ins,
+per-site settings and API keys are then set up from the app (docs/TECHNICAL.md, "Provenance.app's router").
 Anything else: base URL `http://127.0.0.1:4141/v1`, model = a tier name.
 
 </details>

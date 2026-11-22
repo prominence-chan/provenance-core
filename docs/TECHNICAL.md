@@ -39,7 +39,13 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
 - `POST /v1/messages`, `POST /v1/messages/count_tokens`: Anthropic Messages API (Claude Code)
 - `POST /v1/responses`, `GET /v1/responses/{id}`: OpenAI Responses API (Codex, Provenance)
 - `GET /v1/models`: the tiers plus every usable concrete model (OpenAI and Anthropic list shapes)
+- `GET /v1/sources`: per tier, what it can be served from (each signed-in chat model, the API models as one "Token
+  pool"), how much of each is left, whether it can be pinned, and `needs`: `keys` (the tier has API models but none
+  with a key: the pool is listed rather than left out), `signin` (no account of that chat site signed in), else null
 - `GET /status`: tiers, scores, calibration, headroom, health, latency
+- `GET /health`: `{ok, service, version, pid, home, uptime_s, api: {providers, usable, models}, web: {providers,
+  enabled}, tiers}`; cheap (nothing is opened or fetched), for the app that started the router and for telling
+  which router answers on a port
 
 ## Catalog
 
@@ -60,6 +66,11 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
 - **tiers** and **aliases**.
 - **prune** (optional, off when absent): history pruning, see "History pruning" below.
 - **compact** (optional, off when absent): summarising compaction, see "Context compaction" below.
+- **extends** (optional): another catalog file (relative to this one) loaded first, with this one laid over it
+  (`catalog.overlay`): mappings merge key by key, an entry with `remove: true` is dropped, `models` entries are
+  matched to the base's by id (`id`, else `provider/model`) and merged into them (or dropped with `remove: true`),
+  new ones are added at the end, and any other value, lists included, replaces the base's. `catalog.app.yaml` is
+  one (see "Provenance.app's router").
 
 A provider without its key (or with an unset `${VAR}`) is skipped. Free-tier lineups change weekly:
 `python -m provenance_core discover <provider>` lists a provider's current models; re-run `calibrate` afterwards.
@@ -408,8 +419,9 @@ The server says at start whether the login is there (from the last check), `prov
 `provenance-core webstatus --boot` when it starts (a live check if the last one is older than 12 h; silent when
 all is well), and a macOS notification appears when the login turns out to be missing or expired.
 
-**When it is used.** Off unless `PCORE_CHATGPT_WEB=1` (or `enabled: true` on the provider; `PCORE_CHATGPT_WEB=0`
-forces it off). When on, its model competes inside its tier like any other (the score is a prior until
+**When it is used.** Off unless turned on. In order: `PCORE_CHATGPT_WEB=0` forces every web provider off; a choice
+made in the app (`PATCH /web/providers/{id}`, kept in `<PCORE_HOME>/settings.json`) decides next; then
+`PCORE_CHATGPT_WEB=1` turns them on; then `enabled: true` on the provider. When on, its model competes inside its tier like any other (the score is a prior until
 `calibrate --only chatgpt-web/<model>` measures it; calibration never touches it unless named), but only for:
 
 - tier requests on the front ends listed in `web.endpoints` (default `[responses]`: Provenance and Codex; add
@@ -463,6 +475,8 @@ page is fine again.
 | `browser_source` | `cft` | bundled only: `cft` (Chrome for Testing) or `chrome` (a background-only clone of the installed Google Chrome, this Mac only) |
 | `browser_watch_s` | 2 | bundled only: how often every window's position is checked and put back off screen |
 | `login_timeout_s` | 900 | a sign-in window left open this long is closed (then the account is checked) |
+| `skip_unchecked` | false | an account no check has ever seen signed in (`signed_in` still null: a new one, nothing signed in yet) is skipped without penalty and not counted as capacity, instead of having its browser opened to find the sign-in page. `catalog.app.yaml` turns it on |
+| `notify` | true | macOS notifications when the provider goes unavailable, and at start when a sign-in is missing |
 | `name`, `login_url`, `session_cookies` | the site's | what the app calls the provider, where the sign-in window opens, and `{domains, names}` of the cookie that means signed in (`CHATGPT_SITE` / `SITES`) |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
@@ -499,7 +513,7 @@ normal window (the bundled build's plain copy): a background-only app cannot tak
   browser must not open a newer profile); the closest major from above is chosen, so the installed Chrome (used by
   `weblogin`) can still open the profile. When Chrome updates to a new major version, a matching build is prepared
   on the next launch. If nothing suitable can be had, the installed Chrome is used as before.
-- **Shipping it in Provenance.app** (not done yet): a build step downloads the Chrome for Testing build for the
+- **Shipping it in Provenance.app** (done: `ui/scripts/fetch-browser.ts`): a build step downloads the Chrome for Testing build for the
   current Stable milestone into `ui/vendor/browser/` and electron-builder copies it unmodified with
   `"extraResources": [{"from": "vendor/browser", "to": "browser"}]` (outside the asar) to
   `Provenance.app/Contents/Resources/browser/Google Chrome for Testing.app`. browser_host finds it there and makes the
@@ -560,10 +574,12 @@ to the person as it is.
 
 | endpoint | |
 |---|---|
-| `GET /web/accounts` | `browser` (`mode`, `source`, `ready`, `version`, `preparing`, `stage`, `progress` 0-1 while downloading else null, `error`), `accounts` (the global list of ids), `providers`: `id`, `name` ("ChatGPT", "Gemini", ...), `url`, `enabled`, `shares_browser_with`, `models` (`id`, `label`, `tier`, `model`, `accounts`: null = every account), `accounts` (per account: `signed_in` true / false / null = never checked, `checked_at`, `email` (the identity the page showed at the last check, else null), `blocked`, `reason`, `blocked_for_s`, `today`, `daily_cap`, `signing_in`, `window_open`, `login` {`state`, `reason`}) |
+| `GET /web/accounts` | `browser` (`mode`, `source`, `ready`, `version`, `preparing`, `stage`, `progress` 0-1 while downloading else null, `error`), `accounts` (the global list of ids), `providers`: `id`, `name` ("ChatGPT", "Gemini", ...), `url`, `enabled`, `enabled_by` (`app`, `env`, `catalog`, or `env-off`: PCORE_CHATGPT_WEB=0, not changeable from the app), `daily_cap` (per account), `shares_browser_with`, `models` (`id`, `label`, `tier`, `model`, `accounts`: null = every account), `accounts` (per account: `signed_in` true / false / null = never checked, `checked_at`, `email` (the identity the page showed at the last check, else null), `blocked`, `reason`, `blocked_for_s`, `today`, `daily_cap`, `signing_in`, `window_open`, `login` {`state`, `reason`}) |
 | `POST /web/login` `{provider, account, bounds?}` | start a sign-in; answers once the window is open (`{"state": "open"}`), or `preparing` while the browser is downloaded; 409 when a sign-in already holds that account's browser. `bounds` `{left, top, width, height}` places the window (default 80, 60, 1000x800), e.g. beside the app |
 | `GET /web/login?provider=&account=` | `{state, reason}` (plus `provider`, `account`, `since`, `how`: cookie / closed / timeout); poll about once a second |
 | `POST /web/login/cancel` `{provider, account}` | closes the window, nothing is checked: `{"state": "idle"}` |
+| `POST /web/login/show` `{provider, account}` | brings the open sign-in window back to the front (`NSRunningApplication`, as clicking its Dock icon does): the login view plus `shown` (false when macOS refused, or for a headless test window, which is never brought forward); 409 when no window is open |
+| `PATCH /web/providers/{id}` `{enabled?, daily_cap?}` | turns the site on or off, sets its daily cap (per account, 1-10000); kept in `<PCORE_HOME>/settings.json` and applied to the running bridges at once; answers with the provider as `GET /web/accounts` lists it. A browser no enabled site uses any more is closed. 409 with a `detail` for anything else (another key, a wrong type, PCORE_CHATGPT_WEB=0) |
 | `POST /web/accounts` `{account}` | a new account slot (a new browser profile) on every web provider |
 | `DELETE /web/accounts/{id}` | removes it from every provider; its profile directory is never deleted (`profile_kept`, `note` say so) |
 | `POST /web/browser/prepare` | start preparing the bundled browser if it is not ready; answers with `browser` |
@@ -631,6 +647,46 @@ plain copy opened with `open -n -a`, small in a corner, came to the front, signe
 quit and verified in 10 s. **Not verified:** a real sign-in on any site (the cookie names above, Google's reaction to
 this window, the identity selectors, and how each site's sign-in page behaves when opened directly).
 
+## Provenance.app's router
+
+Provenance.app (`ui/` in the Provenance repo) runs this router itself when no router answers at its configured URL:
+a relocatable CPython (python-build-standalone) with the wheels its tests pass with and `provenance_core` as plain
+files, in `Provenance.app/Contents/Resources/router/` (`ui/scripts/fetch-router.ts`). A router that already answers
+(the owner's launchd service on :4141) is used instead and left alone. What the router has for it:
+
+- **`catalog.app.yaml`**: `extends: catalog.yaml` and changes only what a new user's first start needs: one account
+  per site, `skip_unchecked`, no notifications, Z.ai left out (no models), OVH needing a key (its anonymous quota
+  is one request a year), Gemini's models on every account. With no API keys at all, the chat sites work once
+  signed in, Kilo's anonymous models serve the pool where they can, and every tier whose API models all need a key
+  lists the pool with `needs: "keys"`.
+- **Settings changed from the app** (`provider_settings.py`): `PATCH /web/providers/{id}` (above), kept in
+  `<PCORE_HOME>/settings.json` as `{"providers": {"<id>": {"enabled": false, "daily_cap": 120}}}` and laid over the
+  catalog at load, like `web_accounts.json`; `catalog.yaml` is never rewritten.
+- **API keys from the app** (`pool_keys.py`): `GET /pool/keys` lists every API provider (`id`, `usable`,
+  `anonymous`, `vars`: `{name, set, from: "app" | "env" | null}`, `models`, `tiers`), never a value;
+  `PUT /pool/keys/{provider}` `{"values": {"<VAR>": "<key>"}}` checks the names against the provider's variables
+  (its `api_key_env` and any `${VAR}` in its `base_url`), keeps them in `<PCORE_HOME>/keys.json` (mode 0600, the
+  home 0700) and puts them into the process environment, where providers read their keys, so they work at once;
+  `DELETE /pool/keys/{provider}` removes the ones set from the app (a variable from the environment, such as
+  `keys.env`, cannot be removed from there: 409). `catalog.load` puts `keys.json` into the environment; a key set
+  from the app wins over the same variable from the shell. Nothing logs a value: uvicorn logs request lines only,
+  and errors name variables, never their contents.
+- **`serve --watch-stdin`**: the app keeps the write end of the router's stdin; when the app goes away, however it
+  goes (quit, crash, `kill -9`), stdin reaches EOF and the router shuts down as on Ctrl+C: the sign-in window and
+  every background browser are closed on shutdown (they also have watchdogs of their own). If that hangs, it exits
+  after 20 s anyway.
+- **How the app starts it**: `python3 -I -B -m provenance_core serve --catalog <Resources>/router/catalog.app.yaml
+  --scores <home>/scores.yaml --host 127.0.0.1 --port <free port> --watch-stdin`, cwd and `PCORE_HOME` =
+  `~/Library/Application Support/Provenance/router`, `PCORE_TOKEN` random per launch (any local web page can POST to
+  localhost), `PCORE_CHATGPT_WEB=1`, `PCORE_CHATGPT_WEB_DRIVER=patchright`, `PCORE_BROWSER_APP=<Resources>/browser`,
+  and `PLAYWRIGHT_NODEJS_PATH` at a wrapper that runs patchright's driver on the app's own Electron in Node mode, so
+  the driver's own 117 MB Node is not shipped. The app hands the same URL and token to `provenance app-server`
+  (`TIERLM_BASE_URL`, `TIERLM_TOKEN`, read by its built-in tierlm provider).
+- **For the app's end-to-end check**: `tests/serve_mock.py` runs this server with the web chats pointed at the mock
+  page (`tests/mock_chatgpt.py`), a scratch home and every browser headless (the sign-in window started directly
+  with `--headless=new`), and prints `{url, mock, home, pid}`; `ui/scripts/router-e2e.ts` drives the real UI
+  against it.
+
 ## Subscription fallback
 
 `python -m provenance_core usage` reads Claude Code's and Codex's own rate-limit data (Codex session rollouts;
@@ -663,10 +719,10 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_ANTHROPIC_FALLBACK` | `any` | fallback for `/v1/messages` |
 | `PCORE_RESPONSES_FALLBACK` | `down1` | fallback for `/v1/responses` |
 | `PCORE_ADAPTER_MAX_TOKENS` | `16384` | cap on agents' max_tokens (they ask for 32k-64k, which free tiers reject or count against tokens/minute) |
-| `PCORE_HOME` | `~/.tierlm` | subscription-fallback state |
+| `PCORE_HOME` | `~/.tierlm` | where the router keeps its state (web accounts and settings, keys.json, browser profiles, the bundled browser, subscription-fallback state) |
 | `PCORE_BASE_URL` | `http://127.0.0.1:4141` | where `usage` / `env` look for the proxy |
 | `PCORE_LOW_PCT` | `95` | subscription usage that counts as low |
-| `PCORE_CHATGPT_WEB` | unset | `1` turns the chatgpt-web provider on, `0` forces it off |
+| `PCORE_CHATGPT_WEB` | unset | `1` turns the web providers on (one turned off from the app stays off), `0` forces them all off |
 | `PCORE_BROWSER_APP` | unset | the bundled browser to use: a Chrome for Testing `.app`, or the folder that holds one (Provenance.app's `Contents/Resources/browser`) |
 | `PCORE_BROWSER_DIR` | `<PCORE_HOME>/browser` | where the bundled browser is prepared |
 | `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `prune`) |
@@ -689,4 +745,6 @@ page (`tests/mock_chatgpt.py`) in headless Chrome; those tests are skipped witho
 The bundled-browser tests run the same mock page in the background-only browser (its window off screen); the
 Chrome for Testing one is skipped unless a copy is already prepared (`python -m provenance_core.browser_host`).
 `tests/test_web_setup.py` runs the sign-in flow against the mock page's sign-in page (`login: "cookie"`) with a
-headless window on scratch profiles.
+headless window on scratch profiles. `tests/test_app_router.py` covers what Provenance.app needs (`catalog.app.yaml`,
+settings and keys from the app, `/health`, `needs`, `--watch-stdin`); `tests/serve_mock.py` is not a test but the
+server the app's end-to-end check runs (see "Provenance.app's router").
