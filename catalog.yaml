@@ -53,14 +53,21 @@ providers:
   zai-web: {type: chatgpt_web, base_url: "https://chat.z.ai", api_key_env: none,
             web: {site: zai, share: chatgpt-web, accounts: [main, b, c], daily_cap: 500, min_gap_s: 2, max_gap_s: 5,
                   endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true, quiet: true}}
+  # Qwen web (chat.qwen.ai, signed in, temporary chats), also as tabs in the chatgpt-web accounts' windows.
+  qwen-web: {type: chatgpt_web, base_url: "https://chat.qwen.ai", api_key_env: none,
+             web: {site: qwen, share: chatgpt-web, accounts: [main, b, c], daily_cap: 300, min_gap_s: 3, max_gap_s: 7,
+                   endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true, quiet: true}}
 
 models:
   # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
   # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
   - {provider: chatgpt-web, model: luna, score: 93, context: 64000}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
-  # Z.ai guest, measured 2026-11-21: 53 on the probe set (spark), and the page answers "Error code: 405, try again
-  # later" after about 20 messages in a few minutes. Left out of the pool until a signed-in account is tried.
-  # - {provider: zai-web, model: glm-5.3-flash, score: 53, context: 64000}
+  # Other web chats (priors until measured through the page; see the providers above).
+  - {provider: qwen-web, model: qwen4-max, score: 50, context: 64000}
+  - {provider: qwen-web, model: qwen3.7-plus, score: 50, context: 64000}
+  - {provider: zai-web, model: glm-5.3, score: 50, context: 64000}
+  # Z.ai guest (no sign-in) measured 53 and hit "Error code: 405" after about 20 messages.
+  - {provider: zai-web, model: glm-5.3-flash, score: 50, context: 64000}
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}

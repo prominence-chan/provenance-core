@@ -1030,7 +1030,40 @@ SITES = {
         "msg": '[id^="message-"]',
         "login": None,
     },
+    "qwen": {  # chat.qwen.ai, signed in; temporary chats, like ChatGPT's
+        "name": "Qwen",
+        "path": "/?temporary-chat=true",
+        "temp": 'button[aria-label="Temporary Chat"][aria-pressed="true"]',
+        "composer": "textarea.message-input-textarea",
+        "send": 'button.send-button, button[aria-label="Send"]',
+        "stop": 'button[aria-label="Stop"], button[aria-label="Stop generating"], button.stop-button, .send-button.stop',
+        "user": ".qwen-chat-message-user",
+        "assistant": ".qwen-chat-message-assistant",
+        "root": ".response-message-content.phase-answer",
+        "actions": 'button[aria-label="Regenerate"]',
+        "model": '[aria-label="Select Model"]',
+        "msg": '[data-msg-id], [id^="chat-response-message-"]',
+        "login": 'button[aria-label="Log in"], a[href*="/auth"]',
+        # code blocks are an editor widget that only draws the lines in view, so the finished reply is taken from
+        # the page's own Copy button (the reply's markdown, as written) instead of from the elements
+        "copy": 'button[aria-label="Copy"]',
+    },
 }
+
+# Runs in the page's own script world: keep what the page's Copy button would put on the clipboard.
+CAPTURE_JS = r"""() => {
+  if (window.__pcoreCap) { window.__pcoreCap.length = 0; return true; }
+  window.__pcoreCap = [];
+  try {
+    navigator.clipboard.writeText = t => { window.__pcoreCap.push(String(t)); return Promise.resolve(); };
+    navigator.clipboard.write = async items => { for (const it of items) if (it.types.includes('text/plain')) window.__pcoreCap.push(await (await it.getType('text/plain')).text()); };
+  } catch (e) {}
+  const exec = document.execCommand.bind(document);
+  document.execCommand = (c, ...a) => { if (c === 'copy') { window.__pcoreCap.push(String(window.getSelection())); return true; } return exec(c, ...a); };
+  return true;
+}"""
+COPY_CLICK_JS = r"""(cfg) => { const as = document.querySelectorAll(cfg.assistant); const a = as[as.length - 1]; if (!a) return false;
+  const bs = a.querySelectorAll(cfg.copy); const b = bs[bs.length - 1]; if (!b) return false; b.click(); return true; }"""
 
 # The same facts PROBE_JS reports, for a site described in SITES.
 SITE_PROBE_JS = r"""([cfg, fresh]) => {
@@ -1038,6 +1071,7 @@ SITE_PROBE_JS = r"""([cfg, fresh]) => {
                       return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const first = sel => sel ? [...document.querySelectorAll(sel)].find(vis) || null : null;
   const out = {url: location.href, title: document.title, temp: true, account: true, slug: null, lastState: null};
+  if (cfg.temp) out.temp = !!document.querySelector(cfg.temp);
   out.composer = !!first(cfg.composer);
   out.login = !!first(cfg.login);
   const scoped = [...document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"], [data-sonner-toast], [class*="toast" i], [class*="error" i]')]
@@ -1058,7 +1092,8 @@ SITE_PROBE_JS = r"""([cfg, fresh]) => {
   const lu = us[us.length - 1], last = as[as.length - 1];
   const body = last ? last.querySelector(cfg.root) : null;
   out.lastLen = body ? (body.innerText || '').length : 0;
-  const id = el => { const h = el && cfg.msg ? el.closest(cfg.msg) : null; return h ? h.id || null : null; };
+  const id = el => { const h = el && cfg.msg ? (el.closest(cfg.msg) || el.querySelector(cfg.msg)) : null;
+                     return h ? h.getAttribute('data-msg-id') || h.id || null : null; };
   out.lastUser = id(lu); out.lastAsst = id(last);
   out.asstAfterUser = !!(last && lu && (lu.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING));
   out.actions = cfg.actions ? [...document.querySelectorAll(cfg.actions)].length : 0;
@@ -1423,8 +1458,28 @@ class Bridge:
             return await page.evaluate(SITE_PROBE_JS, [self.site, fresh])
         return await page.evaluate(PROBE_JS, fresh)
 
-    async def _read(self, page) -> dict:
-        return await page.evaluate(READ_JS, self.site)
+    async def _main_world(self, page, js: str):
+        try:  # patchright runs page scripts in a world of their own unless told otherwise
+            return await page.evaluate(js, isolated_context=False)
+        except TypeError:
+            return await page.evaluate(js)
+
+    async def _read(self, page, final: bool = False) -> dict:
+        r = await page.evaluate(READ_JS, self.site)
+        if final and self.site and self.site.get("copy"):
+            try:
+                await self._main_world(page, CAPTURE_JS)
+                if await page.evaluate(COPY_CLICK_JS, self.site):
+                    for _ in range(10):
+                        await asyncio.sleep(0.2)
+                        got = await self._main_world(page, "() => window.__pcoreCap || []")
+                        if got:
+                            if got[-1].strip():
+                                r["md"] = got[-1]
+                            break
+            except Exception:  # noqa: BLE001 - the elements' text is the fallback
+                pass
+        return r
 
     def _strike(self) -> float:
         """One more failure in a row -> how long to stay away now (doubles each time, up to backoff_max_s)."""
@@ -1477,7 +1532,9 @@ class Bridge:
                     )
             elif p.get("composer"):
                 ok += 1
-                if ok >= (2 if p.get("account") else 4):
+                # a site whose temporary mode comes on a moment after the page (Qwen): give it time before judging
+                slow_temp = bool(self.site and self.site.get("temp") and p.get("temp") is not True)
+                if ok >= (2 if p.get("account") else 4) and not (slow_temp and time.time() < deadline - 25):
                     break
             else:
                 ok = 0
@@ -1491,8 +1548,11 @@ class Bridge:
         if p.get("temp") is not True:  # the url flag didn't take: try the page's own toggle once
             toggle = page.locator('button[aria-label*="temporary chat" i]').first
             try:
-                await toggle.click(timeout=3000)
-                await asyncio.sleep(1.0)
+                try:
+                    await toggle.click(timeout=3000)
+                except Exception:  # noqa: BLE001 - a hidden window does not take clicks; the script click does
+                    await toggle.evaluate("el => el.click()", timeout=3000)
+                await asyncio.sleep(1.5)
                 p = await self._probe(page, True)
             except Exception:  # noqa: BLE001
                 pass
@@ -1565,9 +1625,14 @@ class Bridge:
         if shown(p) == want or p.get("model") is None:
             return p
         try:
-            await page.locator(self.site["model"]).first.focus(timeout=4000)
+            opener = page.locator(self.site["model"]).first
+            items = '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button'
+            await opener.focus(timeout=4000)
             await page.keyboard.press("Enter")
             await asyncio.sleep(1.0)
+            if not await page.locator(items).count():
+                await opener.evaluate("el => el.click()")
+                await asyncio.sleep(1.0)
             picked = await page.evaluate(
                 r"""(want) => { for (const e of document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button')) {
                      if (((e.innerText || '').trim().split(/\s+/)[0] || '').toLowerCase() === want) { e.click(); return true; } } return false; }""",
@@ -1689,7 +1754,7 @@ class Bridge:
                 raise WebError(
                     f"no complete reply after {int(timeout)} s (page state saved in {self.home / 'chatgpt-web-debug'})"
                 )
-        r = await self._read(page)
+        r = await self._read(page, final=True)
         if not (r.get("md") or "").strip():
             raise WebError("the reply was empty")
         if r.get("slug"):
