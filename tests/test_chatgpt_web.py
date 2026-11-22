@@ -1126,3 +1126,164 @@ def test_live_stream_fails_over_before_any_text_and_reports_after():
             [e async for e in UpstreamStream(live).events()]
 
     run(go())
+
+
+# ---- the bundled browser (`browser: bundled`), against the mock page ---------------------------------------------------
+def _bundled_ready():
+    """The bundled browser already prepared under <PCORE_HOME>/browser, new enough for the installed Chrome. These
+    tests never download or prepare one (`python -m provenance_core.browser_host` does)."""
+    if not _chrome_ok():
+        return None
+    from provenance_core import browser_host as bh
+
+    return bh.current(need=bh.required_major())
+
+
+bundled = pytest.mark.skipif(
+    not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.browser_host)"
+)
+
+
+def _bundled_bridge(mock, tmp_path, monkeypatch, source="cft", **opts):
+    from provenance_core import browser_host as bh
+
+    if source == "cft":
+        rec = _bundled_ready()
+        monkeypatch.setattr(bh, "ensure", lambda profile=None, **k: rec)  # what is prepared; never a download
+    else:  # the clone of the installed Chrome is made per test, in a scratch directory (an APFS clone: instant)
+        monkeypatch.setenv("PCORE_BROWSER_DIR", str(tmp_path / "browser"))
+    return bridge_for(mock, tmp_path, headless=False, browser="bundled", browser_source=source, **opts)
+
+
+def _app_type(pid: int) -> str:
+    import subprocess
+
+    sh = lambda *c: subprocess.run(c, capture_output=True, text=True).stdout.strip()  # noqa: E731
+    return sh("lsappinfo", "info", "-only", "ApplicationType", sh("lsappinfo", "find", f"pid={pid}"))
+
+
+def _left_running(profile) -> str:
+    import subprocess
+
+    return subprocess.run(["pgrep", "-f", f"user-data-dir={profile}"], capture_output=True, text=True).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("cft", marks=bundled),
+        pytest.param(
+            "chrome",
+            marks=pytest.mark.skipif(
+                not _chrome_ok() or not os.uname().sysname == "Darwin", reason="needs macOS and Google Chrome"
+            ),
+        ),
+    ],
+)
+def test_bundled_browser_runs_the_window_unseen(mock, tmp_path, monkeypatch, source):
+    async def go():
+        b = _bundled_bridge(mock, tmp_path, monkeypatch, source)
+        try:
+            first = await b.complete("auto", dict(USER))
+            proc = b._proc
+            guest = cw.Bridge(mock.url, {**b.o, "reuse_chat": True}, home=tmp_path / "guest", host=b)
+            second = await guest.complete("auto", dict(USER))
+            same, tabs = guest._ctx is b._ctx, len(b._ctx.pages)
+            cdp = await b._ctx.new_cdp_session(guest._page)
+            win = await cdp.send("Browser.getWindowForTarget")
+            await cdp.detach()
+            win["screen"] = await guest._page.evaluate("[screen.width, screen.height]")
+            brands = await guest._page.evaluate("navigator.userAgentData.brands.map(b => b.brand)")
+            # the guest's page is a background tab of the off-screen window: its timers must still run
+            ticks = await guest._page.evaluate(
+                "() => new Promise(r => { let i = 0; const t = setInterval(() => i++, 50);"
+                " setTimeout(() => { clearInterval(t); r(i); }, 1000); })"
+            )
+            st, gst = b.status(), guest.status()
+            await guest._shutdown()  # closes the guest's tabs only
+            third = await b.complete("auto", dict(USER))
+            app_type = _app_type(proc.pid)
+        finally:
+            await b.release()
+        return dict(
+            texts=[r["choices"][0]["message"]["content"] for r in (first, second, third)],
+            same=same,
+            tabs=tabs,
+            win=win,
+            ticks=ticks,
+            st=st,
+            gst=gst,
+            app_type=app_type,
+            exit=proc.poll(),
+            left=_left_running(b.profile),
+            after=b.status(),
+            brands=brands,
+        )
+
+    r = run(go())
+    # Chrome for Testing has no "Google Chrome" brand; the clone of the installed Chrome is that Chrome
+    assert ("Google Chrome" in r["brands"]) == (source == "chrome") and "Chromium" in r["brands"]
+    assert r["texts"] == ["ok", "ok", "ok"] and r["same"] and r["tabs"] == 2 and len(mock.sent) == 3
+    assert "BackgroundOnly" in r["app_type"]  # no Dock icon, never the active app
+    # created off screen: macOS keeps only a corner of about 40x41 px of it inside the display
+    (w, h), bounds = r["win"]["screen"], r["win"]["bounds"]
+    assert bounds["left"] >= w - 64 and bounds["top"] >= h - 64
+    assert r["ticks"] >= 12  # 20 expected; a throttled background tab manages about 1
+    assert r["st"]["browser"].startswith("bundled ") and r["gst"]["browser"] == r["st"]["browser"]
+    assert r["exit"] is not None and not r["left"]  # release() quit it; nothing left on the scratch profile
+    assert r["after"]["browser"] is None and not r["after"]["window_open"]
+
+
+@bundled
+def test_bundled_browser_goes_when_the_bridge_goes(mock, tmp_path, monkeypatch):
+    """A background-only browser is never seen: if the process that drives it dies, its watchdog ends it. And a
+    vanished bundled window is started again on the next request (nobody can have closed it by hand)."""
+
+    async def go():
+        b = _bundled_bridge(mock, tmp_path, monkeypatch)
+        try:
+            await b.complete("auto", dict(USER))
+            proc = b._proc
+            b._watch.stdin.close()  # what the kernel does to the pipe when this process dies, even by SIGKILL
+            for _ in range(150):
+                if proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+            gone = proc.poll() is not None
+            await asyncio.sleep(0.5)
+            again = await b.complete("auto", dict(USER))
+            relaunched = b._proc is not proc and b._proc.poll() is None
+        finally:
+            await b.release()
+        return gone, again, relaunched, b.status(), _left_running(b.profile)
+
+    gone, again, relaunched, st, left = run(go())
+    assert gone and relaunched and again["choices"][0]["message"]["content"] == "ok"
+    assert not st["blocked"] and not left
+
+
+def test_browser_option_picks_the_browser(tmp_path, monkeypatch):
+    from provenance_core import browser_host as bh
+
+    rec = {"exe": "/nonexistent/bundled", "version": "157.0.1.2"}
+    monkeypatch.setattr(bh, "ensure", lambda profile=None, **k: rec)
+    monkeypatch.setattr(bh, "ensure_soon", lambda profile=None, **k: None)
+
+    def mk(**o):
+        return cw.Bridge("http://x", {"profile": str(tmp_path / "p"), "notify": False, **o}, home=tmp_path)
+
+    async def go():
+        assert cw.DEFAULTS["browser"] == "chrome" and await mk()._bundled_browser() is None
+        assert await mk(browser="bundled")._bundled_browser() is rec
+        assert await mk(browser="bundled", headless=True)._bundled_browser() is None  # headless: as before
+        assert await mk(browser="auto")._bundled_browser() is None  # not ready: chrome now, prepared meanwhile
+        with pytest.raises(cw.WebUnavailable) as e:
+            await mk(browser="firefox")._bundled_browser()
+        assert e.value.kind == "setup"
+        # a bundled browser that cannot start: unavailable for a while, and nothing else is opened instead
+        b = mk(browser="bundled", driver=os.environ.get("PCORE_TEST_DRIVER", "playwright"))
+        with pytest.raises(cw.WebUnavailable) as e:
+            await b._ensure_page()
+        assert e.value.kind == "browser" and "bundled" in e.value.reason and b._proc is None and b._pw is None
+
+    run(go())

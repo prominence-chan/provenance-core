@@ -278,6 +278,9 @@ page is fine again.
 | `accounts` | none | e.g. `[main, b, c]`: one Chrome profile, window, daily count and cooldown per signed-in account (`provenance-core weblogin --account b`). A request goes to the account already holding its chat, else the least busy one that is not cooling down; `daily_cap` is per account |
 | `backoff_base_s`, `backoff_max_s` | 60, 900 | a "temporary limits" / failed-to-load notice, or two page errors in a row: stay away this long, doubling each time in a row |
 | `quiet` | false | macOS: hide the bridge's Chrome as soon as it opens (your own Chrome is untouched). `headless: true` is stopped by the site's browser check, so this is the way to keep it off the screen |
+| `browser` | `chrome` | which browser runs the window: `chrome` (the installed Google Chrome), `bundled` (the bridge's own background-only Chrome for Testing, see "Bundled browser" below), `auto` (bundled when it is ready, else chrome while it is prepared in the background). `share:` guests use their host's browser |
+| `browser_trim` | true | bundled only: also pass the trimmed switch set |
+| `browser_source` | `cft` | bundled only: `cft` (Chrome for Testing) or `chrome` (a background-only clone of the installed Google Chrome, this Mac only) |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
 A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice; on a page with no picker, as on the Free plan, the account's one model answers). The page
@@ -287,6 +290,65 @@ update.
 **Commands and endpoints:** `weblogin`, `webstatus [--probe] [--boot]`; `GET /chatgpt-web/status[?probe=1]`,
 `POST /chatgpt-web/release[?reset=1]` (close the window; `reset` also forgets a block). State (today's count, last
 check, block reason) is in `~/.tierlm/chatgpt_web.json`.
+
+### Bundled browser
+
+`browser: bundled` (or `auto`) runs the window in the bridge's own copy of Chrome for Testing instead of the
+installed Google Chrome (`provenance_core/browser_host.py`). The copy's Info.plist says `LSBackgroundOnly`: no Dock
+icon, no app-switcher entry, and it can never become the active app, so it cannot take focus. It starts with no
+window (`--no-startup-window`) and the bridge creates its one window already off screen and in the background
+(`Target.createTarget {newWindow, background, left: 20000, top: 20000}`): no window is ever drawn on screen; macOS
+keeps a 40x41 px corner of it inside the display. Tabs are background tabs of that window. `quiet`'s hiding and
+parking are not needed and are skipped. The same profile directory is used, so the sign-in carries over (both
+launches use `--use-mock-keychain --password-store=basic`, the same cookie-encryption key). `weblogin` always opens a
+normal window: a background-only app cannot take the keyboard.
+
+- **Getting it.** `python -m provenance_core.browser_host` prepares it ahead of time; otherwise the first launch in
+  `bundled` mode does (in `auto` mode, a background thread does while the installed Chrome is used). Sources, in
+  order: an app under `Provenance.app/Contents/Resources/browser/` or named by `PCORE_BROWSER_APP`, the copy already
+  prepared, Playwright's cache, a download from Google's Chrome for Testing bucket (~190 MB zip, md5-checked). It
+  must be at least as new as the installed Chrome's major version and as the profile's `Last Version` (an older
+  browser must not open a newer profile); the closest major from above is chosen, so the installed Chrome (used by
+  `weblogin`) can still open the profile. When Chrome updates to a new major version, a matching build is prepared
+  on the next launch. If nothing suitable can be had, the installed Chrome is used as before.
+- **Shipping it in Provenance.app** (not done yet): a build step downloads the Chrome for Testing build for the
+  current Stable milestone into `ui/vendor/browser/` and electron-builder copies it unmodified with
+  `"extraResources": [{"from": "vendor/browser", "to": "browser"}]` (outside the asar) to
+  `Provenance.app/Contents/Resources/browser/Google Chrome for Testing.app`. browser_host finds it there and makes the
+  background-only clone under `<PCORE_HOME>/browser` on first use (same APFS volume: no copy). Chrome for Testing
+  is only ad hoc (linker) signed, so the app's own ad-hoc `codesign --deep` pass (`scripts/adhoc-sign.cjs`) has no
+  Google signature to break; that pass's `--verify --deep --strict` must still be checked once with the browser
+  inside. Shipping it unmodified also leaves a normal-window copy for `weblogin`. It adds ~370 MB to the app (~190 MB to the DMG); a newer one is still
+  downloaded when the installed Chrome or the profile moves past the shipped major version.
+- **On disk.** `<PCORE_HOME>/browser/<version>/plain/` (the build as downloaded, ~370 MB) and `.../background/` (an
+  APFS clone with the edited Info.plist, re-signed ad hoc: an edited plist breaks the signature and the kernel kills
+  the process; the clone costs ~0.1 MB, though `du` counts it again), `current.json` (the version in use). Older
+  versions are removed once nothing runs from them.
+- **Lifetime.** The bridge starts the browser itself and attaches over a local debugging port (`--remote-debugging-
+  port=0`, 127.0.0.1). A watchdog (a shell waiting on a pipe only the bridge holds) ends the browser if the bridge
+  dies, so a browser nobody can see is never left running. `release` / idle close sends `Browser.close` and waits
+  for the process. A bundled window that vanished is restarted on the next request without the "closed" cooldown.
+- **Trimmed switches** (`browser_trim`, `TRIM_ARGS` / `TRIM_FEATURES`): `--process-per-site` (tabs of one site share
+  a renderer), `--disable-back-forward-cache`, no spare renderer, no phishing classifier, domain reliability, pings,
+  metrics upload, crash reporter, download protection, optimization-guide fetches/models, autofill server, CT
+  updater, What's New; `--autoplay-policy=user-gesture-required`, `--mute-audio`. The renderer sandbox stays on
+  (Playwright's launch passes `--no-sandbox`). Left out on purpose because a page can tell: GPU / software GL /
+  device-scale-factor switches, `--disable-extensions`, `--disable-default-apps`, `--disable-component-update` and
+  `MediaRouter` (patchright removes these from Playwright's defaults). A fingerprint of 38 page-visible groups
+  (globals, navigator, userAgentData, WebGL, canvas, audio, EME, permissions, codecs, AI APIs) is identical with and
+  without the trim, and chatgpt.com's logged-out page shows its input box with no challenge.
+  Measured (Chrome for Testing 157, M-series Mac, scratch profile, sum of RSS over the browser's processes; 4 tabs
+  of a heavy news page, each loaded twice): idle with one blank tab ~650 MB / 1-1.5 % CPU either way; 4 heavy tabs
+  2,305-2,383 MB / 150-155 % CPU / 19 processes with today's switches, 1,648-1,702 MB / 121-129 % CPU / 14 processes
+  trimmed (about -29 % memory, -18 % CPU).
+- **Known differences from the installed Chrome.** The same fingerprint, taken from a background-only clone of the
+  installed Chrome 157.0.8103.80, differs from Chrome for Testing 157.0.8103.78 in one thing only:
+  `navigator.userAgentData.brands` / `fullVersionList` have no `Google Chrome` entry (`Chromium` + `Not-A.Brand`;
+  the user-agent string, Widevine, WebGL, plugins and globals are the same). `browser_source: chrome` avoids even
+  that: the bundled browser is then a background-only APFS clone of the installed Google Chrome (`<PCORE_HOME>/
+  browser/chrome/`, re-cloned whenever Chrome updates, never older than the profile); it is for this Mac only, as
+  Google Chrome cannot be shipped inside Provenance.app. Device-bound Google sessions (DBSC) keep their keys per
+  browser app, so a Google sign-in made in the installed Chrome may have to be renewed in the bundled one.
 
 ## Subscription fallback
 
@@ -339,3 +401,5 @@ Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLA
 
 `.venv/bin/python -m pytest -q` (upstreams are mocked). The chatgpt-web page driver is tested against a local mock
 page (`tests/mock_chatgpt.py`) in headless Chrome; those tests are skipped without Playwright and Google Chrome.
+The bundled-browser tests run the same mock page in the background-only browser (its window off screen); the
+Chrome for Testing one is skipped unless a copy is already prepared (`python -m provenance_core.browser_host`).

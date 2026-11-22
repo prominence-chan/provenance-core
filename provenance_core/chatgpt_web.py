@@ -1162,6 +1162,16 @@ DEFAULTS = {
     "driver": "playwright",  # or "patchright": drive Chrome without the automation markers (docs/TECHNICAL.md)
     "headless": False,  # true: no window at all. chatgpt.com's browser check stops a headless Chrome, so use `quiet`
     "quiet": False,  # macOS: hide the window's Chrome right after it opens, so it never takes the screen or focus
+    # which browser runs the window. chrome: the installed Google Chrome (as always). bundled: the bridge's own
+    # Chrome for Testing copy under <PCORE_HOME>/browser, a background-only app (no Dock icon, never takes focus) whose
+    # window is created off screen; prepared (downloaded once, ~190 MB) on first use, the installed Chrome if that
+    # fails. auto: the bundled one when it is ready, else chrome while it is prepared in the background.
+    # Same profile either way; `weblogin` always opens a normal window. See browser_host.py
+    "browser": "chrome",
+    "browser_trim": True,  # bundled: also pass the trimmed switch set (browser_host.TRIM_ARGS / TRIM_FEATURES)
+    # bundled: cft (Chrome for Testing, what Provenance.app can ship) or chrome (a background-only clone of the
+    # installed Google Chrome: the same build, so the same "Google Chrome" brand to sites; this Mac only)
+    "browser_source": "cft",
     "notify": True,  # macOS notification when the provider goes unavailable
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
     "site": None,  # another chat site from SITES (e.g. zai) instead of chatgpt.com
@@ -1219,6 +1229,8 @@ class Bridge:
         self.sleep, self.clock, self.rand = sleep, clock, rand
         self.lock = asyncio.Lock()
         self._pw = self._ctx = self._page = None
+        self._proc = self._watch = None  # bundled: the browser process this bridge started, and its watchdog
+        self._bundled: str | None = None  # the bundled browser's version while it is the one running
         self._closing = False
         self._gone = False  # the user closed the window themselves
         self._last_done = 0.0
@@ -1259,9 +1271,17 @@ class Bridge:
             "kind": s.get("kind") if left > 0 else None,
             "model_seen": s.get("model_seen"),
             "window_open": self._page is not None,
+            "browser": self.browser_in_use(),
             "profile": str(self.profile),
             **({"account": self.account} if self.account else {}),
         }
+
+    def browser_in_use(self) -> str | None:
+        """What runs this bridge's window now: "bundled <version>", "chrome", or None when no window is open."""
+        owner = self.host or self
+        if self._page is None:
+            return None
+        return f"bundled {owner._bundled}" if owner._bundled else "chrome"
 
     def capacity(self, accounts=None) -> dict:
         s = self.status()
@@ -1319,8 +1339,11 @@ class Bridge:
         if self._page is not None and not self._page.is_closed() and not self._gone:
             return self._page
         gone, self._gone = self._gone, False
+        was_bundled = self._bundled
         await self._shutdown()
-        if gone:  # closing the window is a "not now": stay out of the way for a while instead of reopening it
+        # closing the window is a "not now": stay out of the way for a while instead of reopening it. The bundled
+        # browser's window is never on screen, so it going away is a crash or a quit, not that: just start it again
+        if gone and not was_bundled:
             raise WebUnavailable("the ChatGPT window was closed", float(self.o["cooldown_closed_s"]), "closed")
         driver = str(self.o["driver"]).lower()
         if driver not in ("playwright", "patchright"):
@@ -1333,7 +1356,21 @@ class Bridge:
         except ImportError:
             raise WebUnavailable(f"{driver} is not installed (pip install {driver})", 3600, "setup") from None
         self.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        bundled = await self._bundled_browser()
         self._pw = await async_playwright().start()
+        if bundled:
+            try:
+                self._page = await self._launch_bundled(bundled, driver)
+                return await self._watch_page()
+            except Exception as e:  # noqa: BLE001 - profile in use, the copy broken, ...
+                await self._shutdown()
+                if str(self.o.get("browser")).lower() != "auto":
+                    raise WebUnavailable(
+                        f"could not open the bundled browser on the profile: {str(e).splitlines()[0][:160]}",
+                        120,
+                        "browser",
+                    ) from None
+                self._pw = await async_playwright().start()  # auto: the installed Chrome, as before
         try:
             # playwright: stock defaults, the window says it is automated (navigator.webdriver is true).
             # patchright (the approach CatGPT-Gateway uses): the same real Chrome and profile, driven without the
@@ -1376,6 +1413,9 @@ class Bridge:
                 f"could not open Chrome on the chatgpt-web profile: {str(e).splitlines()[0][:160]}", 120, "browser"
             ) from None
         self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
+        return await self._watch_page()
+
+    async def _watch_page(self):
         try:  # a just-opened window is still loading its blank first tab; navigating over that gets interrupted
             await self._page.wait_for_load_state("load", timeout=5000)
         except Exception:  # noqa: BLE001
@@ -1387,7 +1427,96 @@ class Bridge:
 
         self._page.on("close", closed)
         self._ctx.on("close", closed)
+        if self._bundled:
+            self._ctx.browser.on("disconnected", closed)
         return self._page
+
+    # ---- the bundled browser (`browser: bundled | auto`) -----------------------------------------------------------
+    async def _bundled_browser(self) -> dict | None:
+        """The prepared bundled browser to launch, or None for the installed Chrome."""
+        mode = str(self.o.get("browser") or "chrome").lower()
+        if mode not in ("chrome", "bundled", "auto"):
+            raise WebUnavailable(f"unknown chatgpt-web browser {mode!r} (chrome, bundled or auto)", 3600, "setup")
+        if mode == "chrome" or self.o["headless"]:  # headless runs the installed Chrome as before
+            return None
+        from . import browser_host
+
+        source = str(self.o.get("browser_source") or "cft").lower()
+        if source == "chrome":  # a background-only clone of the installed Chrome: instant, so always waited for
+            return await asyncio.to_thread(browser_host.ensure_chrome_clone, self.profile)
+        if source != "cft":
+            raise WebUnavailable(f"unknown chatgpt-web browser_source {source!r} (cft or chrome)", 3600, "setup")
+        if mode == "bundled":  # wait for it (a download, the first time)
+            return await asyncio.to_thread(browser_host.ensure, self.profile)
+        return browser_host.ensure_soon(self.profile)  # auto: what is ready now; prepared meanwhile otherwise
+
+    async def _launch_bundled(self, rec: dict, driver: str):
+        """Start the bundled browser on the profile with no window, attach over its debugging port, and open the
+        one window already off screen and in the background: nothing is ever drawn on screen and focus stays put
+        (macOS keeps a 40x41 px corner of it inside the display)."""
+        from . import browser_host
+
+        args = browser_host.launch_args(self.profile, driver, trim=bool(self.o.get("browser_trim", True)))
+        port_file = self.profile / "DevToolsActivePort"
+        started = time.time()
+        self._proc = subprocess.Popen(
+            [rec["exe"], *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self._watch = watchdog(self._proc.pid)
+        self._bundled = rec["version"]
+        port = None
+        for _ in range(300):
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"it exited at start (code {self._proc.returncode}; is the profile open in another browser?)"
+                )
+            try:
+                if port_file.stat().st_mtime >= started - 1:  # not a stale file from an earlier run
+                    port = int(port_file.read_text().split()[0])
+                    break
+            except (OSError, ValueError, IndexError):
+                pass
+            await asyncio.sleep(0.1)
+        if not port:
+            raise RuntimeError("it did not open its debugging port within 30 s")
+        browser = await self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=30000)
+        self._ctx = browser.contexts[0]
+        return await self._parked_page(window=True)
+
+    async def _parked_page(self, window: bool):
+        """bundled: a new page created in the background, as a tab of the existing window or (window=True) in a
+        new window placed off screen as it is made."""
+        params = {"url": "about:blank", "background": True}
+        if window:
+            params.update(newWindow=True, left=20000, top=20000, width=1180, height=860)
+        known = set(self._ctx.pages)
+        cdp = await self._ctx.browser.new_browser_cdp_session()
+        try:
+            async with self._ctx.expect_page(timeout=10000) as info:
+                await cdp.send("Target.createTarget", params)
+            page = await info.value
+        finally:
+            await cdp.detach()
+        if page in known:
+            raise RuntimeError("the new tab was an existing one")
+        return page
+
+    def _reap(self, proc, watch):
+        """Wait for the bundled browser to exit after Browser.close; end it if it does not (only ever this process,
+        which this bridge started)."""
+        try:
+            if proc:
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=10)
+        finally:
+            stop_watchdog(watch)
 
     async def _park(self):
         """quiet: push the window past the bottom right corner of the screen (macOS keeps a 40 pixel corner of it
@@ -1408,7 +1537,12 @@ class Bridge:
 
     async def _new_tab(self):
         page = None
-        if self.o["quiet"] and not self.o["headless"]:
+        if (self.host or self)._bundled:  # a background tab of the off-screen window; nothing to hide or park
+            try:
+                page = await self._parked_page(window=not self._ctx.pages)
+            except Exception:  # noqa: BLE001
+                page = None
+        elif self.o["quiet"] and not self.o["headless"]:
             # an ordinary new tab brings the hidden Chrome back on screen and takes the keyboard; a background tab
             # does not take the keyboard, and hiding again right after keeps the window off screen
             try:
@@ -1424,7 +1558,7 @@ class Bridge:
                 page = None
         if page is None:
             page = await self._ctx.new_page()
-        if self.o["quiet"] and not self.o["headless"]:
+        if self.o["quiet"] and not self.o["headless"] and not (self.host or self)._bundled:
             await self._park()
             hide_chrome(self.profile)
 
@@ -1451,8 +1585,13 @@ class Bridge:
             return
         self._sessions.clear()
         ctx, pw, self._ctx, self._pw, self._page = self._ctx, self._pw, None, None, None
+        proc, watch, bundled = self._proc, self._watch, self._bundled
+        self._proc = self._watch = self._bundled = None
         try:
-            if ctx:
+            if ctx and bundled:  # a browser this bridge started itself: ask it to quit (it exits, profile saved)
+                cdp = await ctx.browser.new_browser_cdp_session()
+                await asyncio.wait_for(cdp.send("Browser.close"), 10)
+            elif ctx:
                 await ctx.close()
         except Exception:  # noqa: BLE001
             pass
@@ -1461,6 +1600,8 @@ class Bridge:
                 await pw.stop()
         except Exception:  # noqa: BLE001
             pass
+        if proc or watch:
+            await asyncio.to_thread(self._reap, proc, watch)
         self._closing = False
 
     async def release(self):
@@ -2175,6 +2316,37 @@ def make_bridge(base_url: str, options: dict | None = None, host=None):
     return Bridge(base_url, options, host=next(iter(hosts.values()), None))
 
 
+def watchdog(pid: int):
+    """A tiny shell that ends the bundled browser `pid` when this process goes away, however it goes (even
+    SIGKILL): it waits on a pipe only this process holds. Without it a background-only browser, which has no Dock
+    icon and no window on screen, could be left running unseen. Its own session, so Ctrl+C here leaves it to act."""
+    try:
+        return subprocess.Popen(
+            ["/bin/sh", "-c", f"read _ignored; kill -TERM {int(pid)} 2>/dev/null"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+
+def stop_watchdog(watch):
+    """After the browser has exited: end the watchdog without letting it signal (the pid could be reused)."""
+    if not watch:
+        return
+    try:
+        watch.kill()
+        watch.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        watch.stdin.close()
+    except OSError:
+        pass
+
+
 def hide_chrome(profile: Path):
     """Hide (as Cmd+H does) the Chrome that runs on this profile; the user's own Chrome is another process and is
     left alone. Best effort: needs macOS and permission to use System Events."""
@@ -2211,14 +2383,20 @@ def notify(text: str):
 # ---- the one-time sign-in ---------------------------------------------------------------------------------------------
 def login_window(bridge: Bridge, wait_min: float = 45) -> int:
     """`provenance-core weblogin`: an ordinary Chrome window on the dedicated profile, not driven by anything. You
-    sign in by hand and quit that Chrome (Cmd+Q); then the profile is checked once."""
-    if not os.path.exists(CHROME):
-        print(f"Google Chrome not found at {CHROME}")
+    sign in by hand and quit that Chrome (Cmd+Q); then the profile is checked once. Always a normal window (a
+    background-only browser cannot take the keyboard): the installed Chrome, or, when the bundled browser has
+    already written the profile with a newer version than that Chrome, the bundled build's plain (normal) copy."""
+    from . import browser_host
+
+    plain = browser_host.login_app(bridge.profile)
+    exe = str(browser_host.app_exe(plain)) if plain else CHROME
+    if not os.path.exists(exe):
+        print(f"Google Chrome not found at {exe}")
         return 2
     bridge.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     # the same key-storage switches Playwright's Chrome uses, so both read the same cookie jar
     cmd = [
-        CHROME,
+        exe,
         f"--user-data-dir={bridge.profile}",
         "--use-mock-keychain",
         "--password-store=basic",
