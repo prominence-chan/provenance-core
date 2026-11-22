@@ -701,6 +701,22 @@ def test_full_chat_moves_to_a_new_chat_in_the_same_request(mock, tmp_path):
 
 
 @browser
+def test_a_guest_bridge_works_in_the_hosts_chrome(mock, tmp_path):
+    async def go(b):
+        guest = cw.Bridge(mock.url, {**b.o, "reuse_chat": True}, home=tmp_path / "guest", host=b)
+        first = await b.complete("auto", dict(USER))
+        second = await guest.complete("auto", dict(USER))
+        same, tabs = guest._ctx is b._ctx, len(b._ctx.pages)
+        await guest._shutdown()  # closes the guest's tabs only
+        third = await b.complete("auto", dict(USER))
+        return [r["choices"][0]["message"]["content"] for r in (first, second, third)], same, tabs, guest.profile == b.profile
+
+    texts, same, tabs, same_profile = scenario(mock, tmp_path, go)
+    assert texts == ["ok", "ok", "ok"] and same and tabs == 2
+    assert same_profile and len(mock.sent) == 3
+
+
+@browser
 def test_named_model_can_fall_back_to_auto(mock, tmp_path):
     mock.state["model"] = "Auto"
     mock.state["models"] = ["Auto"]

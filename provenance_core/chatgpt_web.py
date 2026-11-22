@@ -1139,8 +1139,11 @@ class Bridge:
         clock=time.time,
         rand=random.uniform,
         account: str | None = None,
+        host: "Bridge | None" = None,
     ):
         self.account = account
+        self.host = host  # another Bridge whose Chrome this one works in, as extra tabs (`share:` in the catalog)
+        self._launch = asyncio.Lock()
         self.base_url = base_url.rstrip("/")
         self.o = {**DEFAULTS, **(options or {})}
         if env(
@@ -1153,6 +1156,8 @@ class Bridge:
         kind = self.o.get("site") or "chatgpt"
         base = Path(self.o["profile"] or self.home / f"{kind}-web-profile").expanduser()
         self.profile = base.with_name(base.name + tag)
+        if host:
+            self.profile = host.profile
         self.state_path = self.home / f"{kind}_web{tag}.json"
         self.busy = 0  # requests in flight or queued on this account (the pool spreads by it)
         self.sleep, self.clock, self.rand = sleep, clock, rand
@@ -1229,6 +1234,21 @@ class Bridge:
 
     # ---- the browser ---------------------------------------------------------------------------------------------
     async def _ensure_page(self):
+        if not self.host:
+            async with self._launch:
+                return await self._ensure_own_page()
+        # a guest in another bridge's Chrome: its own tabs there, reopened whenever that Chrome was restarted
+        if self._page is not None and not self._page.is_closed() and self._ctx is not None and self._ctx is self.host._ctx:
+            return self._page
+        self._sessions.clear()
+        self._page, self._gone = None, False
+        async with self.host._launch:
+            await self.host._ensure_own_page()
+        self._ctx, self._pw = self.host._ctx, self.host._pw
+        self._page = await self._new_page()
+        return self._page
+
+    async def _ensure_own_page(self):
         if self._page is not None and not self._page.is_closed() and not self._gone:
             return self._page
         gone, self._gone = self._gone, False
@@ -1343,6 +1363,18 @@ class Bridge:
 
     async def _shutdown(self):
         self._closing = True
+        if self.host:  # only this bridge's tabs: the Chrome belongs to the host
+            pages = [x["page"] for x in self._sessions.values()] + [self._page]
+            self._sessions.clear()
+            self._ctx = self._pw = self._page = None
+            for pg in pages:
+                try:
+                    if pg and not pg.is_closed():
+                        await pg.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._closing = self._gone = False
+            return
         self._sessions.clear()
         ctx, pw, self._ctx, self._pw, self._page = self._ctx, self._pw, None, None, None
         try:
@@ -1763,6 +1795,7 @@ class Bridge:
             else:
                 if key and session:
                     self._sessions.pop(key)
+                if key and session and not session["page"].is_closed():
                     page = session["page"]  # a changed transcript starts a fresh chat in its own tab
                 else:
                     await self._guarded(self._ensure_page)
@@ -1875,7 +1908,7 @@ class Bridge:
             return data
         finally:
             self._last_done = self.clock()
-            self._arm_idle()
+            (self.host or self)._arm_idle()
             self.busy -= 1
             self.lock.release()
 
@@ -1916,9 +1949,11 @@ class BridgePool:
     to the account already holding its chat, else to the least busy account that is not cooling down; an account
     that turns it away passes it to the next."""
 
-    def __init__(self, base_url: str = "https://chatgpt.com", options: dict | None = None, **kw):
+    def __init__(self, base_url: str = "https://chatgpt.com", options: dict | None = None, hosts=None, **kw):
         names = [str(n) for n in (options or {}).get("accounts") or ["main"]]
-        self.bridges = {n: Bridge(base_url, options, account=n, **kw) for n in dict.fromkeys(names)}
+        self.bridges = {
+            n: Bridge(base_url, options, account=n, host=(hosts or {}).get(n), **kw) for n in dict.fromkeys(names)
+        }
         first = next(iter(self.bridges.values()))
         self.o, self.profile, self.base_url = first.o, first.profile, first.base_url
         self._turn = 0
@@ -2000,9 +2035,13 @@ class BridgePool:
         }
 
 
-def make_bridge(base_url: str, options: dict | None = None):
-    """A Bridge, or a BridgePool when the provider lists `accounts`."""
-    return BridgePool(base_url, options) if (options or {}).get("accounts") else Bridge(base_url, options)
+def make_bridge(base_url: str, options: dict | None = None, host=None):
+    """A Bridge, or a BridgePool when the provider lists `accounts`. `host`: the bridge (or pool) of the provider
+    named by `share:`; this one then works in the same Chrome windows, account by account, as extra tabs."""
+    hosts = getattr(host, "bridges", None) or ({"main": host} if host else {})
+    if (options or {}).get("accounts"):
+        return BridgePool(base_url, options, hosts=hosts)
+    return Bridge(base_url, options, host=next(iter(hosts.values()), None))
 
 
 def hide_chrome(profile: Path):

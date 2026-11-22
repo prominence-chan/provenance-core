@@ -64,7 +64,8 @@ class Router:
 
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
-            self.bridges[provider] = make_bridge(p.base_url, p.options)
+            share = (p.options or {}).get("share")  # work inside another web provider's Chrome windows
+            self.bridges[provider] = make_bridge(p.base_url, p.options, self.bridge(share) if share else None)
         return self.bridges[provider]
 
     def web_ok(self, endpoint: str) -> bool:
