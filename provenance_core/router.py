@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import compact, prune
+from . import compact, context_signal, prune
 from .catalog import Catalog, Model
 from .state import State
 
@@ -273,6 +273,7 @@ class Router:
             print(f"prune: {m.id} history {prune.summary(pruned)}", flush=True)
         if compacted:
             print(f"compact: {m.id} history {compact.summary(compacted)}", flush=True)
+        context_signal.note_compaction(compacted)
         payload = {**{k: v for k, v in body.items() if not k.startswith("_")}, "model": m.model, "stream": stream}
         headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
         t0 = time.time()
@@ -316,6 +317,7 @@ class Router:
         def done(data):
             msg = data["choices"][0]["message"]
             web = data["pcore"]["web"]
+            context_signal.note_web(web)
             log(
                 f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
                 + (", repaired" if web.get("repaired") else "")

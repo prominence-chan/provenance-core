@@ -25,6 +25,7 @@ from collections import OrderedDict
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import context_signal
 from . import ledger as usage_ledger
 from .adapters import (
     Target,
@@ -41,7 +42,7 @@ from .adapters import (
     session_key,
     text_of,
 )
-from .router import NoCapacity, Router
+from .router import NoCapacity, Router, estimate_tokens
 from .settings import env
 
 STORE_MAX = 256
@@ -404,6 +405,15 @@ class Store:
         return self.data.get(rid)
 
 
+def too_big(router: Router, body: dict, target: Target) -> bool:
+    """Is the request bigger than every model of its tier takes whole? (Then no capacity means the history no longer
+    fits, not that the sources are busy.)"""
+    if not target.tier:
+        return False
+    sizes = [m.context for m in router.catalog.models_in(target.tier)]
+    return bool(sizes) and estimate_tokens(body) > max(sizes)
+
+
 def register(app, router: Router, token: str | None):
     store = Store()
     app.state.responses_store = store
@@ -438,9 +448,10 @@ def register(app, router: Router, token: str | None):
             body["_single_tool_call"] = True  # a hint for the chatgpt_web prompt; dropped before any HTTP provider
         rid = "resp_" + secrets.token_hex(16)
         key, turn = usage_ledger.request_keys(req, session)
+        strain = context_signal.begin()  # what fitting the history took (context_signal.py)
 
         def note(m, inp: int | None, out: int | None):
-            ledger.record(key, m.id, router.catalog.tier_of(m), turn, inp, out)
+            ledger.record(key, m.id, router.catalog.tier_of(m), turn, inp, out, ctx=context_signal.flags(strain))
 
         try:
             if req.get("stream"):
@@ -453,6 +464,8 @@ def register(app, router: Router, token: str | None):
                 )
             data, m = await complete(router, body, target, session, web=router.web_ok("responses"))
         except NoCapacity as e:
+            if too_big(router, body, target):
+                ledger.record(key, "", target.tier, turn, ctx=["over"])  # served by nothing: a context entry only
             return error(503, str(e), "server_error", "no_capacity")
         output, finish = items_from_chat(data, custom, shell, single)
         u = data.get("usage") or {}

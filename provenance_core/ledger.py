@@ -11,8 +11,13 @@ from before a restart still resolve. The file is compacted to the newest entries
 
 GET /v1/pcore/usage?key=...&turn=...&since=...&until=... (since/until in unix seconds) returns per-model counts:
 {"key", "turn", "requests", "input_tokens", "output_tokens", "models": [{"model", "tier", "requests",
-"input_tokens", "output_tokens"}]} sorted by requests. With `turn`, entries carrying that turn id match; entries
-without a turn id match only by the window (when one is given)."""
+"input_tokens", "output_tokens"}], "context": {"<flag>": n}} sorted by requests. With `turn`, entries carrying that
+turn id match; entries without a turn id match only by the window (when one is given).
+
+An entry may also carry "ctx": what fitting the history into its model took (context_signal.py: compacted, trimmed,
+restarted, ...). "context" counts the matching requests per flag (empty when nothing had to be done). A request no
+model could take because of its size is an entry with an empty model and ctx ["over"]: counted in "context", not in
+"requests" or "models"."""
 
 from __future__ import annotations
 
@@ -60,7 +65,7 @@ class Ledger:
                         e = json.loads(line)
                     except ValueError:
                         continue
-                    if isinstance(e, dict) and e.get("key") and e.get("model"):
+                    if isinstance(e, dict) and e.get("key") and (e.get("model") or e.get("ctx")):
                         self.entries.append(e)
         except OSError:
             return
@@ -87,6 +92,7 @@ class Ledger:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         ts: float | None = None,
+        ctx: list[str] | None = None,
     ) -> dict:
         e = {
             "ts": round(ts if ts is not None else time.time(), 3),
@@ -99,6 +105,8 @@ class Ledger:
             e["in"] = int(input_tokens)
         if output_tokens is not None:
             e["out"] = int(output_tokens)
+        if ctx:
+            e["ctx"] = list(ctx)
         with self.lock:
             self.entries.append(e)
             if self.path:
@@ -124,6 +132,11 @@ class Ledger:
             rows = [e for e in rows if e.get("turn") == turn or (not e.get("turn") and windowed and in_window(e))]
         else:
             rows = [e for e in rows if in_window(e)]
+        context: dict[str, int] = {}
+        for e in rows:
+            for f in e.get("ctx") or ():
+                context[f] = context.get(f, 0) + 1
+        rows = [e for e in rows if e.get("model")]
         models: dict[str, dict] = {}
         for e in rows:
             m = models.setdefault(
@@ -141,6 +154,7 @@ class Ledger:
             "input_tokens": sum(m["input_tokens"] for m in out),
             "output_tokens": sum(m["output_tokens"] for m in out),
             "models": out,
+            "context": context,
         }
 
 
