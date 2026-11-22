@@ -50,6 +50,32 @@ def create_app(
         tiers = [t for t, _ in router.catalog.tiers]
         raise HTTPException(404, f"unknown model {name}; use one of {tiers} or a catalog id")
 
+    started = time.time()
+
+    @app.get("/health")
+    async def health(authorization: str | None = Header(None)):
+        """For the app that started this router (and anyone checking which router answers): the process, its home,
+        and what it can serve right now. Cheap: nothing is opened or fetched."""
+        check(authorization)
+        cat = router.catalog
+        api = [p for p in cat.providers.values() if p.type == "openai"]
+        web = [n for n, p in cat.providers.items() if p.type == "chatgpt_web"]
+        return {
+            "ok": True,
+            "service": "provenance-core",
+            "version": __version__,
+            "pid": os.getpid(),
+            "home": str(home_dir()),
+            "uptime_s": int(time.time() - started),
+            "api": {
+                "providers": len(api),
+                "usable": sum(p.usable for p in api),
+                "models": sum(1 for m in cat.models.values() if not cat.is_web(m) and cat.providers[m.provider].usable),
+            },
+            "web": {"providers": len(web), "enabled": [n for n in web if cat.providers[n].usable]},
+            "tiers": [t for t, _ in cat.tiers],
+        }
+
     @app.get("/v1/sources")
     async def sources(authorization: str | None = Header(None)):
         """Per tier: what it can be served from (each signed-in chat model, and the pooled API models as one), how
@@ -227,6 +253,15 @@ def create_app(
     setup = web_setup.WebSetup(router)
     app.state.web_setup = setup
     app.router.on_shutdown.append(setup.close)
+
+    async def close_browsers():  # on shutdown: no browser is left running (a sign-in window was closed just above)
+        for b in list(router.bridges.values()):
+            try:
+                await b.release()
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                pass
+
+    app.router.on_shutdown.append(close_browsers)
 
     def fail(e: Exception, state: str | None = None):
         msg = str(e).strip("'\"")
