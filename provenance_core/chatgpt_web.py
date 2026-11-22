@@ -71,9 +71,13 @@ runs every tool block you write and sends back its output as the next message; n
 computer.
 - You know nothing about this machine, its files, projects, processes or anything "local" or "mine" except what \
 appears in this conversation. Find out by running commands, never from memory or by guessing.
+- A tool block is plain text in your reply. It will not appear in your own tool list and does not need to: writing \
+the block is the call, and it always works.
 - Do not use web search, browsing, Python / code execution, file analysis, canvas, memory or image tools. They run \
-on OpenAI's servers, cannot see my computer, and waste the turn. If the task really needs the internet, fetch it \
-with a command (curl) on my machine.
+in a sandbox on OpenAI's servers, not on my computer: a path like /Users/... does not exist there, so whatever \
+they find (or fail to find) is wrong, and it wastes the turn. If the task really needs the internet, fetch it with \
+a command (curl) on my machine.
+- Do not ask me whether to go on, search further or retry: just do it with the next block.
 - Think and plan as much as you need, then write every independent call this turn's tool rules allow, and stop. \
 Never write a tool's output yourself or claim something you have not seen in a tool result.
 - A failed command is information: try another way. A reply without a tool block ends the run, so only do that \
@@ -605,6 +609,9 @@ _STALL = re.compile(
     r"|\b(?:retry|try again|re-?run)\b[^.\n]{0,60}\b(?:enabled|available|tools?)\b"
     r"|\bplease (?:retry|re-?run|run|try again|execute|paste|share|provide|send)\b"
     r"|\bso (?:that )?I can (?:continue|proceed)\b"
+    r"|\b(?:would you like|do you want) me to\b|\b(?:should|shall) I (?:re-?run|retry|search|continue|proceed|go ahead|try|look|check|run)\b"
+    r"|\b(?:could not|couldn['’]t|did not|didn['’]t|was unable to|wasn['’]t able to) (?:find|locate|see|access)\b"
+    r"|\bno longer (?:accessible|available)\b"
     r"|\bI(?:['’]ll| will| am going to|['’]m going to)(?: \w+){0,2} (?:use|run|inspect|check|look|read|open|start|begin|apply|"
     r"patch|create|add|implement|update|fix|search|list|examine|proceed|continue|try|write|edit|verify|test|reproduce)\b"
     r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b",
@@ -626,7 +633,9 @@ def nudge_message(tools: dict) -> str:
     return (
         "That reply had no tool block, so nothing ran, and sent as it is it would end the agent's run. Nobody "
         "else runs commands for you here. A tool call is just text in your reply (it does not need your "
-        "function-calling interface) and my program runs it on my computer. If there is a next step, write the "
+        "function-calling interface) and my program runs it on my computer. Anything you looked up with your own "
+        "Python, file or search tool came from OpenAI's sandbox, not from my computer, so it does not count. If "
+        "there is a next step, write the "
         f"turn again and take it now by ending the turn with a block like this:\n\n{how}\n\n"
         "A command that failed is a reason to try another way, not to stop. If you really are finished, or need "
         "a decision from me, repeat your answer instead."
@@ -1380,10 +1389,16 @@ class Bridge:
             await box.click(timeout=2500)
         except Exception:  # noqa: BLE001
             await box.focus(timeout=10000)
-        await box.fill(text, timeout=30000)
-        typed = await box.evaluate(
-            "el => (el.value !== undefined ? el.value : el.innerText || '').replace(/\\s+/g, '').length"
-        )
+        want = len(re.sub(r"\s+", "", text))
+        for attempt in range(3):  # the editor is sometimes not ready right after the previous reply: type again
+            await box.fill(text, timeout=30000)
+            typed = await box.evaluate(
+                "el => (el.value !== undefined ? el.value : el.innerText || '').replace(/\\s+/g, '').length"
+            )
+            if typed >= 0.9 * want or attempt == 2:
+                break
+            await asyncio.sleep(1.5)
+            await box.focus(timeout=10000)
         if typed < 0.9 * len(re.sub(r"\s+", "", text)):
             raise WebError(f"the composer took {typed} of {len(text)} characters (message too long for the page?)")
         self.save(count=self.load().get("count", 0) + 1)

@@ -77,7 +77,7 @@ def test_prompt_holds_the_whole_request():
         "<<<tool result: shell>>>\na.py\nb.py",
         "<<<user>>>\nand now?",
         "At most one tool block",
-        "cannot see my computer",
+        "not on my computer",
         "Shorthand for `apply_patch` (body = `input`)",
     ):
         assert piece in prompt
@@ -721,6 +721,8 @@ def test_stalled_replies():
         "hit an environment error. I haven't changed any files yet. Please retry the shell inspection so I can continue.",
         "Next, I'll patch the config.",
         "Let me check the tests first.",
+        "I couldn’t find a directory matching “Olympus” under /Users/yufan. Would you like me to search the rest?",
+        "The previous search process is no longer accessible. Should I rerun the Olympus project search?",
     ):
         assert cw.stalled(t, SCHEMAS), t
     for t in (
