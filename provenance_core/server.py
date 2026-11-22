@@ -10,7 +10,9 @@ POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_
 POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py
 /web/*                      account setup for the web-chat bridge from the app, see web_setup.py
 GET  /health                is it up, which process, what it serves (for the app that started it)
-/pool/keys                  API keys for the token pool, set from the app, see pool_keys.py"""
+/pool/keys                  API keys for the token pool, set from the app, see pool_keys.py
+/codex-sub/<key>/backend-api/*  Codex on your own ChatGPT sign-in, forwarded to OpenAI with history pruning, see
+                            codex_sub.py (the key is derived from PCORE_TOKEN; Authorization is the caller's own)"""
 
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import __version__, anthropic_api, pool_keys, responses_api, web_setup
+from . import __version__, anthropic_api, codex_sub, pool_keys, responses_api, web_setup
 from .catalog import load
 from .router import NoCapacity, Router, estimate_tokens
 from .settings import env, home_dir
@@ -377,6 +379,7 @@ def create_app(
 
     anthropic_api.register(app, router, token)
     responses_api.register(app, router, token)
+    codex_sub.register(app, router, token)
 
     @app.api_route(
         "/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], include_in_schema=False

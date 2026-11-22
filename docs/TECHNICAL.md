@@ -50,6 +50,8 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
   model of the tier takes the history at all: the request failed). `compacted` and `summarised` are normal for any
   long thread; `trimmed`, `restarted` and `over` mean it no longer fits even compacted, and Provenance.app then
   suggests continuing the thread in Codex or Claude Code
+- `/codex-sub/<key>/backend-api/*`: Codex on your own ChatGPT sign-in, forwarded to OpenAI with its history
+  pruned (see "Codex on your own sign-in")
 - `GET /status`: tiers, scores, calibration, headroom, health, latency
 - `GET /health`: `{ok, service, version, pid, home, uptime_s, api: {providers, usable, models}, web: {providers,
   enabled}, tiers}`; cheap (nothing is opened or fetched), for the app that started the router and for telling
@@ -172,6 +174,48 @@ model can still read. Options: `keep_turns`, `step`, `min_dup_chars`, `run_lines
 Each request records what was removed (per rule: count and characters saved): the bridge's log line (`history saved
 N of M chars (rule count/chars, ...)`), `pcore.web.pruned` in its completion, and for API models a `prune:` log line
 and `pcore.prune` in the response.
+
+## Codex on your own sign-in (`/codex-sub/…`, `codex_sub.py`)
+
+A pass-through for Codex (the provenance binary) on the user's own ChatGPT / Codex sign-in: the binary keeps its own
+login (auth.json, token refresh, account id) and is only pointed here, and the router forwards its requests to
+OpenAI's Codex backend with the history pruned on the way. Provenance.app's "Run Codex through Provenance" uses it.
+
+```sh
+provenance app-server -c model_provider="openai" \
+  -c openai_base_url="http://127.0.0.1:4141/codex-sub/<key>/backend-api/codex" \
+  -c features.enable_request_compression=false
+```
+
+- **Forwarding**: `/codex-sub/<key>/backend-api/<path>` goes to `<upstream>/backend-api/<path>`
+  (`PCORE_CODEX_SUB_UPSTREAM`, default `https://chatgpt.com`, the URL the binary itself would use) with the method,
+  query, body and the caller's own headers (minus hop-by-hop ones and `X-PCore-Prune`); the answer comes back as it
+  came: status, headers (`Retry-After`, `Content-Encoding`, rate-limit headers), body streamed chunk by chunk. A
+  websocket upgrade gets `426`, which makes the binary use HTTP for the session at once (over its Responses websocket
+  it sends only a turn's new items, which leaves nothing to prune). What the binary sends to its ChatGPT base
+  (`chatgpt_base_url`: usage, accounts, workspace routing) and its token refreshes still go to OpenAI directly; leave
+  `chatgpt_base_url` alone, or the binary's workspace routing sends model requests to the workspace's backend instead.
+- **Treatment**: only `POST …/codex/responses`. Its `input` items are pruned in place (`prune_responses.py`): the text
+  of old tool outputs (`function_call_output`, `custom_tool_call_output`, `local_shell_call_output` with a plain-string
+  `output`) and the file text in old whole-file write calls, by the rules above, in mode `stable`. Never touched:
+  `instructions`, tools, messages of any role, reasoning items (encrypted content included), ids, call ids, the
+  number and order of items; `dup_system` and `filler` are not used; a call carrying encrypted content or arguments
+  keeps its arguments. Consecutive requests of a thread share their pruned prefix byte for byte between boundary
+  moves (`tests/test_codex_sub.py` checks it), so OpenAI's prompt cache keeps hitting. On by default; `prune:
+  {codex: false}` (or options) in the catalog, `PCORE_PRUNE=0`, the header `X-PCore-Prune: off` or the body field
+  `"pcore": {"prune": false}` (not forwarded) turn it off. A body that can't be read (zstd without a zstd module,
+  unknown items) is forwarded byte for byte. A request whose pruning changed nothing is also forwarded byte for byte.
+- **Compaction** is left to Codex: its own remote compaction (`…/responses/compact`) is forwarded untouched; compact.py
+  works on chat messages and asks a model for its brief, which has no safe counterpart for encrypted Responses items.
+- **Ledger**: each model request is an entry (thread / turn from `client_metadata`, tier `codex`, the token counts and
+  `cached` tokens from `response.completed`, `pruned: {before, after}` in characters of `input`); `/v1/pcore/usage`
+  sums them as `pruned` and `cached_tokens`. A `codex-sub:` log line names the model and the characters saved.
+- **The key**: `Authorization` belongs to OpenAI here, so the caller proves itself in the path instead:
+  `<key>` = the first 32 hex digits of sha256(`"provenance-codex-sub\0" + PCORE_TOKEN`) (`codex_sub.path_key`), so a
+  key seen in a log or an error message neither gives the token away nor opens any other route. Without
+  `PCORE_TOKEN` the router is open and any key is taken. The access log shows the path as `/codex-sub/***/…`.
+  `GET /codex-sub/<key>/_health` answers `{ok, upstream, prune}` without forwarding anything. Nothing on this route
+  logs, prints or stores a header value, an account id or a token.
 
 ## Context compaction
 
@@ -733,7 +777,8 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_CHATGPT_WEB` | unset | `1` turns the web providers on (one turned off from the app stays off), `0` forces them all off |
 | `PCORE_BROWSER_APP` | unset | the bundled browser to use: a Chrome for Testing `.app`, or the folder that holds one (Provenance.app's `Contents/Resources/browser`) |
 | `PCORE_BROWSER_DIR` | `<PCORE_HOME>/browser` | where the bundled browser is prepared |
-| `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `prune`) |
+| `PCORE_PRUNE` | unset | history pruning: `1` / `all`, `api`, `web`, `codex`, or `0` to force it off (overrides the catalog's `prune`) |
+| `PCORE_CODEX_SUB_UPSTREAM` | `https://chatgpt.com` | where `/codex-sub/<key>/backend-api/…` forwards to |
 | `PCORE_COMPACT` | unset | summarising compaction: `1` / `all`, `api`, `web`, or `0` to force it off (overrides the catalog's `compact`) |
 
 Provider keys use the provider's own variable names (`GEMINI_API_KEY`, `CLOUDFLARE_API_TOKEN`, ...; see

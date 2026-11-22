@@ -17,7 +17,13 @@ turn id match; entries without a turn id match only by the window (when one is g
 An entry may also carry "ctx": what fitting the history into its model took (context_signal.py: compacted, trimmed,
 restarted, ...). "context" counts the matching requests per flag (empty when nothing had to be done). A request no
 model could take because of its size is an entry with an empty model and ctx ["over"]: counted in "context", not in
-"requests" or "models"."""
+"requests" or "models".
+
+An entry may carry "pruned": {"before": chars, "after": chars} of the history as the client sent it and as it went
+on, for a request whose history the router pruned (the Codex pass-through, codex_sub.py, records every request it
+looked at, saved or not). "pruned" in the answer sums them: {"requests", "before", "after", "saved"}; absent when no
+matching entry has one. "cached_tokens" sums the input tokens a provider reported as served from its prompt cache,
+for entries that carry it ("cached")."""
 
 from __future__ import annotations
 
@@ -93,6 +99,8 @@ class Ledger:
         output_tokens: int | None = None,
         ts: float | None = None,
         ctx: list[str] | None = None,
+        pruned: dict | None = None,
+        cached_tokens: int | None = None,
     ) -> dict:
         e = {
             "ts": round(ts if ts is not None else time.time(), 3),
@@ -107,6 +115,10 @@ class Ledger:
             e["out"] = int(output_tokens)
         if ctx:
             e["ctx"] = list(ctx)
+        if cached_tokens is not None:
+            e["cached"] = int(cached_tokens)
+        if pruned:
+            e["pruned"] = {"before": int(pruned.get("before") or 0), "after": int(pruned.get("after") or 0)}
         with self.lock:
             self.entries.append(e)
             if self.path:
@@ -137,6 +149,7 @@ class Ledger:
             for f in e.get("ctx") or ():
                 context[f] = context.get(f, 0) + 1
         rows = [e for e in rows if e.get("model")]
+        cut = [e["pruned"] for e in rows if isinstance(e.get("pruned"), dict)]
         models: dict[str, dict] = {}
         for e in rows:
             m = models.setdefault(
@@ -147,7 +160,7 @@ class Ledger:
             m["input_tokens"] += e.get("in") or 0
             m["output_tokens"] += e.get("out") or 0
         out = sorted(models.values(), key=lambda m: (-m["requests"], -m["output_tokens"], m["model"]))
-        return {
+        res = {
             "key": key,
             "turn": turn,
             "requests": len(rows),
@@ -156,6 +169,12 @@ class Ledger:
             "models": out,
             "context": context,
         }
+        if any("cached" in e for e in rows):  # input tokens the provider's prompt cache served (when it says)
+            res["cached_tokens"] = sum(e.get("cached") or 0 for e in rows)
+        if cut:
+            before, after = sum(p.get("before", 0) for p in cut), sum(p.get("after", 0) for p in cut)
+            res["pruned"] = {"requests": len(cut), "before": before, "after": after, "saved": before - after}
+        return res
 
 
 def register(app, ledger: Ledger, authorized_fn):
