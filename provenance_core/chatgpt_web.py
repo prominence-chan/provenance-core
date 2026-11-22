@@ -2103,6 +2103,19 @@ def login_window(bridge: Bridge, wait_min: float = 45) -> int:
         flush=True,
     )
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:  # the bridge's own Chromes are hidden: put this one in front so it is the one you see
+        time.sleep(1.5)
+        subprocess.Popen(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of (first process whose unix id is {proc.pid}) to true',
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
     try:
         proc.wait(timeout=wait_min * 60)
     except subprocess.TimeoutExpired:
