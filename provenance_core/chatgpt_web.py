@@ -1177,6 +1177,15 @@ class Bridge:
             # patchright (the approach CatGPT-Gateway uses): the same real Chrome and profile, driven without the
             # automation markers, so the site's automatic browser check treats it like the hand-opened window.
             # Launched the way patchright documents: real Chrome, persistent profile, no viewport, no extra flags.
+            hider = None
+            if self.o["quiet"] and not self.o["headless"]:
+
+                async def hide_early():  # Chrome shows its window as it starts: hide it the moment it exists
+                    for _ in range(25):
+                        await asyncio.sleep(0.15)
+                        hide_chrome(self.profile)
+
+                hider = asyncio.get_running_loop().create_task(hide_early())
             self._ctx = await self._pw.chromium.launch_persistent_context(
                 str(self.profile),
                 channel="chrome",
@@ -1197,6 +1206,8 @@ class Bridge:
             if self.o["quiet"] and not self.o["headless"]:
                 await self._park()
                 hide_chrome(self.profile)
+                if hider:
+                    hider.cancel()
         except Exception as e:  # noqa: BLE001 - profile in use (weblogin still open), Chrome missing, ...
             await self._shutdown()
             raise WebUnavailable(
