@@ -25,6 +25,7 @@ from collections import OrderedDict
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import ledger as usage_ledger
 from .adapters import (
     Target,
     UpstreamStream,
@@ -406,6 +407,9 @@ class Store:
 def register(app, router: Router, token: str | None):
     store = Store()
     app.state.responses_store = store
+    ledger = getattr(app.state, "usage_ledger", None) or usage_ledger.Ledger()
+    app.state.usage_ledger = ledger
+    usage_ledger.register(app, ledger, lambda request: authorized(request, token))
 
     @app.post("/v1/responses")
     async def responses(request: Request):
@@ -433,10 +437,17 @@ def register(app, router: Router, token: str | None):
         if single:
             body["_single_tool_call"] = True  # a hint for the chatgpt_web prompt; dropped before any HTTP provider
         rid = "resp_" + secrets.token_hex(16)
+        key, turn = usage_ledger.request_keys(req, session)
+
+        def note(m, inp: int | None, out: int | None):
+            ledger.record(key, m.id, router.catalog.tier_of(m), turn, inp, out)
+
         try:
             if req.get("stream"):
                 resp, m, t0 = await open_stream(router, body, target, session, web=router.web_ok("responses"))
-                gen = _stream(router, store, resp, m, t0, rid, req, model_name, body, convo, custom, shell, single)
+                gen = _stream(
+                    router, store, resp, m, t0, rid, req, model_name, body, convo, custom, shell, single, note
+                )
                 return StreamingResponse(
                     gen, media_type="text/event-stream", headers={"X-PCore-Model": m.id, "Cache-Control": "no-cache"}
                 )
@@ -457,6 +468,7 @@ def register(app, router: Router, token: str | None):
         )
         if req.get("store", True) is not False:
             store.put(rid, convo, out)
+        note(m, out["usage"]["input_tokens"], out["usage"]["output_tokens"])
         return JSONResponse(out, headers={"X-PCore-Model": m.id, "X-PCore-Tier": router.catalog.tier_of(m)})
 
     @app.get("/v1/responses/{rid}")
@@ -469,7 +481,7 @@ def register(app, router: Router, token: str | None):
         return s["response"]
 
 
-async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, custom, shell, single):
+async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, custom, shell, single, note=None):
     seq = 0
 
     def ev(kind: str, **data) -> bytes:
@@ -580,6 +592,8 @@ async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, cust
         if req.get("store", True) is not False:
             store.put(rid, convo, final)
         router.state.success(m, (time.time() - t0) * 1000)
+        if note:
+            note(m, inp, up.output_tokens())
         # always response.completed (status says "incomplete" on truncation): Codex treats response.incomplete as a
         # hard error and would drop the partial turn
         yield ev("response.completed", response=final)
