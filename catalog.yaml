@@ -63,11 +63,12 @@ models:
   # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
   - {provider: chatgpt-web, model: luna, score: 93, context: 64000}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
   # Other web chats (priors until measured through the page; see the providers above).
-  - {provider: qwen-web, model: qwen4-max, score: 50, context: 64000}
+  - {provider: qwen-web, model: qwen4-max, score: 93, context: 64000}   # measured 100 on the probe set 2026-11-21 (29 of 29); held at 93 = top of solstice, like luna
   - {provider: qwen-web, model: qwen3.7-plus, score: 50, context: 64000}
-  - {provider: zai-web, model: glm-5.3, score: 50, context: 64000}
-  # Z.ai guest (no sign-in) measured 53 and hit "Error code: 405" after about 20 messages.
-  - {provider: zai-web, model: glm-5.3-flash, score: 50, context: 64000}
+  # Z.ai is left out: as a guest GLM-5.3-Flash measured 53 and the page answered "Error code: 405, try again later"
+  # after about 20 messages; signed in (2026-11-21) every request was refused the same way.
+  # - {provider: zai-web, model: glm-5.3, score: 50, context: 64000}
+  # - {provider: zai-web, model: glm-5.3-flash, score: 50, context: 64000}
   # Google AI Studio free tier (2026-11): Flash-class models only; the Pro / Gemini 4 models answer 429 with no
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}

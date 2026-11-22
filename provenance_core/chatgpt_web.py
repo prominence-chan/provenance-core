@@ -1179,6 +1179,7 @@ class Bridge:
         self.account = account
         self.host = host  # another Bridge whose Chrome this one works in, as extra tabs (`share:` in the catalog)
         self._launch = asyncio.Lock()
+        self._tabs = asyncio.Lock()  # one new tab at a time per Chrome: two at once could be handed the same tab
         self.base_url = base_url.rstrip("/")
         self.o = {**DEFAULTS, **(options or {})}
         if env(
@@ -1371,16 +1372,23 @@ class Bridge:
             pass
 
     async def _new_page(self):
+        async with (self.host or self)._tabs:
+            return await self._new_tab()
+
+    async def _new_tab(self):
         page = None
         if self.o["quiet"] and not self.o["headless"]:
             # an ordinary new tab brings the hidden Chrome back on screen and takes the keyboard; a background tab
             # does not take the keyboard, and hiding again right after keeps the window off screen
             try:
+                known = set(self._ctx.pages)
                 cdp = await self._ctx.new_cdp_session(self._ctx.pages[0])
                 async with self._ctx.expect_page(timeout=10000) as info:
                     await cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
                 page = await info.value
                 await cdp.detach()
+                if page in known:  # never hand out a tab that already belongs to a chat
+                    page = None
             except Exception:  # noqa: BLE001 - fall back to the ordinary way
                 page = None
         if page is None:
@@ -1510,8 +1518,8 @@ class Bridge:
         url = f"{self.base_url}{self.site['path']}" if self.site else f"{self.base_url}/?temporary-chat=true"
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:  # noqa: BLE001
-            if "interrupted" not in str(e):
+        except Exception as e:  # noqa: BLE001 - a tab that is still loading its blank page drops the first try
+            if "interrupted" not in str(e) and "ERR_ABORTED" not in str(e):
                 raise
             await asyncio.sleep(1.0)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
