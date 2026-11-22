@@ -2402,16 +2402,21 @@ class Bridge:
                     text, calls, extra = await self._guarded(run)
                 except WebUnsent as e:
                     if not reuse:
-                        raise
-                    # the chat is full or stopped taking messages: nothing was sent, so carry on in a fresh chat
-                    # with the history the caller sent (shortened), in the same request
-                    await self._dump(page, {"reason": str(e)}, "full")
-                    # the same first message a new chat gets (pruned, summarised or cut); a model's brief only if
-                    # one is already cached, since the window is held here
-                    reuse = False
-                    prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
-                    text, calls, extra = await self._guarded(run)
-                    extra["restarted"] = True
+                        # a new chat that did not take the message (a page not quite ready just after the browser
+                        # started): nothing was sent, so open the chat again and send once more
+                        await self.sleep(self.rand(1.0, 2.5))
+                        text, calls, extra = await self._guarded(run)
+                        extra["resent"] = True
+                    else:
+                        # the chat is full or stopped taking messages: nothing was sent, so carry on in a fresh
+                        # chat with the history the caller sent (shortened), in the same request
+                        await self._dump(page, {"reason": str(e)}, "full")
+                        # the same first message a new chat gets (pruned, summarised or cut); a model's brief only
+                        # if one is already cached, since the window is held here
+                        reuse = False
+                        prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
+                        text, calls, extra = await self._guarded(run)
+                        extra["restarted"] = True
             except Exception as e:
                 if key:
                     self._sessions.pop(key, None)  # the page may contain a partial reply
