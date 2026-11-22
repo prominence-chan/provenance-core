@@ -161,3 +161,61 @@ def test_calibration_grading():
 
     assert grade("so the answer is\n391", r"^\s*391\s*$")
     assert grade("6/(1-3/4)", "EVAL24:1346") and not grade("4*6*1*3", "EVAL24:1346")
+
+
+class FakeWeb:
+    """Stands in for a web bridge pool: only what the router asks about capacity."""
+
+    def __init__(self, remaining, busy=0):
+        self.remaining, self.busy = remaining, busy
+
+    def capacity(self, accounts=None):
+        return {"remaining": self.remaining, "busy": self.busy, "accounts": 3, "available": self.remaining > 0}
+
+
+def web_setup(tmp_path, monkeypatch):
+    for k in ("A_KEY", "B_KEY", "C_KEY"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setenv("PCORE_CHATGPT_WEB", "1")
+    cat = json.loads(json.dumps(CAT))
+    cat["providers"]["gpt"] = {"type": "chatgpt_web", "base_url": "https://gpt.test", "api_key_env": "none"}
+    cat["providers"]["qw"] = {"type": "chatgpt_web", "base_url": "https://qw.test", "api_key_env": "none"}
+    cat["models"] += [
+        {"provider": "gpt", "model": "Luna", "score": 88, "label": "GPT-6 Luna"},
+        {"provider": "qw", "model": "qwen4-max", "score": 86, "accounts": ["main"]},
+    ]
+    p = tmp_path / "catalog.yaml"
+    p.write_text(yaml.safe_dump(cat))
+    router = Router(load(p), State(clock=Clock()), httpx.AsyncClient(transport=httpx.MockTransport(lambda r: None)))
+    router.bridges = {"gpt": FakeWeb(0.5), "qw": FakeWeb(0.7)}
+    return router
+
+
+def test_sources_share_by_usage_left_and_can_be_pinned(tmp_path, monkeypatch):
+    router = web_setup(tmp_path, monkeypatch)
+    ids = lambda **kw: [m.id for m in router.candidates("tier-1", 100, web=True, **kw)]  # noqa: E731
+    src = {s["id"]: s for s in router.sources("tier-1")}
+    assert set(src) == {"luna", "qwen4-max", "pool"} and src["luna"]["label"] == "GPT-6 Luna"
+    assert src["pool"]["models"] == ["a/big", "b/big2"] and src["pool"]["label"] == "Token pool"
+    # nothing running: the fullest source first (the pool is untouched, then Qwen at 70%, then Luna at 50%)
+    assert ids() == ["a/big", "b/big2", "qw/qwen4-max", "gpt/Luna"]
+    router.inflight["a/big"] = 3  # a busy pool gives way
+    assert ids()[0] == "qw/qwen4-max"
+    assert ids(source="luna")[0] == "gpt/Luna" and len(ids(source="luna")) == 4  # the others stay as a fallback
+    router.state.remember("s", "gpt/Luna")  # a conversation stays where it was served
+    assert ids(session="s")[0] == "gpt/Luna"
+    assert ids(session="s", source="pool")[0] == "a/big"  # unless the user now pins something else
+    router.bridges["qw"].remaining = 0.0
+    assert "qw/qwen4-max" not in ids() or ids()[-1] == "qw/qwen4-max"
+    assert [m.id for m in router.candidates("tier-1", 100, web=False)] == ["a/big", "b/big2"]
+
+
+def test_pinned_model_names_resolve(tmp_path, monkeypatch):
+    from provenance_core.adapters import resolve_target
+
+    router = web_setup(tmp_path, monkeypatch)
+    t = resolve_target(router, "luna/tier-1", "down1")
+    assert (t.tier, t.source, t.label) == ("tier-1", "luna", "luna/tier-1")
+    assert resolve_target(router, "pool/tier-1", "none").source == "pool"
+    assert resolve_target(router, "nosuch/tier-1", "none").source is None
+    assert resolve_target(router, "gpt/Luna", "none").concrete == "gpt/Luna"

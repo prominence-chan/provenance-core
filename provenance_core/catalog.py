@@ -82,6 +82,8 @@ class Model:
     tags: list[str] = field(default_factory=list)
     pool: Limits | None = None  # the provider's shared limits (copied at load)
     shared_tpd: bool = False
+    label: str | None = None  # the name shown where a source can be picked (web models), e.g. "GPT-6 Luna"
+    accounts: list[str] | None = None  # web models: only these accounts of the provider have this model
 
 
 @dataclass
@@ -155,6 +157,8 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
             context=int(m.get("context", 32768)),
             limits=lim,
             tags=m.get("tags", []),
+            label=m.get("label"),
+            accounts=[str(a) for a in m["accounts"]] if m.get("accounts") else None,
         )
         prov = providers[m["provider"]]
         models[mid].pool = prov.pool if prov.pool.any() else None

@@ -46,6 +46,33 @@ def create_app(
         tiers = [t for t, _ in router.catalog.tiers]
         raise HTTPException(404, f"unknown model {name}; use one of {tiers} or a catalog id")
 
+    @app.get("/v1/sources")
+    async def sources(authorization: str | None = Header(None)):
+        """Per tier: what it can be served from (each signed-in chat model, and the pooled API models as one), how
+        much of each one's usage is left and how busy it is. `model` is the name a client sends to pin that source."""
+        check(authorization)
+        out = []
+        for t, _ in router.catalog.tiers:
+            out.append(
+                {
+                    "tier": t,
+                    "sources": [
+                        {
+                            "id": s["id"],
+                            "label": s["label"],
+                            "kind": s["kind"],
+                            "model": f"{s['id']}/{t}",
+                            "remaining": round(s["remaining"], 3),
+                            "busy": s["busy"],
+                            "available": s["available"],
+                            "pinnable": s["pinnable"],
+                        }
+                        for s in router.sources(t, web=router.web_ok("responses"))
+                    ],
+                }
+            )
+        return {"tiers": out}
+
     @app.get("/v1/models")
     async def models(authorization: str | None = Header(None)):
         check(authorization)

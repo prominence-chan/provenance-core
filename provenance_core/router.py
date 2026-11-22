@@ -48,6 +48,7 @@ class Router:
         self.state = state or State()
         self.client = client or httpx.AsyncClient(timeout=timeout)
         self.bridges: dict = {}  # provider name -> chatgpt_web.Bridge (made on first use)
+        self.inflight: dict[str, int] = {}  # model id -> requests being served right now
 
     # ---- selection -------------------------------------------------------------------------------------------
     def tiers_for(self, tier: str, fallback: str) -> list[str]:
@@ -78,15 +79,74 @@ class Router:
             if p.type == "chatgpt_web"
         )
 
+    # A tier is served from sources: each web model is one (a signed-in chat site: "GPT-6 Luna", "Qwen4-Max"), and
+    # all the API models of the tier together are one more, the token pool. A request that names only the tier goes
+    # to the source with the most of its usage left for the work it already has; a client may also pin a source.
+    def source_id(self, m: Model) -> str:
+        return m.model.lower() if self.catalog.is_web(m) else "pool"
+
+    def _source_load(self, models: list[Model], tokens: int = 1024) -> dict:
+        """remaining: share (0-1) of the source's usage that is left; busy: requests it is serving now."""
+        busy = sum(self.inflight.get(m.id, 0) for m in models)
+        if self.catalog.is_web(models[0]):
+            m = models[0]
+            c = self.bridge(m.provider).capacity(m.accounts)
+            ok = c["available"] and self.state.available(m)
+            return {
+                "remaining": c["remaining"] if ok else 0.0,
+                "busy": max(busy, c["busy"]),
+                "slots": max(1, c["accounts"]),
+                "available": ok,
+            }
+        heads = [self.state.headroom(m, tokens) for m in models if self.state.available(m)]
+        heads = [h for h in heads if h > 0]
+        return {
+            "remaining": sum(heads) / len(models) if heads else 0.0,
+            "busy": busy,
+            "slots": max(1, len(heads)),
+            "available": bool(heads),
+        }
+
+    def sources(self, tier: str, web: bool = True) -> list[dict]:
+        """The tier's sources, best first: most usage left per request already running on it."""
+        groups: dict[str, list[Model]] = {}
+        for m in self.catalog.models_in(tier):
+            if web or not self.catalog.is_web(m):
+                groups.setdefault(self.source_id(m), []).append(m)
+        out = []
+        for sid, ms in groups.items():
+            load = self._source_load(ms)
+            is_web = self.catalog.is_web(ms[0])
+            out.append(
+                {
+                    "id": sid,
+                    "label": (ms[0].label or ms[0].model) if is_web else "Token pool",
+                    "kind": "web" if is_web else "pool",
+                    "models": [m.id for m in ms],
+                    **load,
+                    "rank": load["remaining"] / (1 + load["busy"] / load["slots"]) if load["available"] else -1.0,
+                    # worth offering as a pin only while a fair part of its usage is left
+                    "pinnable": load["available"] and load["remaining"] >= 0.1,
+                }
+            )
+        return sorted(out, key=lambda s: -s["rank"])
+
     def candidates(
-        self, tier: str, tokens: int, session: str | None = None, fallback: str = "none", web: bool = False
+        self,
+        tier: str,
+        tokens: int,
+        session: str | None = None,
+        fallback: str = "none",
+        web: bool = False,
+        source: str | None = None,
     ) -> list[Model]:
         """`web`: include chatgpt_web models. Off by default so ensembles, calibration and anything that didn't ask
-        never reach the web bridge; the front ends pass it per the provider's `endpoints`."""
+        never reach the web bridge; the front ends pass it per the provider's `endpoints`. `source`: the pinned
+        source of the first tier, tried before the others. A conversation stays on the model that served it."""
         out: list[Model] = []
         sticky = self.state.sticky(session)
-        for t in self.tiers_for(tier, fallback):
-            ranked: list[Choice] = []
+        for i, t in enumerate(self.tiers_for(tier, fallback)):
+            by_source: dict[str, list[Choice]] = {}
             for m in self.catalog.models_in(t):
                 if not self.state.available(m) or m.context < tokens:
                     continue
@@ -97,12 +157,19 @@ class Router:
                     continue
                 lat = self.state.health.get(m.id)
                 lat_ms = lat.latency_ms if lat and lat.latency_ms else 3000
-                # score dominates (stability), headroom spreads load before a model hits its cap, latency breaks ties
+                # inside the pool: score dominates (stability), headroom spreads load, latency breaks ties
                 rank = m.score + 6 * head - min(lat_ms, 30000) / 10000
-                if m.id == sticky:
-                    rank += 1000
-                ranked.append(Choice(m, rank))
-            out += [c.model for c in sorted(ranked, key=lambda c: -c.rank)]
+                by_source.setdefault(self.source_id(m), []).append(Choice(m, rank))
+            order = [s["id"] for s in self.sources(t, web) if s["id"] in by_source]
+            if source and i == 0 and source in by_source:
+                order = [source] + [s for s in order if s != source]
+            tier_models = [c.model for s in order for c in sorted(by_source[s], key=lambda c: -c.rank)]
+            pinned_here = source and i == 0 and source in by_source
+            for m in tier_models:
+                if m.id == sticky and (not pinned_here or self.source_id(m) == source):
+                    tier_models = [m] + [x for x in tier_models if x is not m]
+                    break
+            out += tier_models
         return out
 
     # ---- calling ---------------------------------------------------------------------------------------------
@@ -162,16 +229,17 @@ class Router:
 
         bridge = self.bridge(m.provider)
         try:
+            only = {"accounts": m.accounts} if m.accounts and hasattr(bridge, "bridges") else {}
             if stream:
                 live = LiveStream(
-                    lambda on_text: bridge.complete(m.model, body, model_id=m.id, wait=wait, on_text=on_text),
+                    lambda on_text: bridge.complete(m.model, body, model_id=m.id, wait=wait, on_text=on_text, **only),
                     m.id,
                     on_done=done,
                 )
                 await live.first()
                 self.state.success(m, (time.time() - t0) * 1000)
                 return live, t0
-            data = await bridge.complete(m.model, body, model_id=m.id, wait=wait)
+            data = await bridge.complete(m.model, body, model_id=m.id, wait=wait, **only)
         except WebUnavailable as e:
             self.state.failure(m, retry_after=max(1.0, e.cooldown), rate_limited=True)
             log(f"unavailable for {int(e.cooldown)} s: {e.reason}")
@@ -196,29 +264,42 @@ class Router:
         fallback: str = "none",
         attempts: int = 4,
         web: bool = False,
+        source: str | None = None,
     ) -> tuple[dict, Model]:
         tokens = estimate_tokens(body)
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web)[:attempts]:
+        for m in self.candidates(tier, tokens, session, fallback, web, source)[:attempts]:
+            self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 data = await self.call(m, body)
                 self.state.remember(session, m.id)
                 return data, m
             except Exception as e:  # noqa: BLE001 - every provider error means "try the next one"
                 errors.append(str(e)[:200])
+            finally:
+                self.inflight[m.id] -= 1
         raise NoCapacity(f"no model in {tier} (fallback={fallback}) could serve this: {errors or 'none available'}")
 
     async def stream(
-        self, body: dict, tier: str, session: str | None = None, fallback: str = "none", web: bool = False
+        self,
+        body: dict,
+        tier: str,
+        session: str | None = None,
+        fallback: str = "none",
+        web: bool = False,
+        source: str | None = None,
     ):
         tokens = estimate_tokens(body)
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web)[:4]:
+        for m in self.candidates(tier, tokens, session, fallback, web, source)[:4]:
+            self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 resp, t0 = await self.call(m, body, stream=True)
             except Exception as e:  # noqa: BLE001
                 errors.append(str(e)[:200])
                 continue
+            finally:
+                self.inflight[m.id] -= 1
             self.state.remember(session, m.id)
             self.state.record(m, tokens)
             return resp, m, t0

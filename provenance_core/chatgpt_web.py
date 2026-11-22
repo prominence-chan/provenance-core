@@ -894,7 +894,8 @@ READ_JS = r"""(cfg) => {
     const code = el.querySelector('pre code') || el.querySelector('pre');
     const tagged = el.querySelector('[data-lang]');
     let lang = tagged ? tagged.getAttribute('data-lang') || '' : ((el.querySelector('[class*="language-"]') || el).className.match(/language-([\w+#.-]+)/) || [])[1] || '';
-    if (/^(code|text|plain|plaintext)$/.test(lang)) lang = '';
+    if (!lang && cfg.codeLang) { const l = el.querySelector(cfg.codeLang); if (l) lang = (l.textContent || '').trim().toLowerCase(); }
+    if (/^(code|text|plain|plaintext|code snippet)$/.test(lang) || /\s/.test(lang)) lang = '';
     const lines = code ? code.querySelectorAll(cfg.codeLine || '.never') : [];
     const text = (lines.length ? [...lines].map(l => l.textContent.replace(/\n$/, '')).join('\n') : (code ? code.textContent : el.innerText)).replace(/\n$/, '');
     const f = fence(text, 3);
@@ -1046,6 +1047,25 @@ SITES = {
         "login": 'button[aria-label="Log in"], a[href*="/auth"]',
         # code blocks are an editor widget that only draws the lines in view, so the finished reply is taken from
         # the page's own Copy button (the reply's markdown, as written) instead of from the elements
+        "copy": 'button[aria-label="Copy"]',
+    },
+    "gemini": {  # gemini.google.com, signed in; temporary chats via the page's toggle
+        "name": "Gemini",
+        "path": "/app",
+        "temp": 'button[aria-label="Turn off temporary chat"], chat-window.is-temporary-chat',
+        "temp_toggle": True,  # no url for it: the toggle is pressed after the page loads
+        "composer": 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
+        "send": 'button[aria-label="Send message"]',
+        "stop": 'button[aria-label="Stop response"]',
+        "user": "user-query",
+        "assistant": "model-response",
+        "root": "message-content .markdown",
+        "code": "code-block",
+        "codeLang": ".code-block-decoration > span",
+        "actions": 'model-response button[aria-label="Copy"]',
+        "model": '[data-test-id="bard-mode-menu-button"]',
+        "msg": ".conversation-container[id]",
+        "login": 'a[href*="accounts.google.com/ServiceLogin"], a[aria-label="Sign in"]',
         "copy": 'button[aria-label="Copy"]',
     },
 }
@@ -1243,6 +1263,12 @@ class Bridge:
             **({"account": self.account} if self.account else {}),
         }
 
+    def capacity(self, accounts=None) -> dict:
+        s = self.status()
+        cap = int(self.o["daily_cap"])
+        left = 0.0 if s["blocked"] or not cap else max(0, cap - s["today"]) / cap
+        return {"remaining": left, "busy": self.busy, "accounts": 0 if s["blocked"] else 1, "available": left > 0}
+
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
         self._notified = None
@@ -1274,7 +1300,12 @@ class Bridge:
             async with self._launch:
                 return await self._ensure_own_page()
         # a guest in another bridge's Chrome: its own tabs there, reopened whenever that Chrome was restarted
-        if self._page is not None and not self._page.is_closed() and self._ctx is not None and self._ctx is self.host._ctx:
+        if (
+            self._page is not None
+            and not self._page.is_closed()
+            and self._ctx is not None
+            and self._ctx is self.host._ctx
+        ):
             return self._page
         self._sessions.clear()
         self._page, self._gone = None, False
@@ -1541,7 +1572,12 @@ class Bridge:
             elif p.get("composer"):
                 ok += 1
                 # a site whose temporary mode comes on a moment after the page (Qwen): give it time before judging
-                slow_temp = bool(self.site and self.site.get("temp") and p.get("temp") is not True)
+                slow_temp = bool(
+                    self.site
+                    and self.site.get("temp")
+                    and not self.site.get("temp_toggle")
+                    and p.get("temp") is not True
+                )
                 if ok >= (2 if p.get("account") else 4) and not (slow_temp and time.time() < deadline - 25):
                     break
             else:
@@ -1627,14 +1663,16 @@ class Bridge:
         """SITES: the picker button shows the model's name first; its menu is opened with the keyboard (a hidden
         window does not take clicks) and the entry with exactly that name is chosen."""
 
-        def shown(p):
-            return ((p.get("model") or "").split() or [""])[0].lower()
+        def shown(p):  # the picker button: "GLM-5.3-Flash Max", "Qwen4-Max", "Hydrogen"
+            return want in (p.get("model") or "").lower().split()
 
-        if shown(p) == want or p.get("model") is None:
+        if shown(p) or p.get("model") is None:
             return p
         try:
             opener = page.locator(self.site["model"]).first
-            items = '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button'
+            items = (
+                '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button'
+            )
             await opener.focus(timeout=4000)
             await page.keyboard.press("Enter")
             await asyncio.sleep(1.0)
@@ -1643,7 +1681,7 @@ class Bridge:
                 await asyncio.sleep(1.0)
             picked = await page.evaluate(
                 r"""(want) => { for (const e of document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper] button')) {
-                     if (((e.innerText || '').trim().split(/\s+/)[0] || '').toLowerCase() === want) { e.click(); return true; } } return false; }""",
+                     if ((e.innerText || '').toLowerCase().split(/\s+/).includes(want)) { e.click(); return true; } } return false; }""",
                 want,
             )
             if not picked:
@@ -1652,7 +1690,7 @@ class Bridge:
         except Exception:  # noqa: BLE001
             pass
         p = await self._probe(page, True)
-        if shown(p) != want and self.o["strict_model"]:
+        if not shown(p) and self.o["strict_model"]:
             raise WebUnavailable(
                 f"model {want!r} is not selectable on {self.site['name']} (the page shows {p.get('model')!r})",
                 float(self.o["cooldown_model_s"]),
@@ -2036,16 +2074,36 @@ class BridgePool:
             raise KeyError(f"no account {account!r} (accounts: {', '.join(self.bridges)})")
         return self.bridges[account] if account else next(iter(self.bridges.values()))
 
-    def _order(self, model: str, body: dict) -> list[Bridge]:
+    def capacity(self, accounts=None) -> dict:
+        """What is left today on these accounts (all of them by default) and how busy they are; the router shares
+        requests out between sources by it."""
+        bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
+        open_ = [b for b in bs if not b.status()["blocked"]]
+        cap = sum(int(b.o["daily_cap"]) for b in open_)
+        used = sum(min(b.load().get("count", 0), int(b.o["daily_cap"])) for b in open_)
+        return {
+            "remaining": (cap - used) / cap if cap else 0.0,
+            "busy": sum(b.busy for b in bs),
+            "accounts": len(open_),
+            "available": bool(open_) and used < cap,
+        }
+
+    def _order(self, model: str, body: dict, accounts=None) -> list[Bridge]:
         lean = lean_body(body, int(self.o["lean_system_chars"])) if self.o["lean"] else body
         key = continuation_key(lean, model)
         self._turn += 1
-        bs = list(self.bridges.values())
+        bs = [b for n, b in self.bridges.items() if not accounts or n in accounts] or list(self.bridges.values())
         rot = {id(b): (i - self._turn) % len(bs) for i, b in enumerate(bs)}  # ties go round-robin
         return sorted(bs, key=lambda b: (key not in b._sessions, b.busy, b.load().get("count", 0) // 10, rot[id(b)]))
 
     async def complete(
-        self, model: str, body: dict, model_id: str | None = None, wait: float | None = None, on_text=None
+        self,
+        model: str,
+        body: dict,
+        model_id: str | None = None,
+        wait: float | None = None,
+        on_text=None,
+        accounts=None,
     ) -> dict:
         last: Exception | None = None
         said = []
@@ -2054,7 +2112,7 @@ class BridgePool:
             said.append(piece)
             on_text(piece)
 
-        for b in self._order(model, body):
+        for b in self._order(model, body, accounts):
             try:
                 return await b.complete(model, body, model_id=model_id, wait=wait, on_text=heard if on_text else None)
             except (WebUnavailable, WebSkip) as e:

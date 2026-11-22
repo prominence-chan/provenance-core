@@ -709,7 +709,12 @@ def test_a_guest_bridge_works_in_the_hosts_chrome(mock, tmp_path):
         same, tabs = guest._ctx is b._ctx, len(b._ctx.pages)
         await guest._shutdown()  # closes the guest's tabs only
         third = await b.complete("auto", dict(USER))
-        return [r["choices"][0]["message"]["content"] for r in (first, second, third)], same, tabs, guest.profile == b.profile
+        return (
+            [r["choices"][0]["message"]["content"] for r in (first, second, third)],
+            same,
+            tabs,
+            guest.profile == b.profile,
+        )
 
     texts, same, tabs, same_profile = scenario(mock, tmp_path, go)
     assert texts == ["ok", "ok", "ok"] and same and tabs == 2

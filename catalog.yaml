@@ -57,14 +57,26 @@ providers:
   qwen-web: {type: chatgpt_web, base_url: "https://chat.qwen.ai", api_key_env: none,
              web: {site: qwen, share: chatgpt-web, accounts: [main, b, c], daily_cap: 300, min_gap_s: 3, max_gap_s: 7,
                    endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true, quiet: true}}
+  # Gemini web (gemini.google.com, signed in, temporary chats), also as tabs in the same windows. `main` is a Pro
+  # account (Hydrogen, Neon); `b` and `c` are free accounts with Auto only: see `accounts:` on the models.
+  gemini-web: {type: chatgpt_web, base_url: "https://gemini.google.com", api_key_env: none,
+               web: {site: gemini, share: chatgpt-web, accounts: [main, b, c], daily_cap: 200, min_gap_s: 3,
+                     max_gap_s: 7, endpoints: [responses], reuse_chat: true, max_chat_tabs: 4, lean: true,
+                     quiet: true}}
 
 models:
   # ChatGPT web: `model` is the name to pick in the page's model picker ("auto" = whatever the page has selected).
   # The score is a prior until `calibrate --only chatgpt-web/luna` (29 messages through the page) measures it.
-  - {provider: chatgpt-web, model: luna, score: 93, context: 64000}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
+  - {provider: chatgpt-web, model: luna, score: 93, context: 64000, label: "GPT-6 Luna"}   # 93 = top of solstice (the default tier), by request 2026-11-21; was 95 (nova)
   # Other web chats (priors until measured through the page; see the providers above).
-  - {provider: qwen-web, model: qwen4-max, score: 93, context: 64000}   # measured 100 on the probe set 2026-11-21 (29 of 29); held at 93 = top of solstice, like luna
-  - {provider: qwen-web, model: qwen3.7-plus, score: 50, context: 64000}
+  - {provider: qwen-web, model: qwen4-max, score: 93, context: 64000, label: "Qwen4-Max"}   # measured 100 on the probe set 2026-11-21 (29 of 29); held at 93 = top of solstice, like luna
+  - {provider: qwen-web, model: qwen3.7-plus, score: 50, context: 64000, label: "Qwen3.7-Plus"}
+  # Gemini, tiers as asked 2026-11-22 (not measured): Neon in nova, Hydrogen in ember, both on the Pro account;
+  # Auto in spark on the two free accounts. Carbon is listed in main's picker but will not select (an upgrade
+  # prompt), so it is left out.
+  - {provider: gemini-web, model: neon, score: 96, context: 64000, label: "Gemini Neon", accounts: [main]}
+  - {provider: gemini-web, model: hydrogen, score: 70, context: 64000, label: "Gemini Hydrogen", accounts: [main]}
+  - {provider: gemini-web, model: auto, score: 50, context: 64000, label: "Gemini Auto", accounts: [b, c]}
   # Z.ai is left out: as a guest GLM-5.3-Flash measured 53 and the page answered "Error code: 405, try again later"
   # after about 20 messages; signed in (2026-11-21) every request was refused the same way.
   # - {provider: zai-web, model: glm-5.3, score: 50, context: 64000}

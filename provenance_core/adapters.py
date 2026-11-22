@@ -22,10 +22,11 @@ class Target:
     tier: str | None  # serve from this tier (with fallback) ...
     concrete: str | None  # ... or from exactly this catalog model
     fallback: str = "none"
+    source: str | None = None  # a tier pinned to one of its sources ("luna/solstice", "pool/solstice")
 
     @property
     def label(self) -> str:
-        return self.tier or self.concrete or "?"
+        return (f"{self.source}/" if self.source else "") + (self.tier or self.concrete or "?")
 
 
 def resolve_target(router: Router, name: str, fallback: str) -> Target | None:
@@ -38,6 +39,13 @@ def resolve_target(router: Router, name: str, fallback: str) -> Target | None:
         return Target(tier, None, fallback)
     if name in router.catalog.models:
         return Target(None, name, "none")
+    if "/" in name:  # "<source>/<tier>": the tier, served from that source first (see Router.sources)
+        src, t = name.rsplit("/", 1)
+        tier = router.catalog.resolve_tier(t)
+        if tier and src.lower() in {s["id"] for s in router.sources(tier)}:
+            return Target(tier, None, fallback, src.lower())
+        if tier:
+            return Target(tier, None, fallback)
     return None
 
 
@@ -122,7 +130,7 @@ async def complete(router: Router, body: dict, target: Target, session: str, web
             return await _call_named(router, m, body, False), m
         except Exception as e:  # noqa: BLE001
             raise NoCapacity(str(e)) from e
-    return await router.complete(body, target.tier, session, target.fallback, web=web)
+    return await router.complete(body, target.tier, session, target.fallback, web=web, source=target.source)
 
 
 async def open_stream(router: Router, body: dict, target: Target, session: str, web: bool = False):
@@ -134,7 +142,7 @@ async def open_stream(router: Router, body: dict, target: Target, session: str, 
             raise NoCapacity(str(e)) from e
         router.state.record(m, estimate_tokens(body))
         return resp, m, t0
-    return await router.stream(body, target.tier, session, target.fallback, web=web)
+    return await router.stream(body, target.tier, session, target.fallback, web=web, source=target.source)
 
 
 class UpstreamStream:
