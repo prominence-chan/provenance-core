@@ -47,8 +47,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import browser_host
-from .chatgpt_web import Bridge, BridgePool, home_dir, stop_watchdog, watchdog
+from . import browser_host, provider_settings
+from .chatgpt_web import Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
 
 ACCOUNT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 ACTIVE = ("preparing", "open", "verifying")
@@ -193,6 +193,24 @@ def quit_app(pid: int) -> bool:
         return False
 
 
+ACTIVATE_JXA = r"""ObjC.import('AppKit');
+function run(argv) { const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(argv[0]));
+  return a.isNil() ? 'none' : String(a.unhide && a.activateWithOptions($.NSApplicationActivateAllWindows)); }"""
+
+
+def activate_app(pid: int) -> bool:
+    """Bring an app's windows to the front, as clicking its Dock icon does (NSRunningApplication; no permission
+    needed). macOS may refuse when the asking process is not the active app; False then, or when it cannot ask."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-e", ACTIVATE_JXA, str(int(pid))],
+                           capture_output=True, text=True, timeout=10)  # fmt: skip
+        return r.stdout.strip() == "true"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 class SigninWindow:
     """One ordinary browser window on a profile, not driven by anything: no debugging port, no automation switch.
     `launch`: "open" (macOS LaunchServices: a new instance, brought to the front like any app the user opens) or
@@ -211,7 +229,7 @@ class SigninWindow:
     def closed_by_hand(self) -> bool:
         """The app is still running but its windows are gone (Cmd+W / the red button on the last window). Only
         after a window was seen, and twice in a row; headless windows (tests) never count."""
-        if not self.pid or "--headless" in " ".join(self.extra_args):
+        if not self.pid or self.headless:
             return False
         n = real_windows(self.pid)
         if n is None:
@@ -262,6 +280,17 @@ class SigninWindow:
             await asyncio.sleep(0.2)
         await self.close()
         raise SetupError("The sign-in window did not open. Try again.")
+
+    @property
+    def headless(self) -> bool:  # tests: a window that cannot be seen, so it is never brought forward either
+        return "--headless" in " ".join(self.extra_args)
+
+    async def show(self) -> bool:
+        """Bring the window back to the front (it went behind the app, or another window). False when it is not
+        open or macOS did not bring it forward."""
+        if not self.alive() or self.headless:
+            return False
+        return await asyncio.to_thread(activate_app, self.pid)
 
     def alive(self) -> bool:
         if not self.pid:
@@ -577,9 +606,37 @@ class WebSetup:
                 pass
         return {"state": "idle", "reason": None, "provider": provider, "account": account}
 
+    async def show(self, provider: str, account: str | None) -> dict:
+        """POST /web/login/show: the open sign-in window back to the front."""
+        account = account or "main"
+        self.bridge_for(provider, account)
+        f = self.flows.get((provider, account))
+        if not f or f.state != "open" or not f.window:
+            raise SetupError("There is no sign-in window open for this account.")
+        shown = await f.window.show()
+        return {**f.view(), "shown": shown}
+
     async def close(self):
         for key in list(self.flows):
             await self.cancel(*key)
+
+    # -- per-provider settings (provider_settings.py): on / off, daily cap
+    async def update_provider(self, provider: str, changes: dict) -> dict:
+        """PATCH /web/providers/{provider}: change and keep its settings; answers with the provider as
+        GET /web/accounts lists it. A browser no enabled site needs any more is closed."""
+        self.pool(provider)  # KeyError for one that is not a web provider
+        if not isinstance(changes, dict):
+            raise SetupError("Send the changes as a JSON object.")
+        if "enabled" in changes and enabled_by(self.router.catalog.providers[provider].options) == "env-off":
+            raise SetupError("The web chats are turned off on this router (PCORE_CHATGPT_WEB=0), so they cannot be "
+                             "turned on from the app.")  # fmt: skip
+        try:
+            provider_settings.update(self.router, provider, changes)
+        except provider_settings.SettingError as e:
+            raise SetupError(str(e)) from None
+        for host in provider_settings.unused_hosts(self.router):
+            await self.router.bridges[host].release()
+        return self.provider_view(provider)
 
     # -- accounts
     async def add_account(self, account: str) -> dict:
@@ -686,57 +743,64 @@ class WebSetup:
         return self.browser_view()
 
     def view(self) -> dict:
+        return {
+            "browser": self.browser_view(),
+            "accounts": self.accounts(),
+            "providers": [self.provider_view(n) for n in self.providers()],
+        }
+
+    def provider_view(self, n: str) -> dict:
+        """One provider as GET /web/accounts lists it."""
         cat = self.router.catalog
-        out = []
-        for n in self.providers():
-            p = cat.providers[n]
-            bs = self.bridges_of(n)
-            first = next(iter(bs.values()))
-            models = [
+        p = cat.providers[n]
+        bs = self.bridges_of(n)
+        first = next(iter(bs.values()))
+        models = [
+            {
+                "id": m.id,
+                "label": m.label or m.model,
+                "tier": cat.tier_of(m),
+                "model": m.model,
+                "accounts": m.accounts,
+            }  # fmt: skip
+            for m in cat.models.values()
+            if m.provider == n
+        ]
+        accts = []
+        for a in self.accounts():
+            b = bs.get(a)
+            if not b:
+                continue
+            s = b.status()
+            accts.append(
                 {
-                    "id": m.id,
-                    "label": m.label or m.model,
-                    "tier": cat.tier_of(m),
-                    "model": m.model,
-                    "accounts": m.accounts,
-                }  # fmt: skip
-                for m in cat.models.values()
-                if m.provider == n
-            ]
-            accts = []
-            for a in self.accounts():
-                b = bs.get(a)
-                if not b:
-                    continue
-                s = b.status()
-                accts.append(
-                    {
-                        "id": a,
-                        "signed_in": s["signed_in"],
-                        "checked_at": s["checked_at"],
-                        "blocked": s["blocked"],
-                        "reason": plain_reason(s, b) if s["blocked"] else None,
-                        "blocked_for_s": s["blocked_for_s"],
-                        "today": s["today"],
-                        "daily_cap": s["daily_cap"],
-                        "email": s.get("email"),
-                        "signing_in": s["signing_in"],
-                        "window_open": s["window_open"],
-                        "login": {k: v for k, v in self.login_state(n, a).items() if k in ("state", "reason")},
-                    }
-                )
-            out.append(
-                {
-                    "id": n,
-                    "name": first.display_name,
-                    "url": first.base_url,
-                    "enabled": p.usable,
-                    "shares_browser_with": p.options.get("share"),
-                    "models": models,
-                    "accounts": accts,
+                    "id": a,
+                    "signed_in": s["signed_in"],
+                    "checked_at": s["checked_at"],
+                    "blocked": s["blocked"],
+                    "reason": plain_reason(s, b) if s["blocked"] else None,
+                    "blocked_for_s": s["blocked_for_s"],
+                    "today": s["today"],
+                    "daily_cap": s["daily_cap"],
+                    "email": s.get("email"),
+                    "signing_in": s["signing_in"],
+                    "window_open": s["window_open"],
+                    "login": {k: v for k, v in self.login_state(n, a).items() if k in ("state", "reason")},
                 }
             )
-        return {"browser": self.browser_view(), "accounts": self.accounts(), "providers": out}
+        return {
+            "id": n,
+            "name": first.display_name,
+            "url": first.base_url,
+            "enabled": p.usable,
+            # what decides `enabled`: "app" (turned on or off here), "env" (PCORE_CHATGPT_WEB=1), "catalog", or
+            # "env-off" (PCORE_CHATGPT_WEB=0: off, and cannot be turned on from the app)
+            "enabled_by": enabled_by(p.options),
+            "daily_cap": int(first.o["daily_cap"]),  # per account
+            "shares_browser_with": p.options.get("share"),
+            "models": models,
+            "accounts": accts,
+        }
 
 
 def _duration(s) -> str:

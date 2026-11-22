@@ -1324,11 +1324,28 @@ def home_dir() -> Path:
 
 
 def enabled(options: dict | None) -> bool:
-    """Off unless turned on: `enabled: true` on the provider, or PCORE_CHATGPT_WEB=1 (=0 forces it off)."""
-    v = env("CHATGPT_WEB")
-    if v is not None and v != "":
-        return v.strip().lower() in ("1", "true", "on", "yes")
-    return bool((options or {}).get("enabled"))
+    """Off unless turned on. In order: PCORE_CHATGPT_WEB=0 forces every web provider off; then a choice made in the
+    app (`user_enabled`, from <PCORE_HOME>/settings.json, see provider_settings.py); then PCORE_CHATGPT_WEB=1 turns
+    them on; then `enabled: true` on the provider."""
+    o = options or {}
+    v = (env("CHATGPT_WEB") or "").strip().lower()
+    if v and v not in ("1", "true", "on", "yes"):
+        return False
+    if o.get("user_enabled") is not None:
+        return bool(o["user_enabled"])
+    return bool(v) or bool(o.get("enabled"))
+
+
+def enabled_by(options: dict | None) -> str:
+    """What decides enabled(): "env-off" (PCORE_CHATGPT_WEB=0, cannot be changed from the app), "app", "env" or
+    "catalog"."""
+    o = options or {}
+    v = (env("CHATGPT_WEB") or "").strip().lower()
+    if v and v not in ("1", "true", "on", "yes"):
+        return "env-off"
+    if o.get("user_enabled") is not None:
+        return "app"
+    return "env" if v else "catalog"
 
 
 class Bridge:
