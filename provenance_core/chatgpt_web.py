@@ -891,8 +891,11 @@ PROBE_JS = r"""(fresh) => {
   out.account = !!first(['[data-testid="accounts-profile-button"]', '[data-testid="profile-button"]',
                          '[data-testid="user-menu-button"]', 'button[aria-label*="profile" i]', 'button[aria-label*="account" i]']);
   const scoped = [...document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"], [data-testid*="error"], [data-testid*="toast"], [class*="text-token-text-error"]')]
-    .filter(vis).filter(el => !el.closest('[data-message-author-role]')).map(el => el.innerText || '').join('\n');
-  const text = (fresh && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
+    .filter(vis).filter(el => !el.closest('[data-message-author-role], [data-turn-key]')).map(el => el.innerText || '').join('\n');
+  // the whole page is read for notices only while it holds no conversation: a chat still on screen (the tab's last
+  // one, before the new chat has loaded) may itself say "try again later"
+  const empty = !document.querySelector('[data-turn-key], [data-message-author-role], [data-response-body], [data-dil-response]');
+  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
   const m = (re, s) => { const x = (s === undefined ? text : s).match(re); return x ? x[0] : null; };
   out.challenge = m(/just a moment|verify (?:that )?you are (?:a )?human|unusual activity|suspicious activity|confirm you(?:'|’)re (?:not a robot|human)|are you a robot|complete the captcha|checking your browser|you have been blocked|access denied/i);
   if (!out.challenge) for (const f of document.querySelectorAll('iframe')) {
@@ -1219,7 +1222,8 @@ SITE_PROBE_JS = r"""([cfg, fresh]) => {
   out.login = !!first(cfg.login);
   const scoped = [...document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"], [data-sonner-toast], [class*="toast" i], [class*="error" i]')]
     .filter(vis).filter(el => !el.closest(cfg.user + ', ' + cfg.assistant)).map(el => el.innerText || '').join('\n');
-  const text = (fresh && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
+  const empty = !document.querySelector(cfg.user + ', ' + cfg.assistant);   // see PROBE_JS
+  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
   const m = (re, s) => { const x = (s === undefined ? text : s).match(re); return x ? x[0] : null; };
   out.challenge = m(/just a moment|verify (?:that )?you are (?:a )?human|unusual activity|suspicious activity|confirm you(?:'|’)re (?:not a robot|human)|are you a robot|complete the captcha|checking your browser|you have been blocked|access denied|slide to (?:verify|complete)/i);
   out.busy = m(/try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|(?:high|heavy) (?:demand|traffic|load)|server (?:is )?busy|too many (?:requests|users)|rate limit/i, scoped);
