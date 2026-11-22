@@ -20,7 +20,7 @@ Mistral, NVIDIA, ...) and serves them as one OpenAI-, Anthropic- and Responses-c
 score and lands in one of four tiers:
 
 ```
-ember  ─▶  spark  ─▶  solstice  ─▶  nova
+spark  ─▶  ember  ─▶  solstice  ─▶  nova
 fast       strong      frontier      the very
 & small    mid-size    agentic       strongest
 ```
@@ -29,8 +29,8 @@ fast       strong      frontier      the very
 | ---------- | ----------------------------------------- |
 | `nova`     | the hardest problems                      |
 | `solstice` | agentic coding and reasoning (default)    |
-| `spark`    | edits, summaries, tool plumbing           |
-| `ember`    | classification, routing, bulk work        |
+| `ember`    | edits, summaries, tool plumbing           |
+| `spark`    | classification, routing, bulk work        |
 
 A request stays inside its tier, fails over to another model when one hits a limit, and keeps a conversation on the
 same model.
@@ -60,7 +60,7 @@ Kilo answers without a key. Export provider keys (`GEMINI_API_KEY`, `GROQ_API_KE
 ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=pcore claude
 ```
 
-Opus maps to `nova`, Sonnet to `solstice`, Haiku to `spark`.
+Opus maps to `nova`, Sonnet to `solstice`, Haiku to `ember`.
 
 </details>
 

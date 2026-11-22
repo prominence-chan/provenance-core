@@ -16,8 +16,8 @@ CAT = {
     "tiers": [
         {"name": "nova", "min_score": 94},
         {"name": "solstice", "min_score": 82},
-        {"name": "spark", "min_score": 62},
-        {"name": "ember", "min_score": 0},
+        {"name": "ember", "min_score": 62},
+        {"name": "spark", "min_score": 0},
     ],
     "providers": {
         "a": {"base_url": "https://a.test/v1", "api_key_env": "A_KEY"},
@@ -313,14 +313,14 @@ def test_messages_model_mapping(env, monkeypatch):
 
     assert tier("claude-opus-4-6[1m]") == "nova"
     assert tier("claude-sonnet-4-5-20250929") == "solstice"
-    assert tier("claude-3-5-haiku-20241022") == "spark"
-    assert tier("solstice") == "solstice" and tier("tier-4") == "ember"
+    assert tier("claude-3-5-haiku-20241022") == "ember"
+    assert tier("solstice") == "solstice" and tier("tier-4") == "spark"
     r = c.post(
         "/v1/messages", json={"model": "b/tiny", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]}
     )
     assert r.headers["x-pcore-model"] == "b/tiny"
-    monkeypatch.setenv("PCORE_MAP_OPUS", "spark")
-    assert tier("claude-opus-4-1") == "spark"
+    monkeypatch.setenv("PCORE_MAP_OPUS", "ember")
+    assert tier("claude-opus-4-1") == "ember"
 
 
 def test_messages_falls_back_down(env):

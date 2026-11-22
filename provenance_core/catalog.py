@@ -6,7 +6,7 @@ A provider with `api_key_env: none` (or `auth: none`) is used without a key and 
 `pool` limits apply across all of its models together (e.g. an anonymous per-IP request cap), and `shared_tpd: true`
 means each model's tpd is its share of one provider-wide daily allowance (Cloudflare's daily neurons).
 
-Tiers are the point of the project: a request asks for a tier ("nova", "solstice", "spark", "ember"; "tier-N" works too) and is only ever served by
+Tiers are the point of the project: a request asks for a tier ("nova", "solstice", "ember", "spark"; "tier-N" works too) and is only ever served by
 models of comparable strength, so answers don't swing between a frontier model and a tiny one depending on which
 free quota happens to be left."""
 

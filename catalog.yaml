@@ -12,10 +12,10 @@
 tiers:
   - {name: nova, min_score: 94}   # hyperfrontier: only the very strongest models
   - {name: solstice,  min_score: 82}   # frontier: solid agentic coding / reasoning
-  - {name: spark,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
-  - {name: ember, min_score: 0}    # fast / small: classification, routing, cheap bulk work
+  - {name: ember,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
+  - {name: spark, min_score: 0}    # fast / small: classification, routing, cheap bulk work
 
-aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: ember, tier-1: nova, tier-2: solstice, tier-3: spark, tier-4: ember, auto: solstice, default: solstice}
+aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: spark, tier-1: nova, tier-2: solstice, tier-3: ember, tier-4: spark, auto: solstice, default: solstice}
 
 providers:
   google:     {base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: GEMINI_API_KEY}

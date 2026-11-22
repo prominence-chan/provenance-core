@@ -66,11 +66,19 @@ class Malformed(ValueError):
 # - tools are shown the way OpenAI shows function tools to its models (TypeScript signatures), not as JSON schema
 # - a command is written raw in a block named after the tool, so heredocs and patches need no JSON escaping
 # - the rules that matter are repeated after the conversation, next to where the reply starts
-FRAME = """You are the coding agent for my computer. The harness executes the text tool blocks below and returns
-their results in the next turn. Only those tools reach my files; your built-in tools run elsewhere. Plan and reason
-as needed, then issue all independent calls allowed by this turn's tool rules. Never invent tool results. Keep
-working through failures. A reply without a tool block ends the run; use one only when done or when you need my
-decision. Write the next assistant turn, without a role marker."""
+FRAME = """You are operating an interactive terminal on my computer through this chat. A program on my machine \
+runs every tool block you write and sends back its output as the next message; nothing else you do reaches my \
+computer.
+- You know nothing about this machine, its files, projects, processes or anything "local" or "mine" except what \
+appears in this conversation. Find out by running commands, never from memory or by guessing.
+- Do not use web search, browsing, Python / code execution, file analysis, canvas, memory or image tools. They run \
+on OpenAI's servers, cannot see my computer, and waste the turn. If the task really needs the internet, fetch it \
+with a command (curl) on my machine.
+- Think and plan as much as you need, then write every independent call this turn's tool rules allow, and stop. \
+Never write a tool's output yourself or claim something you have not seen in a tool result.
+- A failed command is information: try another way. A reply without a tool block ends the run, so only do that \
+when the task is done or you need a decision from me.
+Write the next assistant turn, without a role marker."""
 
 INSTRUCTIONS_HEAD = """# Agent instructions
 Where these say to call a function, write a tool block. Only tools listed below exist%s."""
@@ -95,8 +103,8 @@ be used (no JSON, no escaping, may span lines). Prefer it for anything with quot
 
 To pass other arguments as well, use the tool_call form."""
 
-REMINDER_TOOLS = """Next turn: use ```tool_call JSON%s for work on my computer. Stop after the call blocks and
-wait for results. If the task is complete, answer without a block."""
+REMINDER_TOOLS = """Next turn: act only through ```tool_call JSON%s on my computer (no web search or other built-in
+tools). Stop after the call blocks and wait for results. If the task is complete, answer without a block."""
 
 FRAME_PLAIN = """This message was put together by a program on my computer, which will read your reply and pass it on. Below are its instructions and the conversation so far. Write the assistant's next turn. Do not use your built-in tools (code execution, web search, canvas, memory, image generation) and do not mention this framing in your answer."""
 
@@ -688,6 +696,83 @@ class BufferedStream:
         return None
 
 
+class LiveStream:
+    """The same surface as BufferedStream, but the reply's prose goes out while the page is still writing it. Only
+    whole paragraphs before the first code block are sent early (a tool block has to be complete to be parsed); the
+    rest of the text and the tool calls follow when the reply is finished. `first()` waits for the first text or
+    the end, so a request that fails before anything was said can still go to another model."""
+
+    def __init__(self, start, model_id: str, on_done=None):
+        self.base = {
+            "id": "chatcmpl-web-" + secrets.token_hex(10),
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_id,
+        }
+        self.q: asyncio.Queue = asyncio.Queue()
+        self.sent = ""
+        self.on_done = on_done
+        self.status_code = 200
+        self.headers: dict = {}
+        self._head = None
+        self.task = asyncio.create_task(self._run(start))
+
+    async def _run(self, start):
+        try:
+            self.q.put_nowait(("done", await start(self._on_text)))
+        except BaseException as e:  # noqa: BLE001 - handed to the reader
+            self.q.put_nowait(("error", e))
+
+    def _on_text(self, piece: str):
+        if piece:
+            self.sent += piece
+            self.q.put_nowait(("text", piece))
+
+    async def first(self):
+        self._head = await self.q.get()
+        if self._head[0] == "error":
+            raise self._head[1]
+        return self
+
+    def _chunk(self, delta: dict, finish=None, **more) -> str:
+        return "data: " + json.dumps(
+            {**self.base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **more}
+        )
+
+    async def aiter_lines(self):
+        yield self._chunk({"role": "assistant"})
+        item, self._head = self._head or await self.q.get(), None
+        while True:
+            kind, val = item
+            if kind == "text":
+                yield self._chunk({"content": val})
+            elif kind == "error":
+                yield "data: " + json.dumps({"error": {"message": str(val)[:500]}})
+                return
+            else:
+                ch = val["choices"][0]
+                text = ch["message"].get("content") or ""
+                rest = text[len(self.sent) :] if text.startswith(self.sent) else ("" if self.sent else text)
+                if rest:
+                    yield self._chunk({"content": rest})
+                for i, tc in enumerate(ch["message"].get("tool_calls") or []):
+                    yield self._chunk({"tool_calls": [{"index": i, **tc}]})
+                yield self._chunk({}, ch["finish_reason"], usage=val["usage"])
+                if self.on_done:  # before the last line: the reader stops at [DONE] and never comes back
+                    self.on_done(val)
+                yield "data: [DONE]"
+                return
+            item = await self.q.get()
+
+    async def aiter_raw(self):
+        async for line in self.aiter_lines():
+            yield (line + "\n\n").encode()
+
+    async def aclose(self):
+        if not self.task.done():
+            self.task.cancel()
+
+
 # ---- the page, as a user sees it ------------------------------------------------------------------------------------
 # One probe of the visible page. `fresh` = no conversation on it yet, so the whole page text may be scanned for
 # notices; later only alerts / dialogs / toasts outside the messages are read (a reply may itself talk about limits).
@@ -744,13 +829,23 @@ PROBE_JS = r"""(fresh) => {
   out.send = !!send;
   out.sendEnabled = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
   const msgs = [...document.querySelectorAll('[data-message-author-role]')];
+  // a reply is [data-dil-response] while it is being written and gains [data-response-body] when finished
+  const replies = () => { const r = [...document.querySelectorAll('[data-response-body], [data-dil-response]')];
+                          return r.filter(e => !r.some(o => o !== e && o.contains(e))); };
   out.users = msgs.filter(e => e.getAttribute('data-message-author-role') === 'user').length
               + document.querySelectorAll('[data-content-search-unit-key$=":user"]').length;
-  const as = msgs.filter(e => e.getAttribute('data-message-author-role') === 'assistant').concat([...document.querySelectorAll('[data-response-body]')]);
+  const as = msgs.filter(e => e.getAttribute('data-message-author-role') === 'assistant').concat(replies());
   out.assistants = as.length;
   const last = as[as.length - 1];
   out.lastLen = last ? (last.innerText || '').length : 0;
   out.slug = last ? last.getAttribute('data-message-model-slug') : null;
+  // Which message is last, by its own id: a long chat keeps only the recent turns in the page, so counts stop growing.
+  const us = [...document.querySelectorAll('[data-message-author-role="user"], [data-content-search-unit-key$=":user"]')];
+  const lu = us[us.length - 1];
+  out.lastUser = lu ? (lu.getAttribute('data-content-search-unit-key') || lu.getAttribute('data-message-id') || null) : null;
+  out.lastAsst = last ? (last.getAttribute('data-response-body') || last.getAttribute('data-dil-message-id') || last.getAttribute('data-message-id') || null) : null;
+  out.asstAfterUser = !!(last && lu && (lu.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING));
+  out.lastState = turnStates[turnStates.length - 1] || null;
   out.actions = document.querySelectorAll('[data-testid="copy-turn-action-button"], [data-talvt-turn-state] button[aria-label="Copy"]').length;
   const sw = first(['[data-testid="model-switcher-dropdown-button"]', 'button[aria-label^="Model selector" i]', 'button[aria-haspopup="menu"][aria-label*="model" i]']);
   out.model = sw ? ((sw.innerText || '').trim() || sw.getAttribute('aria-label') || '').replace(/\s+/g, ' ') : null;
@@ -761,8 +856,9 @@ PROBE_JS = r"""(fresh) => {
 # (their text content); the rest is rebuilt from the rendered elements.
 READ_JS = r"""() => {
   // both generations of markup (see PROBE_JS): everything the assistant wrote after the last user message
-  const role = e => e.getAttribute('data-message-author-role') || (e.hasAttribute('data-response-body') ? 'assistant' : 'user');
-  const all = [...document.querySelectorAll('[data-message-author-role], [data-content-search-unit-key$=":user"], [data-response-body]')];
+  const role = e => e.getAttribute('data-message-author-role') || (e.hasAttribute('data-response-body') || e.hasAttribute('data-dil-response') ? 'assistant' : 'user');
+  const found = [...document.querySelectorAll('[data-message-author-role], [data-content-search-unit-key$=":user"], [data-response-body], [data-dil-response]')];
+  const all = found.filter(e => role(e) !== 'assistant' || !found.some(o => o !== e && role(o) === 'assistant' && o.contains(e)));
   let lastUser = -1;
   all.forEach((e, i) => { if (role(e) === 'user') lastUser = i; });
   const as = all.slice(lastUser + 1).filter(e => role(e) === 'assistant');
@@ -1276,11 +1372,14 @@ class Bridge:
             )
         return p
 
-    async def _send(self, page, text: str) -> dict:
+    async def _send(self, page, text: str, on_text=None) -> dict:
         """Type one message, send it, wait for the reply to finish. -> {md, slug}"""
         before = await self._probe(page, False)
         box = page.locator(COMPOSER).first
-        await box.click(timeout=10000)
+        try:  # a click waits for the element to hold still, which a hidden window may never report: focus is enough
+            await box.click(timeout=2500)
+        except Exception:  # noqa: BLE001
+            await box.focus(timeout=10000)
         await box.fill(text, timeout=30000)
         typed = await box.evaluate(
             "el => (el.value !== undefined ? el.value : el.innerText || '').replace(/\\s+/g, '').length"
@@ -1288,33 +1387,66 @@ class Bridge:
         if typed < 0.9 * len(re.sub(r"\s+", "", text)):
             raise WebError(f"the composer took {typed} of {len(text)} characters (message too long for the page?)")
         self.save(count=self.load().get("count", 0) + 1)
+        send = page.locator(SEND).first
         try:
-            await page.locator(SEND).first.click(timeout=15000)
-        except Exception:  # noqa: BLE001 - no recognisable send button: Enter sends too
-            await box.press("Enter")
+            await send.click(timeout=3000)
+        except Exception:  # noqa: BLE001 - hidden window (see above), or no recognisable send button
+            try:
+                await send.evaluate("el => el.click()", timeout=5000)
+            except Exception:  # noqa: BLE001 - Enter sends too
+                await box.press("Enter")
         t0 = time.time()
         timeout = float(self.o["reply_timeout_s"])
         started, stable, last_len = False, 0, -1
+        said, tick = "", 0
         while True:
+            tick += 1
             await asyncio.sleep(0.5)
             p = await self._probe(page, False)
             self._notices(p)
             if p.get("login"):
                 raise WebUnavailable("signed out of ChatGPT mid-request", float(self.o["cooldown_login_s"]), "login")
+            # a new message is known by its id as well as by the count: a long chat drops old turns from the page
+            new_user = p["users"] > before["users"] or bool(
+                p.get("lastUser") and p["lastUser"] != before.get("lastUser")
+            )
+            new_reply = p["assistants"] > before["assistants"] or bool(
+                p.get("lastAsst") and p["lastAsst"] != before.get("lastAsst") and p.get("asstAfterUser")
+            )
+            if env("CHATGPT_WEB_TRACE"):  # one line per look at the page, for working out timing problems
+                print(
+                    f"trace {time.time() - t0:5.1f}s stop={p['stop']} users={p['users']} asst={p['assistants']} "
+                    f"len={p['lastLen']} id={p.get('lastAsst')} after={p.get('asstAfterUser')} "
+                    f"state={p.get('lastState')} new_reply={new_reply}",
+                    flush=True,
+                )
             if not started:
-                started = p["users"] > before["users"] or p["assistants"] > before["assistants"] or p["stop"]
+                started = new_user or new_reply or p["stop"]
                 if not started and time.time() - t0 > 30:
                     raise WebError("the message was not sent" + (f": {p['error']}" if p.get("error") else ""))
                 if not started:
                     continue
-            if p.get("error") and not p["stop"] and p["assistants"] <= before["assistants"]:
+            if p.get("error") and not p["stop"] and not new_reply:
                 raise WebError(f"ChatGPT showed an error: {p['error']}")
             done = False
-            if not p["stop"] and p["assistants"] > before["assistants"] and p["lastLen"] > 0:
+            if not p["stop"] and new_reply and p["lastLen"] > 0:
                 stable = stable + 1 if p["lastLen"] == last_len else 0
-                done = stable >= (2 if p["actions"] > before["actions"] else 8)
+                finished = p["actions"] > before["actions"] or p.get("lastState") == "complete"
+                done = stable >= (2 if finished else 8)
             else:
                 stable = 0
+            if on_text and new_reply and p["lastLen"] != last_len and tick % 2 == 0:
+                # whole paragraphs before the first code block are final: pass them on while the rest is written
+                try:
+                    md = (await page.evaluate(READ_JS)).get("md") or ""
+                except Exception:  # noqa: BLE001 - streaming is a nicety; the full read below is what counts
+                    md = ""
+                cut = md.find("```")
+                safe = md[: cut if cut >= 0 else len(md)]
+                safe = safe[: max(safe.rfind("\n\n"), 0)]
+                if len(safe) > len(said) and safe.startswith(said):
+                    on_text(safe[len(said) :])
+                    said = safe
             last_len = p["lastLen"]
             if done:
                 break
@@ -1377,8 +1509,11 @@ class Bridge:
             raise WebSkip("another request is using the ChatGPT window") from None
 
     # ---- public --------------------------------------------------------------------------------------------------
-    async def complete(self, model: str, body: dict, model_id: str | None = None, wait: float | None = None) -> dict:
-        """One completion request -> a fresh or safely continued temporary chat."""
+    async def complete(
+        self, model: str, body: dict, model_id: str | None = None, wait: float | None = None, on_text=None
+    ) -> dict:
+        """One completion request -> a fresh or safely continued temporary chat. `on_text(piece)` gets the reply's
+        prose as it is written (see LiveStream)."""
         if self.o["lean"]:
             body = lean_body(body, int(self.o["lean_system_chars"]))
         prompt, tools, rules = render_prompt(body)
@@ -1446,7 +1581,7 @@ class Bridge:
                         )
                 else:
                     await self._open_chat(model, page)
-                r = await self._send(page, prompt)
+                r = await self._send(page, prompt, on_text)
                 repaired = False
                 try:
                     text, calls = parse_reply(r["md"], tools, rules)
@@ -1583,13 +1718,23 @@ class BridgePool:
         rot = {id(b): (i - self._turn) % len(bs) for i, b in enumerate(bs)}  # ties go round-robin
         return sorted(bs, key=lambda b: (key not in b._sessions, b.busy, b.load().get("count", 0) // 10, rot[id(b)]))
 
-    async def complete(self, model: str, body: dict, model_id: str | None = None, wait: float | None = None) -> dict:
+    async def complete(
+        self, model: str, body: dict, model_id: str | None = None, wait: float | None = None, on_text=None
+    ) -> dict:
         last: Exception | None = None
+        said = []
+
+        def heard(piece):
+            said.append(piece)
+            on_text(piece)
+
         for b in self._order(model, body):
             try:
-                return await b.complete(model, body, model_id=model_id, wait=wait)
+                return await b.complete(model, body, model_id=model_id, wait=wait, on_text=heard if on_text else None)
             except (WebUnavailable, WebSkip) as e:
                 last = e
+                if said:  # part of a reply already went out: another account would say it twice
+                    break
         raise last
 
     def status(self) -> dict:

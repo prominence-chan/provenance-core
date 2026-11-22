@@ -137,7 +137,7 @@ class Router:
     async def _web_call(self, m: Model, body: dict, stream: bool, wait: float | None = None):
         """A chatgpt_web model: the whole reply is read from the page first, so a failure (login wall, challenge,
         closed window, bad tool call) surfaces here and the caller can still fail over."""
-        from .chatgpt_web import BufferedStream, WebSkip, WebUnavailable
+        from .chatgpt_web import LiveStream, WebSkip, WebUnavailable
 
         t0 = time.time()
         size = len(json.dumps(body.get("messages", []), default=str))
@@ -145,8 +145,31 @@ class Router:
         def log(what: str):  # one line per attempt in the server log: the bridge is slow and worth being able to follow
             print(f"chatgpt-web: {m.id} {what} ({size} chars in, {time.time() - t0:.0f} s)", flush=True)
 
+        def done(data):
+            msg = data["choices"][0]["message"]
+            web = data["pcore"]["web"]
+            log(
+                f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
+                + (", repaired" if web.get("repaired") else "")
+                + (", nudged" if web.get("nudged") else "")
+                + (", continued chat" if web.get("continued") else ", new chat")
+                + (", history shortened" if web.get("compacted") else "")
+                + f", {web.get('sent_chars', '?')} chars typed"
+                + (f", account {web['account']}" if web.get("account") else "")
+            )
+
+        bridge = self.bridge(m.provider)
         try:
-            data = await self.bridge(m.provider).complete(m.model, body, model_id=m.id, wait=wait)
+            if stream:
+                live = LiveStream(
+                    lambda on_text: bridge.complete(m.model, body, model_id=m.id, wait=wait, on_text=on_text),
+                    m.id,
+                    on_done=done,
+                )
+                await live.first()
+                self.state.success(m, (time.time() - t0) * 1000)
+                return live, t0
+            data = await bridge.complete(m.model, body, model_id=m.id, wait=wait)
         except WebUnavailable as e:
             self.state.failure(m, retry_after=max(1.0, e.cooldown), rate_limited=True)
             log(f"unavailable for {int(e.cooldown)} s: {e.reason}")
@@ -159,18 +182,7 @@ class Router:
             log(f"failed: {e}")
             raise RuntimeError(f"{m.id}: {e}") from e
         self.state.success(m, (time.time() - t0) * 1000)
-        msg = data["choices"][0]["message"]
-        log(
-            f"ok: {len(msg.get('content') or '')} chars out, {len(msg.get('tool_calls') or [])} tool call(s)"
-            + (", repaired" if data["pcore"]["web"].get("repaired") else "")
-            + (", nudged" if data["pcore"]["web"].get("nudged") else "")
-            + (", continued chat" if data["pcore"]["web"].get("continued") else ", new chat")
-            + (", history shortened" if data["pcore"]["web"].get("compacted") else "")
-            + f", {data['pcore']['web'].get('sent_chars', '?')} chars typed"
-            + (f", account {data['pcore']['web']['account']}" if data["pcore"]["web"].get("account") else "")
-        )
-        if stream:
-            return BufferedStream(data), t0
+        done(data)
         self.state.record(m, data["usage"]["total_tokens"])
         return data
 

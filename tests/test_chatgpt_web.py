@@ -77,7 +77,7 @@ def test_prompt_holds_the_whole_request():
         "<<<tool result: shell>>>\na.py\nb.py",
         "<<<user>>>\nand now?",
         "At most one tool block",
-        "your built-in tools run elsewhere",
+        "cannot see my computer",
         "Shorthand for `apply_patch` (body = `input`)",
     ):
         assert piece in prompt
@@ -366,7 +366,7 @@ class FakeBridge:
     def __init__(self):
         self.calls, self.fail = [], None
 
-    async def complete(self, model, body, model_id=None, wait=None):
+    async def complete(self, model, body, model_id=None, wait=None, on_text=None):
         self.calls.append(body)
         if self.fail:
             raise self.fail
@@ -1036,3 +1036,45 @@ def test_temporary_limit_backs_off_and_doubles(mock, tmp_path):
 
     waits, sent = scenario(mock, tmp_path, go)
     assert waits == [("busy", 60), ("busy", 120)] and not sent
+
+
+def test_live_stream_sends_prose_early_then_the_rest():
+    async def go():
+        gate = asyncio.Event()
+
+        async def start(on_text):
+            on_text("Looking at the files.")
+            await gate.wait()
+            calls = [{"id": "call_1", "name": "shell", "arguments": '{"command": ["ls"]}'}]
+            return cw.chat_completion("chatgpt-web/luna", "Looking at the files.\n\nNow listing.", calls, "p")
+
+        live = await cw.LiveStream(start, "chatgpt-web/luna").first()  # returns at the first text, before the end
+        assert not live.task.done()
+        gate.set()
+        up = UpstreamStream(live)
+        return [e async for e in up.events()], up
+
+    events, up = run(go())
+    texts = [v for k, v in events if k == "text"]
+    assert texts[0] == "Looking at the files." and "".join(texts) == "Looking at the files.\n\nNow listing."
+    assert up.finish_reason == "tool_calls"
+
+
+def test_live_stream_fails_over_before_any_text_and_reports_after():
+    async def go():
+        async def early(on_text):
+            raise cw.WebUnavailable("signed out", 60, "login")
+
+        with pytest.raises(cw.WebUnavailable):
+            await cw.LiveStream(early, "m").first()
+
+        async def late(on_text):
+            on_text("Half a")
+            await asyncio.sleep(0)
+            raise cw.WebError("the window went away")
+
+        live = await cw.LiveStream(late, "m").first()
+        with pytest.raises(RuntimeError, match="window went away"):
+            [e async for e in UpstreamStream(live).events()]
+
+    run(go())

@@ -4,7 +4,7 @@
 
 Requests are translated to OpenAI chat and served through the Router like /v1/chat/completions (one model, no
 ensemble). Claude model ids map to tiers by family: opus -> PCORE_MAP_OPUS (default the strongest tier, "nova"),
-sonnet -> PCORE_MAP_SONNET ("solstice"), haiku -> PCORE_MAP_HAIKU ("spark"), anything else -> PCORE_MAP_DEFAULT
+sonnet -> PCORE_MAP_SONNET ("solstice"), haiku -> PCORE_MAP_HAIKU ("ember"), anything else -> PCORE_MAP_DEFAULT
 (the sonnet mapping). A tier name, alias or catalog id passes through. Values may end in ":none|down1|any" to set the
 fallback; the adapter default is PCORE_ANTHROPIC_FALLBACK ("any": step down rather than fail a coding agent).
 
@@ -39,7 +39,7 @@ from .adapters import (
 from .router import NoCapacity, Router
 from .settings import env
 
-FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("spark", 2)}  # (tier, position)
+FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("ember", 2)}  # (tier, position)
 
 
 def error(status: int, kind: str, message: str) -> JSONResponse:

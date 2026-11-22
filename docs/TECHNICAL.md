@@ -5,7 +5,7 @@
 - **Tiers by measured strength.** Every model has a 0-100 score: a prior from `catalog.yaml`, replaced by a measured
   one once `python -m provenance_core calibrate` runs its auto-graded probe set (arithmetic, combinatorics, code
   tracing, constrained reasoning; difficulty-weighted). Tiers are score bands: `nova` (>= 94), `solstice` (>= 82),
-  `spark` (>= 62), `ember` (the rest). Bands and names are configurable in `catalog.yaml`; `tier-1`..`tier-4`,
+  `ember` (>= 62), `spark` (the rest). Bands and names are configurable in `catalog.yaml`; `tier-1`..`tier-4`,
   `auto` / `default` (= `solstice`) and the older names (`supernova`, `blaze`, `cinder`, ...) are aliases.
 - **No silent downgrades.** A request is only served inside its tier. It fails over between same-tier models (rate
   limits, errors) and returns 503 rather than quietly answering with a weaker model. `fallback: down1 | any` opts
@@ -79,7 +79,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN="${PCORE_TOKEN:-pc
 ```
 
 Claude model ids map to tiers by family (dates and suffixes like `[1m]` are ignored); a tier name, alias or catalog
-id (`ANTHROPIC_MODEL=solstice`, `/model spark`) passes straight through. A mapping value may end in `:none`,
+id (`ANTHROPIC_MODEL=solstice`, `/model ember`) passes straight through. A mapping value may end in `:none`,
 `:down1` or `:any` to set its fallback (`PCORE_MAP_OPUS=nova:none`). If a default tier name isn't in your catalog,
 the tier at the same position is used. `/v1/messages/count_tokens` returns an estimate. With `PCORE_TOKEN` set the
 proxy accepts it as a bearer token (`ANTHROPIC_AUTH_TOKEN`) or as `x-api-key` (`ANTHROPIC_API_KEY`). When nothing in
@@ -315,7 +315,7 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_PORT` | `4141` | `serve` port |
 | `PCORE_MAP_OPUS` | `nova` | tier for opus-family requests |
 | `PCORE_MAP_SONNET` | `solstice` | sonnet-family requests |
-| `PCORE_MAP_HAIKU` | `spark` | haiku-family requests (Claude Code's side calls) |
+| `PCORE_MAP_HAIKU` | `ember` | haiku-family requests (Claude Code's side calls) |
 | `PCORE_MAP_DEFAULT` | sonnet mapping | any other model name (on `/v1/responses` the default is the strongest tier) |
 | `PCORE_ANTHROPIC_FALLBACK` | `any` | fallback for `/v1/messages` |
 | `PCORE_RESPONSES_FALLBACK` | `down1` | fallback for `/v1/responses` |
