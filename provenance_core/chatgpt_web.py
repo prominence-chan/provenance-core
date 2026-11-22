@@ -901,6 +901,7 @@ PROBE_JS = r"""(fresh) => {
     if (/challenges\.cloudflare\.com|arkoselabs|funcaptcha|hcaptcha|recaptcha|challenge/i.test(src) && vis(f) && r.width > 120 && r.height > 40) { out.challenge = 'captcha frame'; break; }
   }
   out.busy = m(/temporar(?:y|ily)[^.\n]{0,80}limit[^.\n]{0,80}|limit[^.\n]{0,60}temporar(?:y|ily)[^.\n]{0,60}|(?:unable|failed|couldn(?:'|’)t) to load[^.\n]{0,60}|try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|experiencing (?:high|heavy) demand/i);
+  if (out.busy) { const at = text.indexOf(out.busy); out.busyContext = text.slice(Math.max(0, at - 220), at + out.busy.length + 120).replace(/\s+/g, ' ').trim(); }
   out.limit = out.busy ? null : m(/you(?:'|’)ve (?:reached|hit) (?:your|the|our)[^.\n]{0,80}limit|you(?:'|’)re out of[^.\n]{0,60}|too many requests|usage cap|limit reached/i);
   out.error = m(/something went wrong|error generating|network error|unable to load|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|conversation not found|an error occurred/i, scoped);
   // "Context window full - Start a new chat with an automatic summary ...": shown beside the composer, not in a reply
@@ -1891,7 +1892,8 @@ class Bridge:
     def _notices(self, p: dict):
         if p.get("busy") and not p.get("challenge"):
             who = self.site["name"] if self.site else "ChatGPT"
-            raise WebUnavailable(f"{who} is turning chats away for now ({p['busy'][:120]!r})", self._strike(), "busy")
+            said = (p.get("busyContext") or p["busy"])[:360]  # the whole notice: it says whether it is a limit
+            raise WebUnavailable(f"{who} is turning chats away for now ({said!r})", self._strike(), "busy")
         """Anything on the page that means "stop": never interact with it, just report."""
         if p.get("challenge"):
             raise WebUnavailable(
