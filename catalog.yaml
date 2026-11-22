@@ -15,6 +15,10 @@ tiers:
   - {name: ember,  min_score: 62}   # strong mid: good for edits, summaries, tool plumbing
   - {name: spark, min_score: 0}    # fast / small: classification, routing, cheap bulk work
 
+# History pruning (prune.py): repeated file reads, stale reads, bulky write feedback and long old outputs are cut
+# from the history. On for the web bridge (applied only to the prompt that starts a new chat); off for API models.
+prune: {web: true}
+
 aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: spark, tier-1: nova, tier-2: solstice, tier-3: ember, tier-4: spark, auto: solstice, default: solstice}
 
 providers:
