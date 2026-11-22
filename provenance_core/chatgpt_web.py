@@ -1312,6 +1312,9 @@ DEFAULTS = {
     # installed Google Chrome: the same build, so the same "Google Chrome" brand to sites; this Mac only)
     "browser_source": "cft",
     "notify": True,  # macOS notification when the provider goes unavailable
+    # an account no check has ever seen signed in (a new one, nothing signed in yet) is skipped, without penalty,
+    # instead of opening its browser to find the sign-in page. Provenance.app's catalog turns it on
+    "skip_unchecked": False,
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
     "site": None,  # another chat site from SITES (e.g. zai) instead of chatgpt.com
 }
@@ -1474,9 +1477,11 @@ class Bridge:
     def capacity(self, accounts=None) -> dict:
         s = self.status()
         cap = int(self.o["daily_cap"])
-        out = s["blocked"] or s["signing_in"]
+        unchecked = bool(self.o.get("skip_unchecked")) and s["signed_in"] is None
+        out = s["blocked"] or s["signing_in"] or unchecked
         left = 0.0 if out or not cap else max(0, cap - s["today"]) / cap
-        return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0}
+        return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0,
+                "signed_in": s["signed_in"] is True}  # fmt: skip
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
@@ -1497,6 +1502,8 @@ class Bridge:
         if self.signing_in():
             raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
         s = self.load()
+        if self.o.get("skip_unchecked") and s.get("signed_in") is None:
+            raise WebSkip(f"no one has signed in on this account ({self.account or 'main'}) yet")
         left = (s.get("blocked_until") or 0) - self.clock()
         if left > 0:
             raise WebUnavailable(s.get("reason") or "unavailable", left, s.get("kind") or "blocked")
@@ -2552,7 +2559,7 @@ class BridgePool:
         """What is left today on these accounts (all of them by default) and how busy they are; the router shares
         requests out between sources by it."""
         bs = [b for n, b in self.bridges.items() if not accounts or n in accounts]
-        open_ = [b for b in bs if not b.status()["blocked"] and not b.signing_in()]
+        open_ = [b for b in bs if b.capacity()["accounts"]]
         cap = sum(int(b.o["daily_cap"]) for b in open_)
         used = sum(min(b.load().get("count", 0), int(b.o["daily_cap"])) for b in open_)
         return {
@@ -2560,6 +2567,7 @@ class BridgePool:
             "busy": sum(b.busy for b in bs),
             "accounts": len(open_),
             "available": bool(open_) and used < cap,
+            "signed_in": any(b.status()["signed_in"] is True for b in bs),
         }
 
     def _order(self, model: str, body: dict, accounts=None) -> list[Bridge]:

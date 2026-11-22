@@ -70,6 +70,9 @@ def create_app(
                             "busy": s["busy"],
                             "available": s["available"],
                             "pinnable": s["pinnable"],
+                            # why it cannot be used: "keys" (no API key for any of its models), "signin" (no
+                            # account signed in), else null
+                            "needs": s["needs"],
                         }
                         for s in router.sources(t, web=router.web_ok("responses"))
                     ],
