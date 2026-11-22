@@ -45,6 +45,11 @@ class WebSkip(WebError):
     """The bridge can't take this request (busy, prompt too long, images): no health penalty."""
 
 
+class WebUnsent(WebError):
+    """The chat would not take the message (its context window is full, or the page ignored the send). Nothing was
+    sent, so the same request can go to a fresh chat."""
+
+
 class WebUnavailable(WebError):
     """The provider is out until `cooldown` seconds pass (or the login is redone): login, challenge, limit, ..."""
 
@@ -813,6 +818,16 @@ PROBE_JS = r"""(fresh) => {
   out.busy = m(/temporar(?:y|ily)[^.\n]{0,80}limit[^.\n]{0,80}|limit[^.\n]{0,60}temporar(?:y|ily)[^.\n]{0,60}|(?:unable|failed|couldn(?:'|’)t) to load[^.\n]{0,60}|try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|experiencing (?:high|heavy) demand/i);
   out.limit = out.busy ? null : m(/you(?:'|’)ve (?:reached|hit) (?:your|the|our)[^.\n]{0,80}limit|you(?:'|’)re out of[^.\n]{0,60}|too many requests|usage cap|limit reached/i);
   out.error = m(/something went wrong|error generating|network error|unable to load|message (?:is )?too long|(?:too long|exceeds)[^.\n]{0,40}(?:message|limit)|conversation not found|an error occurred/i, scoped);
+  // "Context window full - Start a new chat with an automatic summary ...": shown beside the composer, not in a reply
+  out.full = null;
+  if (!fresh && document.body) {
+    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (!/context window (?:is )?full|conversation (?:is|has gotten) too long|reached the maximum (?:length|context)/i.test(n.nodeValue)) continue;
+      const p = n.parentElement;
+      if (p && vis(p) && !p.closest('[data-turn-key], [data-message-author-role], article, textarea, [contenteditable]')) { out.full = n.nodeValue.trim().slice(0, 160); break; }
+    }
+  }
   let temp = null;
   for (const el of document.querySelectorAll('[aria-label]')) {
     const a = (el.getAttribute('aria-label') || '').toLowerCase();
@@ -1384,6 +1399,8 @@ class Bridge:
     async def _send(self, page, text: str, on_text=None) -> dict:
         """Type one message, send it, wait for the reply to finish. -> {md, slug}"""
         before = await self._probe(page, False)
+        if before.get("full"):
+            raise WebUnsent(f"this chat is full ({before['full']!r})")
         box = page.locator(COMPOSER).first
         try:  # a click waits for the element to hold still, which a hidden window may never report: focus is enough
             await box.click(timeout=2500)
@@ -1412,7 +1429,7 @@ class Bridge:
                 await box.press("Enter")
         t0 = time.time()
         timeout = float(self.o["reply_timeout_s"])
-        started, stable, last_len = False, 0, -1
+        started, stable, last_len, empty = False, 0, -1, 0
         said, tick = "", 0
         while True:
             tick += 1
@@ -1437,8 +1454,10 @@ class Bridge:
                 )
             if not started:
                 started = new_user or new_reply or p["stop"]
+                if not started and p.get("full"):
+                    raise WebUnsent(f"this chat is full ({p['full']!r})")
                 if not started and time.time() - t0 > 30:
-                    raise WebError("the message was not sent" + (f": {p['error']}" if p.get("error") else ""))
+                    raise WebUnsent("the message was not sent" + (f": {p['error']}" if p.get("error") else ""))
                 if not started:
                     continue
             if p.get("error") and not p["stop"] and not new_reply:
@@ -1450,6 +1469,15 @@ class Bridge:
                 done = stable >= (2 if finished else 8)
             else:
                 stable = 0
+            # a reply that is marked finished but has no text never gets any: do not sit out the whole timeout
+            empty = (
+                empty + 1
+                if new_reply and not p["stop"] and not p["lastLen"] and p.get("lastState") == "complete"
+                else 0
+            )
+            if empty >= 40:
+                await self._dump(page, p, "empty")
+                raise WebError("the reply was empty")
             if on_text and new_reply and p["lastLen"] != last_len and tick % 2 == 0:
                 # whole paragraphs before the first code block are final: pass them on while the rest is written
                 try:
@@ -1487,6 +1515,7 @@ class Bridge:
             html = await page.evaluate("""() => { const t = [...document.querySelectorAll('[data-turn-key], [data-message-author-role], article')];
                 const e = t[t.length - 1] || document.querySelector('main') || document.body; return e.outerHTML.slice(0, 400000); }""")
             read = await page.evaluate(READ_JS)
+            read["page_tail"] = await page.evaluate("() => (document.body.innerText || '').slice(-1500)")
             (d / f"{time.strftime('%Y%m%d-%H%M%S')}-{why}.json").write_text(
                 json.dumps({"why": why, "probe": probe, "read": read, "last_turn_html": html}, indent=1)
             )
@@ -1635,7 +1664,22 @@ class Bridge:
                 )
 
             try:
-                text, calls, extra = await self._guarded(run)
+                try:
+                    text, calls, extra = await self._guarded(run)
+                except WebUnsent as e:
+                    if not reuse:
+                        raise
+                    # the chat is full or stopped taking messages: nothing was sent, so carry on in a fresh chat
+                    # with the history the caller sent (shortened), in the same request
+                    await self._dump(page, {"reason": str(e)}, "full")
+                    reuse, compacted = False, False
+                    prompt, tools, rules = render_prompt(body)
+                    if len(prompt) > int(self.o["fresh_prompt_chars"]):
+                        prompt, tools, rules, compacted = compact_initial_prompt(
+                            body, int(self.o["fresh_prompt_chars"])
+                        )
+                    text, calls, extra = await self._guarded(run)
+                    extra["restarted"] = True
             except Exception as e:
                 if key:
                     self._sessions.pop(key, None)  # the page may contain a partial reply

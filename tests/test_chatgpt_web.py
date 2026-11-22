@@ -679,6 +679,28 @@ def test_temporary_chat_reuses_only_its_own_conversation(mock, tmp_path):
 
 
 @browser
+def test_full_chat_moves_to_a_new_chat_in_the_same_request(mock, tmp_path):
+    mock.state["full_after"] = 1
+    mock.replies = [tool_call("shell", {"command": ["pwd"]}), "<p>done</p>"]
+
+    async def go(b):
+        a = {"messages": [{"role": "user", "content": "task A"}], "tools": TOOLS}
+        first = await b.complete("luna", a)
+        msg = first["choices"][0]["message"]
+        follow = {
+            **a,
+            "messages": a["messages"]
+            + [msg, {"role": "tool", "tool_call_id": msg["tool_calls"][0]["id"], "content": "/repo"}],
+        }
+        return await b.complete("luna", follow), b.load().get("strikes", 0)
+
+    last, strikes = scenario(mock, tmp_path, go, reuse_chat=True)
+    assert last["choices"][0]["message"]["content"] == "done"
+    assert last["pcore"]["web"]["restarted"] and not last["pcore"]["web"]["continued"] and not strikes
+    assert len(mock.sent) == 2 and "task A" in mock.sent[1]["prompt"] and "/repo" in mock.sent[1]["prompt"]
+
+
+@browser
 def test_named_model_can_fall_back_to_auto(mock, tmp_path):
     mock.state["model"] = "Auto"
     mock.state["models"] = ["Auto"]

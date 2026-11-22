@@ -153,6 +153,7 @@ class Router:
                 + (", repaired" if web.get("repaired") else "")
                 + (", nudged" if web.get("nudged") else "")
                 + (", continued chat" if web.get("continued") else ", new chat")
+                + (", previous chat was full" if web.get("restarted") else "")
                 + (", history shortened" if web.get("compacted") else "")
                 + f", {web.get('sent_chars', '?')} chars typed"
                 + (f", account {web['account']}" if web.get("account") else "")

@@ -21,6 +21,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</titl
 <main>
   <h1 id="temphead"></h1>
   <div id="thread"></div>
+  <div id="full"></div>
   <form onsubmit="return false">
     <textarea id="prompt-textarea" role="textbox" rows="4" cols="80"></textarea>
     <button id="composer-submit-button" data-testid="send-button" aria-label="Send prompt">send</button>
@@ -50,6 +51,11 @@ $('sw').onclick = () => {
 };
 chrome();
 const btn = $('composer-submit-button');
+function isFull() {  // S.full_after user messages fill the chat: a notice appears and sending does nothing
+  const full = S.full_after && document.querySelectorAll('[data-message-author-role="user"]').length >= S.full_after;
+  $('full').innerHTML = full ? '<div><b>Context window full</b><p>Start a new chat with an automatic summary of this conversation, or upgrade to continue here.</p><button>Start a new chat</button></div>' : '';
+  return full;
+}
 function add(role, htmlText, slug) {
   const art = document.createElement('article'); art.setAttribute('data-testid', 'conversation-turn');
   const d = document.createElement('div'); d.setAttribute('data-message-author-role', role);
@@ -60,6 +66,7 @@ function add(role, htmlText, slug) {
 }
 btn.onclick = async () => {
   if (btn.dataset.testid === 'stop-button') return;
+  if (isFull()) return;
   const box = $('prompt-textarea'); const text = box.value; box.value = '';
   add('user', text);
   btn.dataset.testid = 'stop-button'; btn.setAttribute('aria-label', 'Stop streaming'); btn.textContent = 'stop';
@@ -74,6 +81,7 @@ btn.onclick = async () => {
     const c = document.createElement('button'); c.setAttribute('data-testid', 'copy-turn-action-button'); c.textContent = 'Copy'; art.appendChild(c);
   }
   btn.dataset.testid = 'send-button'; btn.setAttribute('aria-label', 'Send prompt'); btn.textContent = 'send';
+  isFull();
 };
 </script></body></html>"""
 
@@ -108,6 +116,7 @@ class Mock:
             "model": "Luna",
             "models": ["Luna", "Nimbus"],
             "delay": 150,
+            "full_after": 0,  # this many user messages fill a chat (0 = never)
         }
         self.replies: list = ["<p>ok</p>"]
         self.sent: list[dict] = []
