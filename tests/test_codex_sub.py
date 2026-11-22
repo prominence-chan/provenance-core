@@ -87,6 +87,36 @@ def history(steps: int) -> list[dict]:
     return items
 
 
+CODE_HEADER = "Script completed\nWall time 0.1 seconds\nOutput:\n"
+
+
+def code_step(n: int, cmd: str, output: str) -> list[dict]:
+    """One code-mode step (what current Codex models do): an `exec` custom tool call with a script, its output as
+    text parts (the status header, then the script's text)."""
+    cid = f"exec_{n}"
+    script = f"const r = await tools.exec_command({{cmd: {json.dumps(cmd)}}});\ntext(r.output);"
+    return [
+        {"type": "custom_tool_call", "id": f"ctc_{n}", "call_id": cid, "name": "exec", "input": script},
+        {
+            "type": "custom_tool_call_output",
+            "call_id": cid,
+            "output": [{"type": "input_text", "text": CODE_HEADER}, {"type": "input_text", "text": output}],
+        },
+    ]
+
+
+def code_history(steps: int) -> list[dict]:
+    items = history(0) + [{"type": "additional_tools", "role": "developer", "tools": [{"name": "exec"}]}]
+    for n in range(steps):
+        if n % 3 == 0:
+            items += code_step(n, "cat src/mod.py", FILE)
+        elif n % 3 == 1:
+            items += code_step(n, "pytest -q", "FAILED test_mod.py::test_x - assert 1 == 2\n" * 200)
+        else:
+            items += code_step(n, "git status", "On branch main\nnothing to commit, working tree clean\n" * 4)
+    return items
+
+
 def body_of(items: list[dict], **extra) -> dict:
     return {
         "model": "gpt-test-codex",
@@ -159,6 +189,41 @@ def test_old_write_and_custom_tool_call():
     assert new[1]["call_id"] == "p1" and new[1]["name"] == "apply_patch"
     assert new[3] is secret_call  # a call with encrypted arguments keeps them
     assert rep["rules"]["old_write"]["count"] == 1  # and the report counts only what was changed
+
+
+def test_code_mode_text_parts():
+    items = code_history(30)
+    out, rep = prune_responses.prune_request(body_of(items), OPTS)
+    new = out["input"]
+    assert rep["saved"] > 10_000 and {"dup_output", "long_output"} <= set(rep["rules"])
+    changed = [i for i, (a, b) in enumerate(zip(items, new, strict=True)) if a != b]
+    assert changed and all(items[i]["type"] == "custom_tool_call_output" for i in changed)
+    assert max(changed) < rep["boundary"]
+    for i in changed:
+        parts = new[i]["output"]
+        assert new[i]["call_id"] == items[i]["call_id"]
+        assert parts and all(p["type"] == "input_text" and isinstance(p["text"], str) for p in parts)
+    texts = ["".join(p["text"] for p in new[i]["output"]) for i in changed]
+    assert any("same output as a later exec call" in t for t in texts)
+    cut = [new[i]["output"] for i in changed if "of old output omitted" in new[i]["output"][-1]["text"]]
+    assert cut and all(p[0]["text"] == CODE_HEADER and len(p) == 2 for p in cut)  # the status header stays
+    for a, b in zip(items, new, strict=True):
+        if a["type"] != "custom_tool_call_output":
+            assert b is a
+
+
+def test_code_mode_prefix_is_stable():
+    full = code_history(45)
+    ends = [i + 1 for i, it in enumerate(full) if it["type"] == "custom_tool_call_output"]
+    same, prev = 0, None
+    for end in ends:
+        out, rep = prune_responses.prune_request(body_of(full[:end]), OPTS)
+        enc = [json.dumps(it, separators=(",", ":")) for it in out["input"]]
+        if prev and prev[1]["boundary"] == rep["boundary"]:
+            assert enc[: len(prev[0])] == prev[0]
+            same += 1
+        prev = (enc, rep)
+    assert same >= 30
 
 
 def test_structured_outputs_and_unknown_items_pass():

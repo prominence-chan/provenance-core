@@ -196,8 +196,13 @@ provenance app-server -c model_provider="openai" \
   (`chatgpt_base_url`: usage, accounts, workspace routing) and its token refreshes still go to OpenAI directly; leave
   `chatgpt_base_url` alone, or the binary's workspace routing sends model requests to the workspace's backend instead.
 - **Treatment**: only `POST …/codex/responses`. Its `input` items are pruned in place (`prune_responses.py`): the text
-  of old tool outputs (`function_call_output`, `custom_tool_call_output`, `local_shell_call_output` with a plain-string
-  `output`) and the file text in old whole-file write calls, by the rules above, in mode `stable`. Never touched:
+  of old tool outputs (`function_call_output`, `custom_tool_call_output`, `local_shell_call_output` whose `output` is
+  a string or a list of text parts only, which is what code mode returns: a status part, then the script's text) and
+  the file text in old whole-file write calls, by the rules above, in mode `stable`. An output with an image or any
+  other part is left whole. Current Codex models run every tool through code mode (one `exec` call with a script), so
+  the router can't tell a file view from a log there: `long_output` cuts old long outputs of those calls to their head
+  and tail, `dup_output` and `repeated_lines` work as usual, and the read/write rules (`stale_read`, `old_write`,
+  `write_echo`) only see plain shell, apply_patch and file tool calls. Never touched:
   `instructions`, tools, messages of any role, reasoning items (encrypted content included), ids, call ids, the
   number and order of items; `dup_system` and `filler` are not used; a call carrying encrypted content or arguments
   keeps its arguments. Consecutive requests of a thread share their pruned prefix byte for byte between boundary

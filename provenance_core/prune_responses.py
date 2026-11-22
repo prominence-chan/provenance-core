@@ -8,12 +8,15 @@ so encrypted reasoning, ids, statuses, phases and anything this module does not 
 
 What can change, exactly as prune.py judges it (its docstring has the rules):
 - the text of an old tool output: function_call_output / custom_tool_call_output / local_shell_call_output whose
-  `output` is a plain string (exec_header, stale_read, dup_output, repeated_lines, write_echo, long_output)
+  `output` is a plain string, or a list of text parts only (code mode's "Script completed / Wall time / Output:"
+  part plus the script's text parts), judged as one text (exec_header, stale_read, dup_output, repeated_lines,
+  write_echo, long_output). A changed list keeps its first part when the new text still starts with it and gets the
+  rest as one text part; an output with any other part (an image) is left as it is
 - the file text inside an old whole-file write: a function_call's `arguments` or a custom_tool_call's `input`
   (old_write), unless that call carries encrypted content or encrypted arguments
 What never changes: `instructions`, tools, every message (user, developer, system, assistant), reasoning items, ids,
 call ids, names, the number and order of items, and call/output pairing. dup_system and filler (which edit developer
-and assistant messages) are never used here. Structured outputs (content-item lists, images) are left as they are.
+and assistant messages) are never used here.
 
 Stable mode only: the part before an epoch boundary that moves every `step` assistant turns is pruned, judged on that
 part alone, so consecutive requests of one thread start with the same items byte for byte between moves and OpenAI's
@@ -131,11 +134,31 @@ def to_messages(items: list) -> tuple[list[dict], list, list[int]]:
             refs[-1][call_id] = idx
         elif t in OUTPUTS:
             out = it.get("output")
+            if _text_parts(out):
+                out = "".join(p["text"] for p in out)
             msgs.append({"role": "tool", "tool_call_id": it.get("call_id"), "content": out if out is not None else ""})
             refs.append(idx)
             starts.append(idx)
         # reasoning, web_search_call, compaction, tool_search_*, additional_tools, ...: not part of the view
     return msgs, refs, starts
+
+
+def _text_parts(out) -> bool:
+    """A structured output made of text parts only (what code mode returns for a script without images)."""
+    return (
+        isinstance(out, list)
+        and bool(out)
+        and all(isinstance(p, dict) and p.get("type") == "input_text" and isinstance(p.get("text"), str) for p in out)
+    )
+
+
+def _parts_with(parts: list[dict], text: str) -> list[dict]:
+    """A text-parts output carrying `text`: its first part kept when the text still starts with it (code mode's
+    status header), the rest as one text part."""
+    first = parts[0]["text"]
+    if len(parts) > 1 and text.startswith(first) and len(text) > len(first):
+        return [parts[0], {**parts[1], "text": text[len(first) :]}]
+    return [{**parts[0], "text": text}]
 
 
 def _write_back(items: list, before: list[dict], after: list[dict], refs: list) -> list:
@@ -145,7 +168,9 @@ def _write_back(items: list, before: list[dict], after: list[dict], refs: list) 
         if a["role"] == "tool":
             if isinstance(b.get("content"), str) and isinstance(a.get("content"), str) and b["content"] != a["content"]:
                 new = new or list(items)
-                new[refs[i]] = {**items[refs[i]], "output": b["content"]}
+                it = items[refs[i]]
+                out = _parts_with(it["output"], b["content"]) if _text_parts(it.get("output")) else b["content"]
+                new[refs[i]] = {**it, "output": out}
         elif a["role"] == "assistant" and a.get("tool_calls"):
             for ta, tb in zip(a["tool_calls"], b.get("tool_calls") or [], strict=True):
                 old, now = ta["function"]["arguments"], tb["function"]["arguments"]
