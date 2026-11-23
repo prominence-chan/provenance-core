@@ -722,6 +722,15 @@ _STALL = re.compile(
     # its own sandbox's tool failed, so it reports that nothing happened ("the local command execution interface
     # returned an error before confirming that either file was written. No successful changes are verified.")
     r"|\bI(?:['’]m| am) ready to (?:create|write|run|make|apply|edit|start|begin|implement|test|proceed)\b"
+    # a "blocked" report that blames the tools: it tried its own code container or function calling, not a tool block
+    # ("Terminal tool-call interface rejected the command", "returned a container ServerError", "Local terminal
+    # access is unavailable, and the available tools cannot write to the specified machine")
+    r"|\b(?:tool-?call(?:ing)? interface|terminal|command execution|local execution|execution attempt|container)\b"
+    r"[^.\n]{0,60}\b(?:rejected|refused|blocked|unavailable|returned an? (?:\w+ )?(?:Server)?Error|ServerError)\b"
+    r"|\b(?:terminal|shell|command|filesystem|file-?editing)(?: \w+){0,3} (?:is|are|was|were) (?:unavailable|inaccessible|blocked)\b"
+    r"|\bcannot (?:write|read|reach|connect) (?:to|from) (?:the|your) (?:specified |target |local )?(?:machine|computer|filesystem)\b"
+    r"|\bno access to (?:the|your) (?:target |local )?(?:machine|computer|filesystem|terminal)\b"
+    r"|\bServerError\b"
     # a step announced as under way, with nothing run ("I’m correcting that and rerunning the checks.")
     r"|\bI(?:['’]m| am)(?: now| just| also)? (?:correcting|fixing|re-?running|running|updating|applying|writing|"
     r"creating|changing|editing|checking|verifying|testing|patching|implementing|adding|removing|replacing|"

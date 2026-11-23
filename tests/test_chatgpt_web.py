@@ -762,6 +762,13 @@ def test_a_reply_about_its_own_sandbox_failing_is_a_stall():
         "I’m ready to create and test the two files, but the local command execution interface returned an error "
         "before confirming that either file was written. No successful changes are verified.",
         "The execution environment hit an internal error. No changes were made.",
+        "BLOCKED: The terminal command was not successfully executed, so the file has not been created or validated."
+        "\n\nRESULT: No verified changes.\nCHANGES: None.\nVALIDATION: Not run.\nBLOCKERS: Terminal tool-call interface "
+        "rejected the command.\nSTATUS: BLOCKED",
+        "RESULT: Python validation could not be completed because the terminal execution attempt returned a container "
+        "ServerError. No test results can be confirmed.\n\nCHANGES: None.\n\nSTATUS: BLOCKED",
+        "BLOCKERS: Local terminal access is unavailable, and the available tools cannot write to the specified machine.",
+        "BLOCKERS: No access to the target machine's filesystem through the available file-editing tools.",
         "The test exposed a compatibility issue: `ConfigParser` does not accept `encoding` in its constructor. "
         "The encoding belongs in the `read()` call instead. I’m correcting that and rerunning the checks.",
     ]:
