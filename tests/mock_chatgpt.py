@@ -17,6 +17,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</titl
   <span id="acct"></span>
   <span id="tempctl"></span>
 </header>
+<nav aria-label="Chat history" id="side"></nav>
 <div id="banner"></div>
 <main>
   <h1 id="temphead"></h1>
@@ -30,6 +31,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</titl
 <script>
 const S = __STATE__;
 if (S.title) document.title = S.title;
+if (S.sidebar) document.getElementById('side').innerText = S.sidebar;
 const q = new URLSearchParams(location.search);
 let temp = S.temp && q.get('temporary-chat') === 'true';
 let model = S.model;
@@ -138,6 +140,7 @@ class Mock:
             "models": ["Luna", "Nimbus"],
             "delay": 150,
             "full_after": 0,  # this many user messages fill a chat (0 = never)
+            "sidebar": "",  # the saved-chats list beside the chat (titles, its own load errors)
             "box_max": 0,  # the message box holds this many characters (0 = any)
             # login: True / False, or "cookie": signed in when the browser sends SESSION (set by the sign-in page)
             "signin_auto": False,  # the sign-in page signs itself in

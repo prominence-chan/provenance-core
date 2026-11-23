@@ -1444,3 +1444,16 @@ def test_a_lost_temp_chat_or_sign_in_is_doubted_before_the_long_block(mock, tmp_
     seen = scenario(mock, tmp_path, go)
     assert seen == [("page", True, "page"), ("page", True, "page"), (kind, False, kind)], seen
     assert mock.sent == []
+
+
+@browser
+def test_the_sidebar_is_not_read_for_notices(mock, tmp_path):
+    """The saved-chats list has titles of the user's own ("Usage limits: try again later") and its own load error;
+    neither says a chat cannot be sent."""
+    mock.state["sidebar"] = "Usage limits design\nAccess denied essay\nTry again later\nUnable to load history\nRetry"
+
+    async def go(b):
+        return await b.complete("luna", dict(USER)), b.status()
+
+    d, st = scenario(mock, tmp_path, go)
+    assert d["choices"][0]["message"]["content"] == "ok" and not st["blocked"], st
