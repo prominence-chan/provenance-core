@@ -400,9 +400,17 @@ def create_app(
             return fail(e)
 
     @app.get("/web/open")
-    async def web_open_state(provider: str, account: str | None = None, authorization: str | None = Header(None)):
+    async def web_open_state(
+        provider: str | None = None, account: str | None = None, authorization: str | None = Header(None)
+    ):
         check(authorization)
         try:
+            if not provider:  # no account named: whichever key page is open (one at a time), else idle
+                for f in list(setup.opens.values()):
+                    v = f.view()
+                    if v.get("state") in ("preparing", "open"):
+                        return v
+                return {"state": "idle", "reason": None, "provider": None, "account": None, "url": None}
             return setup.open_state(provider, account)
         except KeyError as e:
             return fail(e)
@@ -429,7 +437,10 @@ def create_app(
         check(authorization)
         b = await body_of(request)
         try:
-            return await setup.cancel(str(b.get("provider") or ""), b.get("account"))
+            prov, acc = str(b.get("provider") or ""), b.get("account")
+            if (prov, acc or "main") in setup.opens:  # a key page open in that account's window closes the same way
+                return await setup.open_cancel(prov, acc)
+            return await setup.cancel(prov, acc)
         except KeyError as e:
             return fail(e)
 
