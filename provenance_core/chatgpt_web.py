@@ -719,6 +719,10 @@ _STALL = re.compile(
     # its own sandbox's tool failed, so it reports that nothing happened ("the local command execution interface
     # returned an error before confirming that either file was written. No successful changes are verified.")
     r"|\bI(?:['’]m| am) ready to (?:create|write|run|make|apply|edit|start|begin|implement|test|proceed)\b"
+    # a step announced as under way, with nothing run ("I’m correcting that and rerunning the checks.")
+    r"|\bI(?:['’]m| am)(?: now| just| also)? (?:correcting|fixing|re-?running|running|updating|applying|writing|"
+    r"creating|changing|editing|checking|verifying|testing|patching|implementing|adding|removing|replacing|"
+    r"inspecting|reading|looking|continuing|proceeding|starting|switching|trying|rewriting|adjusting|investigating)\b"
     r"|\b(?:interface|tool|command|execution|environment|sandbox|shell|session)\b[^.\n]{0,40}\b(?:returned|gave|hit|threw|"
     r"raised|produced|reported|encountered) an? (?:\w+ )?error\b"
     r"|\bno (?:successful |file |code )?(?:changes?|edits?|files?|writes?) (?:are|were|was|have been|has been) "
@@ -2502,6 +2506,12 @@ class Bridge:
             session = self._sessions.get(key) if key else None
             reuse = continues()
             compacted, fresh_info = False, {"pruned": None, "compaction": None}
+            said_live: list[str] = []  # what a streaming client was already sent of the first reply
+
+            def heard(piece: str):
+                said_live.append(piece)
+                on_text(piece)
+
             if reuse:
                 page = session["page"]
                 delta = messages[len(session["seen"]) :]
@@ -2534,7 +2544,7 @@ class Bridge:
                         )
                 else:
                     await self._open_chat(model, page)
-                r = await self._send(page, prompt, on_text)
+                r = await self._send(page, prompt, heard if on_text else None)
                 repaired = False
                 try:
                     text, calls = parse_reply(r["md"], tools, rules)
@@ -2637,9 +2647,16 @@ class Bridge:
                 text = re.sub(r"^```\w*\n|\n```$", "", text.strip())
             data = chat_completion(model_id or f"chatgpt-web/{model}", text, calls, prompt, extra)
             if key:
+                kept = data["choices"][0]["message"]
+                early = "".join(said_live)
+                if early and not (kept.get("content") or "").startswith(early):
+                    # a repair or nudge replaced a reply whose first paragraphs had already gone out: the client
+                    # holds those as this turn's text (LiveStream sends nothing more), and the next request is
+                    # compared with what the client holds, or the chat would look changed and start over
+                    kept = {**kept, "content": early}
                 self._sessions[key] = {
                     "page": page,
-                    "seen": messages + [data["choices"][0]["message"]],
+                    "seen": messages + [kept],
                     "reply": data["choices"][0]["message"],
                     "setup": setup,
                 }

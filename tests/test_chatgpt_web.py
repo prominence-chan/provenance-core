@@ -762,6 +762,8 @@ def test_a_reply_about_its_own_sandbox_failing_is_a_stall():
         "I’m ready to create and test the two files, but the local command execution interface returned an error "
         "before confirming that either file was written. No successful changes are verified.",
         "The execution environment hit an internal error. No changes were made.",
+        "The test exposed a compatibility issue: `ConfigParser` does not accept `encoding` in its constructor. "
+        "The encoding belongs in the `read()` call instead. I’m correcting that and rerunning the checks.",
     ]:
         assert cw.stalled(t, SCHEMAS), t
     for t in [
