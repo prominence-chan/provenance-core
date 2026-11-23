@@ -10,6 +10,7 @@
 #   docs-only  the docs say where the key is made, but the page is behind a sign-in and its labels could not be read;
 #              steps name only what the docs name
 #   uncertain  the only walkthrough found is dated, or the docs contradict each other
+# setup: person = the person does this one alone with the written steps (why_person says why); default: assisted
 # recommended: false = not worth setting up for the free pool (shown last, with the reason); default true
 # free_tier: anonymous (no key at all) | free (a standing free allowance) | trial (one-time credit or tokens) | none
 # key_var / extra_fields[].var are the names to send to PUT /pool/keys/{id} as {"values": {"<var>": "<value>"}}
@@ -28,6 +29,7 @@
 # reviewed with `python -m provenance_core.pool_help --review`; this file is corrected by hand from that.
 checked: 2026-11-23
 assistant_notes:
+  - "A provider with `setup: person` needs something only the person can do (a phone code, an email approval, their own details or a payment step). Do not walk it step by step or wait on it: say what it gives, point to its written steps, let the person do it on their own and paste the key into the key card when they have it, and move on to the next provider meanwhile."
   - Walk the person through one provider at a time, in this order; skip any whose `needs` they cannot meet.
   - The person does every click themselves. Never create an account, sign in, accept terms or request a key for them.
   - The key goes into the app's key field for that provider (or PUT /pool/keys/{id}); do not ask for it in chat and
@@ -330,16 +332,18 @@ providers:
   - id: nvidia
     name: NVIDIA API Catalog (build.nvidia.com)
     free_tier: free
-    confidence: uncertain
+    confidence: seen
+    setup: person
+    why_person: NVIDIA asks for an email approval and a phone number with a one-time code before it issues a key, so this one is done by you, not by the assistant.
     what_you_get: >-
       The models with a "Free Endpoint" on build.nvidia.com (38 on the checked date; the chat ones in the pool are
       moonshotai/kimi-k3.1-pro, nvidia/nemotron-3-ultra-550b-a55b, mistralai/mistral-large-4-1t-a52b,
       nvidia/nemotron-3.5-super-vl-120b-a12b, minimaxai/minimax-m3.1-flash, nvidia/nemotron-3.5-lightning-30b-a3b
-      and z-ai/glm-5.3-flash), free "for prototyping" for NVIDIA Developer Program members. The rate limit is
-      unstated: NVIDIA says it varies per model and is shown under your account on build.nvidia.com. Not yet tried
-      with a key.
-    needs: An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. No card stated.
-    time_minutes: 5
+      and z-ai/glm-5.3-flash on the list but not in the pool), free "for prototyping" for NVIDIA Developer Program members. The rate limit is
+      unstated: NVIDIA says it varies per model and is shown under your account on build.nvidia.com. Tried
+      with a key on the checked date: six of the seven answered; z-ai/glm-5.3-flash timed out and was left out.
+    needs: An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. A phone number that can receive a one-time code (required before a key can be generated; some countries are not offered yet). No card.
+    time_minutes: 8
     signup_url: https://build.nvidia.com
     keys_url: https://build.nvidia.com
     key_var: NVIDIA_API_KEY
@@ -348,14 +352,19 @@ providers:
       - Type your email into **Enter your email ID** and click **Next**.
       - "On **Your NVIDIA Account**, enter your password, or use **Log In With Passkey** or **More Login Options** (Log In With Google, Apple, Microsoft, Discord or Facebook; **Show More** for others)."
       - If NVIDIA shows a page saying it has sent a confirmation to your email, open that email and approve it, then come back.
-      - "Create an API key (where this is done after signing in has not been seen: look for **Get API Key** on a model's page that has a Free Endpoint, or for API keys under your account at the top right), copy it and paste it into the app."
-    key_format: Not documented.
+      - NVIDIA may offer **Create A Passkey** (choose **Maybe Later**, then **OK**) and "Secure my account" (choose **Not now**); both can be skipped.
+      - On "Almost done!" leave the two optional boxes unticked if you do not want recommendations or developer news, and click **Submit**.
+      - On **Create an NVIDIA Cloud Account** type any name (for example `provenance`) and click **Create NVIDIA Cloud Account**.
+      - "Back on build.nvidia.com a dialog says **We'll need to verify your phone number**: choose your **Location**, type your **Phone Number**, click **Send Code to Phone** and enter the code. (A bar at the top says \"Please verify your account to get API access\" with **Verify** until this is done.)"
+      - Generate the API key; it is shown once, with its ID, name and expiration. Copy it and paste it into the app.
+    key_format: Starts with `nvapi-`.
+    key_pattern: "^nvapi-[A-Za-z0-9_-]{40,}$"
     gotchas:
-      - "The sign-in steps above were seen on the checked date; the key step was not. NVIDIA's only written walkthrough is old: it puts **Get API Key** in the right-hand pane of a model's page, but a model page now shows a **Deploy** pane with paid partner endpoints instead."
+      - "The steps above were walked on the checked date up to the phone verification; the last step (generating the key) was done by the account's owner. NVIDIA's only written walkthrough is old: it puts **Get API Key** in the right-hand pane of a model's page, but a model page now shows a **Deploy** pane with paid partner endpoints instead."
       - "Only models marked **Free Endpoint** are free: the Models page has that filter (https://build.nvidia.com/models?filters=nimType%3Anim_type_preview). A model's page says so under **Model Availability**; meta/llama-3.3-70b-instruct now says \"Free Endpoint: Deprecated\" and is no longer in the pool."
       - The current model ids are on https://integrate.api.nvidia.com/v1/models, which needs no key.
       - "Access is \"for prototyping, research, development and testing purposes only\", not production, which NVIDIA defines as \"any non-testing activity including activity serving real end-users\"."
-      - Whether the key expires and whether it is shown only once are not stated; save it when it appears.
+      - "The key is shown only once, is \"for API testing use only\" and is valid for 6 months: set a reminder to make a new one."
       - NVIDIA's own pages do not say how free-tier prompts are used; through Kilo, NVIDIA's free endpoints are described as logged "to improve NVIDIA products and services".
     terms_note: Free access through the Developer Program is for prototyping and testing only; production use needs an NVIDIA AI Enterprise license.
     multiple_keys:
@@ -413,6 +422,8 @@ providers:
     name: SambaNova (SambaCloud)
     free_tier: free
     confidence: docs-only
+    setup: person
+    why_person: The new-account onboarding asks for your name, job title and company and has a payment step, so this one is done by you, not by the assistant.
     what_you_get: >-
       gpt-oss-120b and gemma-4-31B-it on the Free Tier: each 20 requests/minute, 20 requests/day and 200,000
       tokens/day. Small, and a new account may now be asked for payment details (see below).

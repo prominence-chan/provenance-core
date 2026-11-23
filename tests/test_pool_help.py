@@ -72,6 +72,7 @@ def test_key_patterns_compile_and_tell_keys_apart(data):
         "groq": "gsk_" + "a1B2" * 13,
         "openrouter": "sk-or-v1-" + "0a1b2c3d" * 8,
         "cloudflare": "cfut_" + "Ab3d" * 12,
+        "nvidia": "nvapi-" + "Zx9_" * 16,
         "kilo": "eyJ" + "hbGciOi" * 3 + "." + "eyJzdWIi" * 4 + "." + "c2lnbmF0dXJl" * 3,
     }
     pats = {}

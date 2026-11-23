@@ -148,7 +148,6 @@ models:
   - {provider: nvidia, model: nvidia/nemotron-3.5-super-vl-120b-a12b, score: 74, context: 1000000, limits: {rpm: 30}}
   - {provider: nvidia, model: minimaxai/minimax-m3.1-flash, score: 66, context: 131072, limits: {rpm: 30}}
   - {provider: nvidia, model: nvidia/nemotron-3.5-lightning-30b-a3b, score: 62, context: 1000000, limits: {rpm: 30}}
-  - {provider: nvidia, model: z-ai/glm-5.3-flash, score: 53, context: 131072, limits: {rpm: 30}}
   # Kilo AI gateway, anonymous (public /models list, 2026-11-23: all still there): the :free models, 200
   # requests/hour per IP across all of them
   - {provider: kilo, model: "nvidia/nemotron-3-ultra-550b-a55b:free", score: 84, context: 1000000, limits: {rpm: 10, rpd: 1500}}

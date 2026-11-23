@@ -15,7 +15,7 @@ Confidence: **seen** = the provider's current docs name the controls; **docs-onl
 | 5 | [Cloudflare Workers AI](#cloudflare) | free tier | A Cloudflare account. No card on the Workers Free plan (the sign-up page itself could not be read). | 5 | seen |
 | 6 | [Requesty](#requesty) | free tier | A Requesty account (the sign-in options could not be read without signing in). No card for the free models. | 3 | docs-only |
 | 7 | [Z.ai (Zhipu) API](#zai) | free tier | A Z.ai account (email and password, or Google or GitHub sign-in). No card stated for the free model. | 3 | docs-only |
-| 8 | [NVIDIA API Catalog (build.nvidia.com)](#nvidia) | free tier | An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. No card stated. | 5 | uncertain |
+| 8 | [NVIDIA API Catalog (build.nvidia.com)](#nvidia) | free tier | An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. A phone number that can receive a one-time code (required before a key can be generated; some countries are not offered yet). No card. | 8 | seen |
 | 9 | [Cohere](#cohere) | free tier | A Cohere account (email and password, or Google or GitHub sign-in). No card. Not available from Belarus, China (with Hong Kong and Macau), Iran, North Korea, Russia or Syria. | 3 | docs-only |
 | 10 | [SambaNova (SambaCloud)](#sambanova) | free tier | A SambaCloud account, with your first and last name, job title and company name. Possibly payment details (not known whether that step can be skipped). The docs say no card; linking one moves the account to the Developer Tier (60 requests/minute, 12,000 requests/day, pay per token). | 3 | docs-only |
 | 11 | [Inception Labs (Mercury)](#inception) | one-time trial | An Inception Platform account you already have (sign-in by Continue with Google, Continue with GitHub, or email and password). New accounts cannot be made. No payment details. | 3 | seen |
@@ -251,13 +251,13 @@ Checked 2026-11-23 (docs-only). Sources: <https://docs.z.ai/guides/overview/quic
 <a id="nvidia"></a>
 ## 8. NVIDIA API Catalog (build.nvidia.com) (`nvidia`)
 
-The models with a "Free Endpoint" on build.nvidia.com (38 on the checked date; the chat ones in the pool are moonshotai/kimi-k3.1-pro, nvidia/nemotron-3-ultra-550b-a55b, mistralai/mistral-large-4-1t-a52b, nvidia/nemotron-3.5-super-vl-120b-a12b, minimaxai/minimax-m3.1-flash, nvidia/nemotron-3.5-lightning-30b-a3b and z-ai/glm-5.3-flash), free "for prototyping" for NVIDIA Developer Program members. The rate limit is unstated: NVIDIA says it varies per model and is shown under your account on build.nvidia.com. Not yet tried with a key.
+The models with a "Free Endpoint" on build.nvidia.com (38 on the checked date; the chat ones in the pool are moonshotai/kimi-k3.1-pro, nvidia/nemotron-3-ultra-550b-a55b, mistralai/mistral-large-4-1t-a52b, nvidia/nemotron-3.5-super-vl-120b-a12b, minimaxai/minimax-m3.1-flash, nvidia/nemotron-3.5-lightning-30b-a3b and z-ai/glm-5.3-flash on the list but not in the pool), free "for prototyping" for NVIDIA Developer Program members. The rate limit is unstated: NVIDIA says it varies per model and is shown under your account on build.nvidia.com. Tried with a key on the checked date: six of the seven answered; z-ai/glm-5.3-flash timed out and was left out.
 
-- **Needs:** An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. No card stated.
+- **Needs:** An email address for an NVIDIA account (signing in joins the free NVIDIA Developer Program and accepts the NVIDIA Technology Access Terms of Use). NVIDIA may send a confirmation to that address that has to be approved before the sign-in goes on, so the mailbox must be at hand. A phone number that can receive a one-time code (required before a key can be generated; some countries are not offered yet). No card.
 - **Sign up:** <https://build.nvidia.com>
 - **Key page:** <https://build.nvidia.com>
 - **Goes into:** `NVIDIA_API_KEY`
-- **Key looks like:** Not documented.
+- **Key looks like:** Starts with `nvapi-`.
 
 Steps:
 
@@ -265,22 +265,26 @@ Steps:
 2. Type your email into **Enter your email ID** and click **Next**.
 3. On **Your NVIDIA Account**, enter your password, or use **Log In With Passkey** or **More Login Options** (Log In With Google, Apple, Microsoft, Discord or Facebook; **Show More** for others).
 4. If NVIDIA shows a page saying it has sent a confirmation to your email, open that email and approve it, then come back.
-5. Create an API key (where this is done after signing in has not been seen: look for **Get API Key** on a model's page that has a Free Endpoint, or for API keys under your account at the top right), copy it and paste it into the app.
+5. NVIDIA may offer **Create A Passkey** (choose **Maybe Later**, then **OK**) and "Secure my account" (choose **Not now**); both can be skipped.
+6. On "Almost done!" leave the two optional boxes unticked if you do not want recommendations or developer news, and click **Submit**.
+7. On **Create an NVIDIA Cloud Account** type any name (for example `provenance`) and click **Create NVIDIA Cloud Account**.
+8. Back on build.nvidia.com a dialog says **We'll need to verify your phone number**: choose your **Location**, type your **Phone Number**, click **Send Code to Phone** and enter the code. (A bar at the top says "Please verify your account to get API access" with **Verify** until this is done.)
+9. Generate the API key; it is shown once, with its ID, name and expiration. Copy it and paste it into the app.
 
 Good to know:
 
-- The sign-in steps above were seen on the checked date; the key step was not. NVIDIA's only written walkthrough is old: it puts **Get API Key** in the right-hand pane of a model's page, but a model page now shows a **Deploy** pane with paid partner endpoints instead.
+- The steps above were walked on the checked date up to the phone verification; the last step (generating the key) was done by the account's owner. NVIDIA's only written walkthrough is old: it puts **Get API Key** in the right-hand pane of a model's page, but a model page now shows a **Deploy** pane with paid partner endpoints instead.
 - Only models marked **Free Endpoint** are free: the Models page has that filter (https://build.nvidia.com/models?filters=nimType%3Anim_type_preview). A model's page says so under **Model Availability**; meta/llama-3.3-70b-instruct now says "Free Endpoint: Deprecated" and is no longer in the pool.
 - The current model ids are on https://integrate.api.nvidia.com/v1/models, which needs no key.
 - Access is "for prototyping, research, development and testing purposes only", not production, which NVIDIA defines as "any non-testing activity including activity serving real end-users".
-- Whether the key expires and whether it is shown only once are not stated; save it when it appears.
+- The key is shown only once, is "for API testing use only" and is valid for 6 months: set a reminder to make a new one.
 - NVIDIA's own pages do not say how free-tier prompts are used; through Kilo, NVIDIA's free endpoints are described as logged "to improve NVIDIA products and services".
 
 Terms: Free access through the Developer Program is for prototyping and testing only; production use needs an NVIDIA AI Enterprise license.
 
 Keys from several accounts: read the terms first. NVIDIA's API catalog terms could not be read on the checked date (the page timed out); read them before adding a second account's key.
 
-Checked 2026-11-23 (uncertain). Sources: <https://docs.api.nvidia.com/nim/docs/api-quickstart>, <https://docs.api.nvidia.com/nim/docs/product>, <https://docs.api.nvidia.com/nim/reference/llm-apis>, <https://build.nvidia.com/>, <https://forums.developer.nvidia.com/t/nvidia-nim-faq/300317>, <https://build.nvidia.com/models>, <https://integrate.api.nvidia.com/v1/models>
+Checked 2026-11-23 (seen). Sources: <https://docs.api.nvidia.com/nim/docs/api-quickstart>, <https://docs.api.nvidia.com/nim/docs/product>, <https://docs.api.nvidia.com/nim/reference/llm-apis>, <https://build.nvidia.com/>, <https://forums.developer.nvidia.com/t/nvidia-nim-faq/300317>, <https://build.nvidia.com/models>, <https://integrate.api.nvidia.com/v1/models>
 
 <a id="cohere"></a>
 ## 9. Cohere (`cohere`)
