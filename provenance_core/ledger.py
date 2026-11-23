@@ -23,7 +23,11 @@ An entry may carry "pruned": {"before": chars, "after": chars} of the history as
 on, for a request whose history the router pruned (the Codex pass-through, codex_sub.py, records every request it
 looked at, saved or not). "pruned" in the answer sums them: {"requests", "before", "after", "saved"}; absent when no
 matching entry has one. "cached_tokens" sums the input tokens a provider reported as served from its prompt cache,
-for entries that carry it ("cached")."""
+for entries that carry it ("cached").
+
+An entry served by an API model carries "kid": the id of the provider's key that served it (pool_keys.py: "main",
+"anon" or a further key's id; never the key itself). A model's row in the answer then has "keys": {"<key id>":
+requests}."""
 
 from __future__ import annotations
 
@@ -101,6 +105,7 @@ class Ledger:
         ctx: list[str] | None = None,
         pruned: dict | None = None,
         cached_tokens: int | None = None,
+        kid: str | None = None,
     ) -> dict:
         e = {
             "ts": round(ts if ts is not None else time.time(), 3),
@@ -117,6 +122,8 @@ class Ledger:
             e["ctx"] = list(ctx)
         if cached_tokens is not None:
             e["cached"] = int(cached_tokens)
+        if kid:  # which of the provider's keys served (its id from pool_keys.py; never the key)
+            e["kid"] = str(kid)
         if pruned:
             e["pruned"] = {"before": int(pruned.get("before") or 0), "after": int(pruned.get("after") or 0)}
         with self.lock:
@@ -157,6 +164,9 @@ class Ledger:
                 {"model": e["model"], "tier": e.get("tier"), "requests": 0, "input_tokens": 0, "output_tokens": 0},
             )
             m["requests"] += 1
+            if e.get("kid"):
+                ks = m.setdefault("keys", {})
+                ks[e["kid"]] = ks.get(e["kid"], 0) + 1
             m["input_tokens"] += e.get("in") or 0
             m["output_tokens"] += e.get("out") or 0
         out = sorted(models.values(), key=lambda m: (-m["requests"], -m["output_tokens"], m["model"]))

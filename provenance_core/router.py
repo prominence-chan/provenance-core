@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import compact, context_signal, prune
+from . import compact, context_signal, pool_keys, prune
 from .catalog import Catalog, Model
 from .state import State
 
@@ -93,7 +93,7 @@ class Router:
         cooldown its models were given when it was found signed out."""
         for m in self.catalog.models.values():
             if m.provider == provider:
-                self.state.health.pop(m.id, None)
+                self.state.forget(m)
 
     def web_ok(self, endpoint: str) -> bool:
         """May tier requests arriving on this front end (responses / messages / chat) use a chatgpt_web provider?"""
@@ -119,20 +119,26 @@ class Router:
             c = self.bridge(m.provider).capacity(m.accounts, model=m.model)
             ok = c["available"] and self.state.available(m)
             return {
+                "capacity": None,
+                "keys": None,
                 "remaining": c["remaining"] if ok else 0.0,
                 "busy": max(busy, c["busy"]),
                 "slots": max(1, c["accounts"]),
                 "available": ok,
                 "needs": None if c.get("signed_in", True) else "signin",
             }
-        heads = [self.state.headroom(m, tokens) for m in models if self.state.available(m)]
-        heads = [h for h in heads if h > 0]
+        # the pool: every (model, key) pair is a slot with its own allowance; what is left is added up over them
+        live = [m for m in models if self.state.available(m)]
+        heads = [h for m in live for _, h in self.state.key_headrooms(m, tokens) if h > 0]
+        total = sum(len(self.state.keys(m)) for m in models)
         return {
-            "remaining": sum(heads) / len(models) if heads else 0.0,
+            "remaining": sum(heads) / total if heads else 0.0,
             "busy": busy,
             "slots": max(1, len(heads)),
             "available": bool(heads),
             "needs": None,
+            "capacity": sum(heads),  # 1.0 per model per key with its whole allowance left
+            "keys": len({(m.provider, k.id) for m in models for k in self.state.keys(m) if k is not None}),
         }
 
     def sources(self, tier: str, web: bool = True) -> list[dict]:
@@ -161,7 +167,7 @@ class Router:
             not self.catalog.is_web(m) for m in self.catalog.models_in(tier, usable_only=False)
         ):  # the tier has API models, none with a key: the pool is listed as needing keys rather than left out
             out.append({"id": "pool", "label": "Token pool", "kind": "pool", "models": [], "remaining": 0.0,
-                        "busy": 0, "slots": 1, "available": False, "needs": "keys", "rank": -1.0,
+                        "busy": 0, "slots": 1, "available": False, "needs": "keys", "rank": -1.0, "capacity": 0.0, "keys": 0,
                         "pinnable": False})  # fmt: skip
         return sorted(out, key=lambda s: -s["rank"])
 
@@ -277,6 +283,8 @@ class Router:
         p = self.catalog.providers[m.provider]
         if p.type == "chatgpt_web":
             return await self._web_call(m, body, stream)
+        if p.expired:  # past its `until` date: not even when named
+            raise RuntimeError(f"{m.id}: {m.provider} stopped on {p.until.isoformat()} and is no longer used")
         body, pruned, compacted = await self.api_body(m, body)
         if pruned and pruned["saved"]:
             print(f"prune: {m.id} history {prune.summary(pruned)}", flush=True)
@@ -284,33 +292,54 @@ class Router:
             print(f"compact: {m.id} history {compact.summary(compacted)}", flush=True)
         context_signal.note_compaction(compacted)
         payload = {**{k: v for k, v in body.items() if not k.startswith("_")}, "model": m.model, "stream": stream}
-        headers = {**p.auth_headers(), "Content-Type": "application/json", **p.headers}
-        t0 = time.time()
-        req = self.client.build_request("POST", f"{p.base_url}/chat/completions", json=payload, headers=headers)
-        resp = await self.client.send(req, stream=stream)
-        if resp.status_code == 429:
-            ra = resp.headers.get("retry-after")
-            self.state.failure(
-                m, retry_after=float(ra) if ra and ra.replace(".", "").isdigit() else None, rate_limited=True
-            )
-            await resp.aclose()
-            raise RuntimeError(f"{m.id}: rate limited")
-        if resp.status_code >= 400:
-            text = (await resp.aread()).decode(errors="replace")[:300]
-            await resp.aclose()
-            self.state.failure(m)
-            raise RuntimeError(f"{m.id}: HTTP {resp.status_code} {text}")
-        if stream:
-            return resp, t0
-        data = resp.json()
-        if pruned and pruned["saved"]:
-            data.setdefault("pcore", {})["prune"] = pruned
-        if compacted:
-            data.setdefault("pcore", {})["compact"] = compacted
-        self.state.success(m, (time.time() - t0) * 1000)
-        used = (data.get("usage") or {}).get("total_tokens") or estimate_tokens(body)
-        self.state.record(m, used)
-        return data
+        # the provider's keys, most headroom first. A key that is rate limited (or out of quota) cools down alone
+        # and the request goes on with the next one; a key the provider rejects is marked and skipped from now on.
+        # With no key that has headroom (a request naming this model while it is over its limits), the best one is
+        # still tried, as it always was.
+        need = estimate_tokens(body)
+        ranked = self.state.key_headrooms(m, need)
+        keys = [k for k, h in ranked if h > 0] or [ranked[0][0] if ranked else self.state.keys(m)[0]]
+        last = "no usable key"
+        for key in keys:
+            headers = {**p.auth_headers(key), "Content-Type": "application/json", **p.headers}
+            t0 = time.time()
+            url = f"{p.base_url_for(key)}/chat/completions"
+            req = self.client.build_request("POST", url, json=payload, headers=headers)
+            resp = await self.client.send(req, stream=stream)
+            if resp.status_code in (429, 402):  # 402: out of credit, which only time or the person can mend
+                ra = resp.headers.get("retry-after")
+                wait = (
+                    float(ra) if ra and ra.replace(".", "").isdigit() else (3600 if resp.status_code == 402 else None)
+                )
+                self.state.failure(m, retry_after=wait, rate_limited=True, key=key)
+                await resp.aclose()
+                last = "rate limited"
+                continue
+            if resp.status_code >= 400:
+                text = (await resp.aread()).decode(errors="replace")[:300]
+                await resp.aclose()
+                if key is not None and key.value and pool_keys.looks_rejected(resp.status_code, text):
+                    pool_keys.reject(p, key, f"The provider rejected this key (HTTP {resp.status_code}).")
+                    print(
+                        f"pool: {m.provider} key {key.id} was rejected (HTTP {resp.status_code}); skipped", flush=True
+                    )
+                    last = f"HTTP {resp.status_code}: the key was rejected"
+                    continue
+                self.state.failure(m)
+                raise RuntimeError(f"{m.id}: HTTP {resp.status_code} {pool_keys.scrub(p, text)}")
+            self.state.note_served(m, key)
+            if stream:
+                return resp, t0
+            data = resp.json()
+            if pruned and pruned["saved"]:
+                data.setdefault("pcore", {})["prune"] = pruned
+            if compacted:
+                data.setdefault("pcore", {})["compact"] = compacted
+            self.state.success(m, (time.time() - t0) * 1000)
+            used = (data.get("usage") or {}).get("total_tokens") or need
+            self.state.record(m, used, key=key)
+            return data
+        raise RuntimeError(f"{m.id}: {last}")
 
     async def _web_call(self, m: Model, body: dict, stream: bool, wait: float | None = None):
         """A chatgpt_web model: the whole reply is read from the page first, so a failure (login wall, challenge,

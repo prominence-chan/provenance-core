@@ -1,4 +1,4 @@
-"""Model catalog: providers (OpenAI-compatible endpoints + one API key each), models with a strength score
+"""Model catalog: providers (OpenAI-compatible endpoints, each with any number of API keys: pool_keys.py), models with a strength score
 (0-100, from `provenance_core calibrate` or a prior), free-tier limits, and the tier each score falls into.
 
 A provider with `api_key_env: none` (or `auth: none`) is used without a key and sent no Authorization header.
@@ -12,8 +12,10 @@ free quota happens to be left."""
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +35,11 @@ class Limits:
 
 
 _VAR = re.compile(r"\$\{(\w+)\}")
+clock = time.time  # what "now" is for a provider's `until` date; a test replaces it
+
+
+def today() -> datetime.date:
+    return datetime.datetime.fromtimestamp(clock(), datetime.UTC).date()
 
 
 @dataclass
@@ -47,27 +54,64 @@ class Provider:
     type: str = "openai"  # "openai" (chat completions over HTTP) or "chatgpt_web" (see chatgpt_web.py)
     options: dict = field(default_factory=dict)  # type-specific settings (the provider's `web:` block)
 
+    # `until`: the last day (UTC) the provider is used; after it its models are no longer offered (a service that
+    # is shutting down). `check`: a GET that tells whether a key is valid without spending quota ({"path": "/models"}
+    # under the base URL, or {"url": ...}; "soft": a refusal is reported but the key is still tried). `pool_per`:
+    # what the provider's `pool` limits count against: "key" (each key's account has its own) or "ip" (one for the
+    # machine, whichever key or none is sent).
+    until: datetime.date | None = None
+    check: dict | None = None
+    pool_per: str = "key"
+
+    # A provider holds any number of keys (pool_keys.py): the first is its environment variable, further ones come
+    # from the app; one usable without a key has its anonymous access as one more slot.
+    @property
+    def keys(self) -> list:
+        from . import pool_keys
+
+        return pool_keys.keys_of(self)
+
+    def slots(self) -> list:
+        """What a request can be sent with right now: the usable keys, then the anonymous slot if there is one."""
+        from . import pool_keys
+
+        return pool_keys.slots(self)
+
+    def fill(self, url: str, key=None) -> str:
+        """${VAR} in `url` from the key's own extras, else from the environment."""
+        ex = getattr(key, "extras", None) or {}
+        return _VAR.sub(lambda m: ex.get(m.group(1)) or os.environ.get(m.group(1), ""), url)
+
+    def base_url_for(self, key=None) -> str:
+        return self.fill(self.url, key).rstrip("/")
+
     @property
     def base_url(self) -> str:
-        return _VAR.sub(lambda m: os.environ.get(m.group(1), ""), self.url).rstrip("/")
+        return self.base_url_for(None)
 
     @property
     def api_key(self) -> str | None:
-        return os.environ.get(self.api_key_env) if self.api_key_env else None
+        """The first usable key (what a tool that wants "the" key gets)."""
+        return next((k.value for k in self.slots() if k.value), None)
+
+    @property
+    def expired(self) -> bool:
+        return self.until is not None and today() > self.until
 
     @property
     def usable(self) -> bool:
+        if self.expired:
+            return False
         if self.type == "chatgpt_web":  # off unless turned on (enabled: true, or PCORE_CHATGPT_WEB=1)
             from .chatgpt_web import enabled
 
             return enabled(self.options)
-        if any(not os.environ.get(v) for v in _VAR.findall(self.url)):
-            return False
-        return self.no_auth or bool(self.api_key)
+        return bool(self.slots())
 
-    def auth_headers(self) -> dict:
-        key = self.api_key
-        return {"Authorization": f"Bearer {key}"} if key else {}
+    def auth_headers(self, key=None) -> dict:
+        """The Authorization header for `key` (a pool_keys.PoolKey); without one, for the first usable key."""
+        value = key.value if key is not None else self.api_key
+        return {"Authorization": f"Bearer {value}"} if value else {}
 
 
 @dataclass
@@ -84,6 +128,7 @@ class Model:
     shared_tpd: bool = False
     label: str | None = None  # the name shown where a source can be picked (web models), e.g. "GPT-6 Luna"
     accounts: list[str] | None = None  # web models: only these accounts of the provider have this model
+    prov: Provider | None = field(default=None, repr=False, compare=False)  # its provider (set at load)
 
 
 @dataclass
@@ -172,6 +217,19 @@ def read(path: str | Path, _seen: tuple = ()) -> dict:
     return overlay(read(path.parent / str(parent), _seen + (path,)), data)
 
 
+def _date(v, name: str) -> datetime.date | None:
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime.datetime):
+        return v.date()
+    if isinstance(v, datetime.date):
+        return v
+    try:
+        return datetime.date.fromisoformat(str(v))
+    except ValueError:
+        raise ValueError(f"provider {name}: until must be a date (YYYY-MM-DD), not {v!r}") from None
+
+
 def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
     data = read(path)
     providers = {}
@@ -189,6 +247,9 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
             shared_tpd=bool(p.get("shared_tpd")),
             type=str(p.get("type") or "openai"),
             options={**(p.get("web") or {}), **({"enabled": True} if p.get("enabled") else {})},
+            until=_date(p.get("until"), name),
+            check=p["check"] if isinstance(p.get("check"), dict) else None,
+            pool_per="ip" if str(p.get("pool_per", "")).lower() == "ip" else "key",
         )
     # web accounts are global (one browser profile each, shared by every site): the catalog's `accounts:` lists,
     # merged, plus the ones added or removed from the app (<PCORE_HOME>/web_accounts.json; see web_setup.py)
@@ -218,6 +279,7 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
             accounts=[str(a) for a in m["accounts"]] if m.get("accounts") else None,
         )
         prov = providers[m["provider"]]
+        models[mid].prov = prov
         models[mid].pool = prov.pool if prov.pool.any() else None
         models[mid].shared_tpd = prov.shared_tpd and bool(lim.tpd)
     # calibrated scores (written by `provenance_core calibrate`) override the priors in the catalog

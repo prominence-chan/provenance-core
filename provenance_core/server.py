@@ -10,8 +10,11 @@ POST /v1/messages           Anthropic Messages API (Claude Code), see anthropic_
 POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py
 /web/*                      account setup for the web-chat bridge from the app, see web_setup.py
 GET  /health                is it up, which process, what it serves (for the app that started it)
-/pool/keys                  API keys for the token pool, set from the app, see pool_keys.py
+/pool/keys                  API keys for the token pool, any number per provider, set from the app, see pool_keys.py
+                            GET /pool/keys | PUT, POST, DELETE /pool/keys/{provider} | PATCH, DELETE
+                            /pool/keys/{provider}/{key_id}
 GET  /pool/help             how to get a free key from each pool provider (?provider=<id> for one), see pool_help.py
+POST /pool/help/{provider}/outcome   how following a provider's steps went (no keys, nothing personal)
 /codex-sub/<key>/backend-api/*  Codex on your own ChatGPT sign-in, forwarded to OpenAI with history pruning, see
                             codex_sub.py (the key is derived from PCORE_TOKEN; Authorization is the caller's own)"""
 
@@ -75,6 +78,14 @@ def create_app(
                 "providers": len(api),
                 "usable": sum(p.usable for p in api),
                 "models": sum(1 for m in cat.models.values() if not cat.is_web(m) and cat.providers[m.provider].usable),
+                # the keys in use, over all providers (not their anonymous slots), and what they add up to: one
+                # slot per usable model per key or anonymous access it can be called with
+                "keys": sum(1 for p in api if p.usable for k in p.slots() if k.value),
+                "slots": sum(
+                    len(cat.providers[m.provider].slots())
+                    for m in cat.models.values()
+                    if not cat.is_web(m) and cat.providers[m.provider].usable
+                ),
             },
             "web": {"providers": len(web), "enabled": [n for n in web if cat.providers[n].usable]},
             "tiers": [t for t, _ in cat.tiers],
@@ -97,6 +108,10 @@ def create_app(
                             "kind": s["kind"],
                             "model": f"{s['id']}/{t}",
                             "remaining": round(s["remaining"], 3),
+                            # the pool: what is left added up over every model and key (1.0 = one model on one
+                            # key with its whole allowance), and how many keys that is; null for a chat site
+                            "capacity": round(s["capacity"], 3) if s.get("capacity") is not None else None,
+                            "keys": s.get("keys"),
                             "busy": s["busy"],
                             "available": s["available"],
                             "pinnable": s["pinnable"],
@@ -148,7 +163,18 @@ def create_app(
                         "calibrated": m.calibrated,
                         "usable": router.catalog.providers[m.provider].usable,
                         "available": router.state.available(m),
+                        # headroom: the best of the model's keys (0-1); capacity: all its keys added up
                         "headroom": round(router.state.headroom(m, 1000), 3),
+                        "capacity": round(router.state.capacity(m, 1000), 3),
+                        "keys": [
+                            {
+                                "id": k.id,
+                                "available": router.state.available(m, k),
+                                "headroom": round(router.state.headroom(m, 1000, k), 3),
+                            }
+                            for k in router.state.keys(m)
+                            if k is not None
+                        ],
                         "latency_ms": (
                             router.state.health.get(m.id).latency_ms if router.state.health.get(m.id) else None
                         ),
@@ -453,16 +479,56 @@ def create_app(
             return fail(e)
 
     # ---- API keys for the token pool, set from the app (pool_keys.py; values are never sent back) ---------------
+    # Any number of keys per provider. PUT sets or replaces the first (the provider's variable, as before); POST
+    # adds one more; PATCH / DELETE with a key id change or remove one; DELETE without one removes all.
     @app.get("/pool/keys")
     async def pool_keys_view(authorization: str | None = Header(None)):
         check(authorization)
-        return {"providers": pool_keys.view(router.catalog)}
+        return {"providers": pool_keys.view(router.catalog), "removed": pool_keys.removed_view(router.catalog)}
+
+    async def checked(provider: str, key_id: str) -> dict:
+        """The provider's view after a key was set, with the validity check's answer and the terms note."""
+        p = router.catalog.providers[provider]
+        key = next((k for k in p.keys if k.id == key_id), None)
+        res = await pool_keys.check(router.client, p, key) if key else {"ok": None, "detail": "No key was set."}
+        for m in router.catalog.models.values():  # a new or replaced key starts without the old one's cooldowns
+            if m.provider == provider:
+                router.state.health.pop(f"{m.id}#{key_id}", None)
+        return {**pool_keys.provider_view(router.catalog, provider), "key_id": key_id if key else None, "check": res}
 
     @app.put("/pool/keys/{provider}")
     async def pool_keys_set(provider: str, request: Request, authorization: str | None = Header(None)):
         check(authorization)
         try:
-            return pool_keys.set_keys(router.catalog, provider, (await body_of(request)).get("values"))
+            b = await body_of(request)
+            meta = {k: b[k] for k in ("label", "tier", "limits", "limits_scale") if k in b}
+            pool_keys.set_keys(router.catalog, provider, b.get("values"), meta)
+            return await checked(provider, pool_keys.MAIN)
+        except (pool_keys.KeySetupError, KeyError) as e:
+            return fail(e)
+
+    @app.post("/pool/keys/{provider}")
+    async def pool_keys_add(provider: str, request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            _, key = pool_keys.add_key(router.catalog, provider, await body_of(request))
+            return await checked(provider, key.id)
+        except (pool_keys.KeySetupError, KeyError) as e:
+            return fail(e)
+
+    @app.patch("/pool/keys/{provider}/{key_id}")
+    async def pool_keys_update(provider: str, key_id: str, request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return pool_keys.update_key(router.catalog, provider, key_id, await body_of(request))
+        except (pool_keys.KeySetupError, KeyError) as e:
+            return fail(e)
+
+    @app.delete("/pool/keys/{provider}/{key_id}")
+    async def pool_keys_delete(provider: str, key_id: str, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return pool_keys.delete_key(router.catalog, provider, key_id)
         except (pool_keys.KeySetupError, KeyError) as e:
             return fail(e)
 
@@ -475,18 +541,34 @@ def create_app(
             return fail(e)
 
     # ---- how to get each provider's free key (pool_help.yaml: text for the app and for an assistant) ------------
+    def help_entry(p: dict, rows: list) -> dict:
+        # `open_with` [{provider, account}]: the signed-in web accounts whose browser profile can open the key page
+        # already signed in (POST /web/open), absent when there is none; `experience`: how following the steps has
+        # gone so far (POST /pool/help/{provider}/outcome)
+        return {**setup.help_view(p), "experience": pool_help.experience(p["id"], rows)}
+
     @app.get("/pool/help")
     async def pool_help_view(provider: str | None = None, authorization: str | None = Header(None)):
         check(authorization)
-        # `open_with` [{provider, account}] on an entry: the signed-in web accounts whose browser profile can open
-        # its key page already signed in (POST /web/open); worked out now, absent when there is none
+        rows = pool_help.outcomes()
         if provider is None:
             d = pool_help.load()
-            return {**d, "providers": [setup.help_view(p) for p in d["providers"]]}
+            return {**d, "providers": [help_entry(p, rows) for p in d["providers"]]}
         try:
-            return {"checked": pool_help.load()["checked"], "provider": setup.help_view(pool_help.provider(provider))}
+            return {"checked": pool_help.load()["checked"], "provider": help_entry(pool_help.provider(provider), rows)}
         except KeyError as e:
             return fail(e)
+
+    @app.post("/pool/help/{provider}/outcome")
+    async def pool_help_outcome(provider: str, request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            row = pool_help.record_outcome(provider, await body_of(request))
+        except KeyError as e:
+            return fail(e)
+        except pool_help.OutcomeError as e:
+            return JSONResponse({"detail": str(e), "reason": str(e)}, status_code=400)
+        return {"recorded": row, "experience": pool_help.experience(provider)}
 
     anthropic_api.register(app, router, token)
     responses_api.register(app, router, token)

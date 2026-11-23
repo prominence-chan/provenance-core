@@ -579,7 +579,10 @@ def test_only_key_pages_of_the_signed_in_site_can_be_opened(tmp_path, home, monk
     router, app, setup = client_for(catalog(tmp_path, url, opens=["127.0.0.1"]))
     ask = {"provider": "chatgpt-web", "account": "b"}
     with TestClient(app) as c:
-        assert c.get("/pool/help").json() == data  # nobody signed in: no open_with anywhere
+        got = c.get("/pool/help").json()
+        for p in got["providers"]:  # each entry also carries how its steps have gone so far (pool_help.experience)
+            assert p.pop("experience")["tries"] == 0
+        assert got == data  # nobody signed in: no open_with anywhere
         anywhere = c.post("/web/open", json={**ask, "url": "https://evil.example/steal"})
         near = c.post("/web/open", json={**ask, "url": url + "/other"})  # the right site, not a listed page
         none = c.post("/web/open", json=ask)

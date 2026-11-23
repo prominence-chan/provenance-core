@@ -72,6 +72,7 @@ def test_key_patterns_compile_and_tell_keys_apart(data):
         "groq": "gsk_" + "a1B2" * 13,
         "openrouter": "sk-or-v1-" + "0a1b2c3d" * 8,
         "cloudflare": "cfut_" + "Ab3d" * 12,
+        "kilo": "eyJ" + "hbGciOi" * 3 + "." + "eyJzdWIi" * 4 + "." + "c2lnbmF0dXJl" * 3,
     }
     pats = {}
     for p in data["providers"]:
@@ -113,11 +114,16 @@ def test_route(tmp_path, monkeypatch, data):
     c = TestClient(create_app(router=Router(cat, State())))
     with c:
         r = c.get("/pool/help")
-        assert r.status_code == 200 and r.json() == data
+        got = r.json()
+        # each provider also carries how following its steps has gone so far (nothing recorded in this home)
+        nothing = {"tries": 0, "worked": 0, "last_worked": None, "common_trouble": []}
+        assert all(p.pop("experience") == nothing for p in got["providers"])
+        assert r.status_code == 200 and got == data
         assert [p["id"] for p in r.json()["providers"]][:2] == ["kilo", "google"]
         one = c.get("/pool/help", params={"provider": "cloudflare"})
         assert one.status_code == 200 and one.json()["checked"] == data["checked"]
         assert one.json()["provider"]["extra_fields"][0]["var"] == "CLOUDFLARE_ACCOUNT_ID"
+        assert one.json()["provider"]["experience"]["tries"] == 0
         missing = c.get("/pool/help", params={"provider": "nope"})
         assert missing.status_code == 404 and "nope" in missing.json()["detail"]
 

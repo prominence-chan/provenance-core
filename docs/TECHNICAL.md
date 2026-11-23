@@ -17,8 +17,12 @@
   the conversation's first user message when no header is sent, scoped per tier.
 - **Ensembles inside a tier.** `ensemble: {k, strategy}`: `majority` (vote on the final line, good for exact
   answers), `judge` (the tier's strongest model merges/picks the best of k answers), `first` (latency hedging).
-- **Quota-aware.** Per-model request/token windows (rpm / rph / rpd / tpm / tpd) keep every free tier under its caps.
-  429s cool a model down for its Retry-After (or 60 s); repeated errors back off exponentially (30 s up to 1 h).
+- **Quota-aware.** Request/token windows (rpm / rph / rpd / tpm / tpd) keep every free tier under its caps. They
+  are counted per (model, key): a provider can hold several keys, each another account of the person's with its
+  own allowance (see "Several keys per provider"). A request to a model goes out with the key that has the most
+  headroom. A 429 (or a 402, out of credit) cools that key down for its Retry-After (or 60 s; an hour for a 402)
+  and the request carries on with the model's next key, then the next model; a key the provider rejects as invalid
+  or revoked is marked and skipped; other errors are the model's and back off exponentially (30 s up to 1 h).
 
 Request options go in a `pcore` body field (the older `tierlm` field is still read):
 
@@ -41,9 +45,12 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
 - `GET /v1/models`: the tiers plus every usable concrete model (OpenAI and Anthropic list shapes)
 - `GET /v1/sources`: per tier, what it can be served from (each signed-in chat model, the API models as one "Token
   pool"), how much of each is left, whether it can be pinned, and `needs`: `keys` (the tier has API models but none
-  with a key: the pool is listed rather than left out), `signin` (no account of that chat site signed in), else null
+  with a key: the pool is listed rather than left out), `signin` (no account of that chat site signed in), else
+  null. For the pool, `remaining` is the share (0-1) left over all its models and keys, `capacity` the same added
+  up (1.0 per model per key with its whole allowance), `keys` how many keys that is
 - `GET /v1/pcore/usage?key=<thread>&turn=<turn>[&since&until]`: which models served a conversation's turn (the usage
-  ledger, `ledger.py`), and `context`: per flag, how many of the turn's Responses requests needed it to fit their
+  ledger, `ledger.py`; an API model's row also has `keys: {<key id>: requests}`, which of the provider's keys
+  served, by id), and `context`: per flag, how many of the turn's Responses requests needed it to fit their
   model (`context_signal.py`): `compacted` (an API model got a brief instead of the old history), `trimmed` (even
   then the kept turns' tool output had to be cut), `summarised` / `shortened` (a web chat's fresh first message got a
   brief / a cut history), `restarted` (a web chat was full and the request carried on in a new one), `over` (no
@@ -52,24 +59,37 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
   suggests continuing the thread in Codex or Claude Code
 - `/codex-sub/<key>/backend-api/*`: Codex on your own ChatGPT sign-in, forwarded to OpenAI with its history
   pruned (see "Codex on your own sign-in")
-- `GET /status`: tiers, scores, calibration, headroom, health, latency
-- `GET /health`: `{ok, service, version, pid, home, uptime_s, api: {providers, usable, models}, web: {providers,
-  enabled}, tiers}`; cheap (nothing is opened or fetched), for the app that started the router and for telling
+- `GET /status`: tiers, scores, calibration, health, latency, and per model `headroom` (the best of its keys, 0-1),
+  `capacity` (its keys added up: 1.0 per key with its whole allowance left) and `keys: [{id, available,
+  headroom}]`
+- `/pool/keys`, `/pool/help`: the pool's API keys and how to get them (see "Several keys per provider" and
+  "Provenance.app's router")
+- `GET /health`: `{ok, service, version, pid, home, uptime_s, api: {providers, usable, models, keys, slots}, web:
+  {providers, enabled}, tiers}` (`keys`: the keys in use over all providers; `slots`: usable models times the keys
+  or anonymous access each can be called with); cheap (nothing is opened or fetched), for the app that started the router and for telling
   which router answers on a port
 
 ## Catalog
 
 `catalog.yaml` lists:
 
-- **providers**: an OpenAI-compatible `base_url` and the env var holding the key (`api_key_env`).
+- **providers**: an OpenAI-compatible `base_url` and the env var holding its first key (`api_key_env`); further
+  keys are added from the app (below).
   - `api_key_env: none` (or `auth: none`) marks a provider usable without a key; no Authorization header is sent.
-    With `auth: none` plus a real `api_key_env`, the key is sent when it's set.
-  - `${VAR}` in `base_url` is filled from the environment (Cloudflare's account id). A provider whose variables
-    aren't set is unusable.
-  - `pool: {rpm, rph, rpd, tpm, tpd}`: limits shared by all of the provider's models (Kilo's 200 requests/hour per
-    IP).
-  - `shared_tpd: true`: each model's `tpd` is its share of one provider-wide daily allowance; usage on any model
-    spends the allowance proportionally (Cloudflare's 10k neurons/day).
+    With `auth: none` plus a real `api_key_env`, the anonymous access and the keys are used side by side (Kilo,
+    OVH).
+  - `${VAR}` in `base_url` is filled from the key's own `extras`, else the environment (Cloudflare's account id).
+    A key without a value for it is unusable.
+  - `pool: {rpm, rph, rpd, tpm, tpd}`: limits shared by all of the provider's models, counted per key (OpenRouter's
+    50 free requests a day per account); `pool_per: ip` counts them once for the machine, whatever key is sent
+    (Kilo's 200 requests/hour per IP).
+  - `shared_tpd: true`: each model's `tpd` is its share of one account-wide daily allowance; usage on any model
+    spends the allowance proportionally (Cloudflare's 10k neurons/day), per key.
+  - `until: <date>`: the last day (UTC) the provider is used. From the next day it is not usable and its models
+    are no longer offered (Inception's Mercury API, which shuts down after 2026-12-28); `GET /pool/keys` says so.
+  - `check: {path: /models}` or `{url: ...}`: a GET that only a valid key gets a 2xx for and that spends no quota,
+    run when a key is added or replaced; `soft: true` reports a refusal without setting the key aside (Cloudflare,
+    whose check also depends on the token's permissions). Absent: no check, the first request tells.
   - `headers`: extra headers sent on every request.
 - **models**: provider model name, prior score, context, free-tier limits, optional `id` (default
   `<provider>/<model>`).
@@ -82,8 +102,69 @@ Responses carry `X-PCore-Model` (the concrete model that answered) and `X-PCore-
   new ones are added at the end, and any other value, lists included, replaces the base's. `catalog.app.yaml` is
   one (see "Provenance.app's router").
 
-A provider without its key (or with an unset `${VAR}`) is skipped. Free-tier lineups change weekly:
+A provider without a usable key (or with an unset `${VAR}`) is skipped. Free-tier lineups change weekly:
 `python -m provenance_core discover <provider>` lists a provider's current models; re-run `calibrate` afterwards.
+
+### Several keys per provider (`pool_keys.py`)
+
+A person with several accounts at a provider (a personal and a work one, a free and a paid one) can use all of
+them: each key is another allowance.
+
+- **A key** has a stable short `id` (`main` for the first, the provider's variable; `k` + 6 hex characters for a
+  further one; `anon` is the anonymous slot of a provider that works without a key), an optional `label`, an
+  optional `tier` hint (`free` | `paid`; absent = unknown), optional `limits` over the catalog's free-tier numbers
+  for that key alone, `extras` (the provider's `${VAR}` values for that key: each Cloudflare token has its own
+  account id), `enabled`, and the day it was `added`.
+- **Limits per key**: `{"scale": 5}` multiplies every catalog limit of the provider (its models' and its `pool`);
+  a field (`rpm`, `rph`, `rpd`, `tpm`, `tpd`) replaces the catalog's number wherever the catalog has that field
+  (model or pool), `null` lifting it; `{"models": {"<model>": {...}}}` replaces them for one model. Default: the
+  catalog's numbers.
+- **Routing** (`state.py`, `router.py`): usage windows and rate-limit cooldowns are kept per (model, key); a
+  model's `headroom` is its best key's, its `capacity` the sum over its keys. `Router.call` tries the model's keys
+  with headroom, most first (so requests alternate between equal keys), moving on at a 429 / 402 (that key cools
+  down alone) or a rejection (HTTP 401, or a 400 / 403 whose text says the key is invalid or revoked: the key is
+  marked unusable with the reason, in this process, until it is replaced, turned on again with `PATCH
+  {"enabled": true}`, or the router restarts), and gives up on the model only when no key is left. A named model
+  with no headroom on any key is still tried on its best one, as before. Which key served a request travels with
+  it (a context variable), so streamed usage and the usage ledger's `kid` land on that key.
+- **Storage**: the first key stays where it was: the provider's environment variable, from `keys.env` / the shell
+  or set from the app into `<PCORE_HOME>/keys.json` as `"<VAR>": "<key>"`. Further keys, and what was said about
+  the first (label, tier, limits), are in the same file under `"@keys": {"<provider>": [{id, key, label, tier,
+  limits, extras, enabled, added}]}` (mode 0600, the home 0700, written through a temporary file). Files from
+  before load unchanged. An older router reads only the top-level strings, so after a rollback the first keys
+  still work; if that older router then writes the file (a `PUT /pool/keys`), the `@keys` section is dropped.
+- **The credential store instead?** `credstore.py` (the macOS Keychain / `keyring`) already holds the web
+  sign-in passwords and could hold API keys too: they would then not sit in a readable file that backups and
+  sync tools pick up. Against it today: the first keys of an existing install are in `keys.env` (plain text,
+  read by the launch script, outside this code), the router runs unattended under launchd where a locked
+  Keychain cannot be asked, and Linux without `keyring` has no store at all. Recommended next step, not done
+  here: an opt-in `PCORE_KEY_STORE=keychain` under which keys set from the app go to the store and `keys.json`
+  keeps only ids and metadata, with `keys.json` as the fallback where no store is available, and an explicit,
+  reversible `provenance-core keys migrate` / `keys export` pair rather than a silent move of existing keys.
+- **API** (the names the app is built against; no answer, log line or error ever carries a key, only its id,
+  label, tier, `usable`, `reason`, `added` and `last4`):
+  - `GET /pool/keys` → `{providers: [...], removed: [...]}`. Per provider, as before: `id`, `usable`,
+    `anonymous`, `vars: [{name, set, from: "app" | "env" | null}]`, `models`, `tiers`; and now `keys: [{id, label,
+    tier, usable, reason, added, last4, limits, enabled, source: "app" | "env"}]`, `multiple_keys: {allowed:
+    "yes" | "check_terms" | "no", note}`, `until`, `expired`, `note`. `removed`: providers taken out of the pool,
+    `{id, name, removed, reason, leftover_key, note}`; a key still saved for one is ignored (and `DELETE
+    /pool/keys/{id}` forgets it).
+  - `PUT /pool/keys/{provider}` `{"values": {"<VAR>": "<key>"}, label?, tier?, limits?}`: set or replace the first
+    key (its meaning before). `POST /pool/keys/{provider}` `{key, label?, tier?, extras?, limits?,
+    limits_scale?}`: add one (the provider's first if it has none); 409 if that exact key is already there.
+    Both answer with the provider's view plus `key_id` and `check: {ok: true | false | null, detail}` (`null`: the
+    provider has no check, or it gave no clear answer; `false`: the key was saved but is set aside).
+  - `PATCH /pool/keys/{provider}/{key_id}` `{label?, tier?, limits?, limits_scale?, enabled?}`;
+    `DELETE /pool/keys/{provider}/{key_id}`; `DELETE /pool/keys/{provider}` removes all of them. A key that comes
+    from the environment (`keys.env`) cannot be removed from the app (409, naming the variable); its label, tier
+    and limits can be set.
+  - Errors: 404 for an unknown provider or key id (for a removed provider, with the reason), 409 with `detail`
+    otherwise.
+- **Terms**: `multiple_keys` comes from `pool_help.yaml` and says what the provider's own terms say about one
+  person using several accounts: `no` where they plainly forbid a second account (OpenRouter, Kilo, Groq, Cohere),
+  `check_terms` where they forbid getting round limits in general words or could not be read, `yes` where nothing
+  against it was found. It is shown, not enforced: a second key is accepted everywhere, because a person may hold
+  a legitimately separate (paid, organization) account. Nothing here creates accounts.
 
 ## Calibration
 
@@ -849,24 +930,36 @@ files, in `Provenance.app/Contents/Resources/router/` (`ui/scripts/fetch-router.
 - **Settings changed from the app** (`provider_settings.py`): `PATCH /web/providers/{id}` (above), kept in
   `<PCORE_HOME>/settings.json` as `{"providers": {"<id>": {"enabled": false, "daily_cap": 120}}}` and laid over the
   catalog at load, like `web_accounts.json`; `catalog.yaml` is never rewritten.
-- **API keys from the app** (`pool_keys.py`): `GET /pool/keys` lists every API provider (`id`, `usable`,
-  `anonymous`, `vars`: `{name, set, from: "app" | "env" | null}`, `models`, `tiers`), never a value;
-  `PUT /pool/keys/{provider}` `{"values": {"<VAR>": "<key>"}}` checks the names against the provider's variables
-  (its `api_key_env` and any `${VAR}` in its `base_url`), keeps them in `<PCORE_HOME>/keys.json` (mode 0600, the
-  home 0700) and puts them into the process environment, where providers read their keys, so they work at once;
-  `DELETE /pool/keys/{provider}` removes the ones set from the app (a variable from the environment, such as
-  `keys.env`, cannot be removed from there: 409). `catalog.load` puts `keys.json` into the environment; a key set
-  from the app wins over the same variable from the shell. Nothing logs a value: uvicorn logs request lines only,
-  and errors name variables, never their contents.
+- **API keys from the app** (`pool_keys.py`): `GET /pool/keys`, `PUT` / `POST` / `DELETE /pool/keys/{provider}`,
+  `PATCH` / `DELETE /pool/keys/{provider}/{key_id}`: any number of keys per provider, kept in
+  `<PCORE_HOME>/keys.json` (mode 0600, the home 0700); see "Several keys per provider" under "Catalog" for the
+  shapes, the storage and the routing. The first key is put into the process environment, where a provider reads
+  it, so it works at once; a key set from the app wins over the same variable from the shell. Nothing logs a
+  value: uvicorn logs request lines only, and errors name variables and key ids, never their contents.
 - **How to get the keys** (`pool_help.py`, `pool_help.yaml`): `GET /pool/help` returns `{checked, assistant_notes,
-  providers: [...]}`, one entry per API provider in the order worth doing them (most free capacity for least
-  effort): `id`, `name`, `free_tier` (`anonymous` | `free` | `trial` | `none`), `what_you_get`, `needs`,
-  `time_minutes`, `signup_url`, `keys_url`, `key_var` and `extra_fields[].var` (the names `PUT /pool/keys/{id}`
-  takes), `steps`, `key_format`, `key_pattern` (a regex, only where the provider documents the shape), `gotchas`,
-  `terms_note`, `confidence` (`seen` | `docs-only` | `uncertain`), `checked`, `sources`.
+  providers: [...], removed: [...], considered: [...]}`, one entry per API provider in the order worth doing them
+  (most free capacity for least effort): `id`, `name`, `free_tier` (`anonymous` | `free` | `trial` | `none`),
+  `what_you_get`, `needs`, `time_minutes`, `signup_url`, `keys_url`, `key_var` and `extra_fields[].var` (the names
+  `PUT /pool/keys/{id}` takes), `steps`, `key_format`, `key_pattern` (a regex, only where the provider documents
+  the shape), `gotchas`, `terms_note`, `multiple_keys` (above), `until` (a provider that is temporary),
+  `confidence` (`seen` | `docs-only` | `uncertain`), `checked`, `sources`, and `experience` (below). `removed`:
+  `{id, name, removed, reason, key_var, sources}` for providers that are no longer free (Mistral, Cerebras);
+  `considered`: `{name, allowance, why_not, source}` for providers looked at and not added.
   `GET /pool/help?provider=<id>` returns `{checked, provider}` (404 for an unknown id). The text is for the app and
   for an assistant walking someone through the sign-ups; [pool-keys.md](pool-keys.md) is the same data, written by
   `python -m provenance_core.pool_help` (a test fails when the two differ).
+- **What happened when someone followed the steps** (`pool_help.py`): `POST /pool/help/{provider}/outcome`
+  `{result: "saved_working" | "saved_rejected" | "skipped" | "gave_up", minutes?, step_notes?: [{step: <number,
+  1 = the first, or text>, ok: bool, note?}], labels_seen?: [str], source: "assistant" | "manual"}` appends a
+  dated line to `<PCORE_HOME>/pool-help-outcomes.jsonl` (mode 0600) and answers `{recorded, experience}`. No keys
+  and nothing personal: a report in which any string matches a provider's `key_pattern`, starts like a known
+  kind of key, holds a long run of mixed letters and digits (a token, an account id) or an email address is
+  refused whole with a 400 that does not quote it; so is one with a field other than those. `GET /pool/help`
+  then gives each provider `experience: {tries, worked, last_worked, common_trouble: [{step, count, notes}]}`
+  from that file (`common_trouble`: the steps reported as not matching the page, most often first).
+  `python -m provenance_core.pool_help --review [home]` prints, per provider, those steps beside their written
+  text with the notes given, the labels people saw that the steps never mention, and the minutes it took, for a
+  person or an agent to correct `pool_help.yaml` by. The instructions are never rewritten automatically.
 - **`serve --watch-stdin`**: the app keeps the write end of the router's stdin; when the app goes away, however it
   goes (quit, crash, `kill -9`), stdin reaches EOF and the router shuts down as on Ctrl+C: the sign-in window and
   every background browser are closed on shutdown (they also have watchdogs of their own). If that hangs, it exits
@@ -943,5 +1036,7 @@ The bundled-browser tests run the same mock page in the background-only browser 
 Chrome for Testing one is skipped unless a copy is already prepared (`python -m provenance_core.browser_host`).
 `tests/test_web_setup.py` runs the sign-in flow against the mock page's sign-in page (`login: "cookie"`) with a
 headless window on scratch profiles. `tests/test_app_router.py` covers what Provenance.app needs (`catalog.app.yaml`,
-settings and keys from the app, `/health`, `needs`, `--watch-stdin`); `tests/serve_mock.py` is not a test but the
+settings and keys from the app, `/health`, `needs`, `--watch-stdin`); `tests/test_multikey.py` covers several
+keys per provider, removed and temporary providers and the setup outcomes, and `tests/conftest.py` points
+`PCORE_HOME` at a scratch directory so no test reads the real home; `tests/serve_mock.py` is not a test but the
 server the app's end-to-end check runs (see "Provenance.app's router").

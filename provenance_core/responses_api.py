@@ -472,7 +472,16 @@ def register(app, router: Router, token: str | None):
         strain = context_signal.begin()  # what fitting the history took (context_signal.py)
 
         def note(m, inp: int | None, out: int | None):
-            ledger.record(key, m.id, router.catalog.tier_of(m), turn, inp, out, ctx=context_signal.flags(strain))
+            ledger.record(
+                key,
+                m.id,
+                router.catalog.tier_of(m),
+                turn,
+                inp,
+                out,
+                ctx=context_signal.flags(strain),
+                kid=router.state.served(m),
+            )
 
         try:
             if req.get("stream"):

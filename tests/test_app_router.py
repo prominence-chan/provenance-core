@@ -217,7 +217,8 @@ def test_health(home, tmp_path):
     with c:
         h = c.get("/health").json()
     assert h["ok"] and h["pid"] == os.getpid() and h["home"] == str(home) and h["service"] == "provenance-core"
-    assert h["api"] == {"providers": 1, "usable": 0, "models": 0} and h["tiers"] == ["nova", "spark"]
+    assert h["api"] == {"providers": 1, "usable": 0, "models": 0, "keys": 0, "slots": 0}
+    assert h["tiers"] == ["nova", "spark"]
 
 
 def test_show_needs_an_open_window(home, tmp_path):
@@ -244,10 +245,17 @@ def test_keys_from_the_app(home, tmp_path):
                 ],
                 "models": 2,
                 "tiers": ["nova", "spark"],
+                # several keys per provider (tests/test_multikey.py): none yet; no terms recorded for a made-up one
+                "keys": [],
+                "multiple_keys": {"allowed": "check_terms", "note": v[0]["multiple_keys"]["note"]},
+                "until": None,
+                "expired": False,
+                "note": None,
             }
         ]
         r = c.put("/pool/keys/keyed", json={"values": {"TEST_KEY": "  sk-secret-1  ", "TEST_ACCT": "acct"}})
         assert r.status_code == 200 and r.json()["usable"] is True
+        assert [k["id"] for k in r.json()["keys"]] == ["main"] and r.json()["check"]["ok"] is None  # no check named
         assert "sk-secret" not in r.text and "acct" not in r.text  # values never come back
         assert os.environ["TEST_KEY"] == "sk-secret-1" and router.catalog.providers["keyed"].usable
         f = home / "keys.json"

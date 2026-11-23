@@ -15,8 +15,8 @@ Ask for a strength, not a model.
 
 </div>
 
-provenance-core takes the free tiers of a dozen providers (Google, Groq, Cerebras, OpenRouter, Kilo, Cloudflare,
-Mistral, NVIDIA, ...) and serves them as one OpenAI-, Anthropic- and Responses-compatible API. Every model gets a
+provenance-core takes the free tiers of a dozen providers (Google, Groq, OpenRouter, Kilo, Cloudflare, Requesty,
+NVIDIA, ...) and serves them as one OpenAI-, Anthropic- and Responses-compatible API. Every model gets a
 score and lands in one of four tiers:
 
 ```

@@ -1,4 +1,22 @@
+import os
+import tempfile
+
 import pytest
+
+# No test reads or writes the real router home (~/.tierlm: its keys, settings, ledgers): PCORE_HOME is a scratch
+# directory unless a test sets its own.
+os.environ["PCORE_HOME"] = tempfile.mkdtemp(prefix="pcore-test-home-")
+os.environ.pop("TIERLM_HOME", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_keys_left_over():
+    """Keys one test set from "the app" (pool_keys keeps them in the process) do not reach the next."""
+    from provenance_core import pool_keys
+
+    yield
+    pool_keys.EXTRA.clear()
+    pool_keys.REJECTED.clear()
 
 
 @pytest.fixture(autouse=True)

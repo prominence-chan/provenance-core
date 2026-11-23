@@ -12,7 +12,8 @@ providers:
   # Z.ai has no models in the catalog (all commented out there): nothing to sign in for.
   zai-web: {remove: true}
   # OVH's anonymous quota measured 1 request per model per IP per year (see catalog.yaml): without a token it only
-  # ever answers 429, so it needs a key like the others.
+  # ever answers 429, so here it is off until a key is set. Its key is pay-per-token, so the app does not suggest
+  # getting one (pool_help.yaml); one that is set is used.
   ovh: {auth: key}
 
 models:
