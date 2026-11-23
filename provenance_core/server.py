@@ -272,6 +272,8 @@ def create_app(
         msg = str(e).strip("'\"")
         if isinstance(e, KeyError):
             return JSONResponse({"detail": msg}, status_code=404)
+        if isinstance(e, web_setup.BadRequest):
+            return JSONResponse({"detail": msg, "reason": msg}, status_code=400)
         return JSONResponse({"detail": msg, "reason": msg, **({"state": state} if state else {})}, status_code=409)
 
     async def body_of(request: Request) -> dict:
@@ -299,6 +301,57 @@ def create_app(
         check(authorization)
         try:
             return await setup.remove_account(account)
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    # a saved sign-in and automatic sign-in for one provider + account (web_signin.py). The password is write-only:
+    # it goes to the system's credential store and no answer ever carries it
+    @app.put("/web/accounts/{provider}/{account}/autologin")
+    async def web_autologin_save(
+        provider: str, account: str, request: Request, authorization: str | None = Header(None)
+    ):
+        check(authorization)
+        try:
+            return setup.autologin_save(provider, account, await body_of(request))
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.patch("/web/accounts/{provider}/{account}/autologin")
+    async def web_autologin_enable(
+        provider: str, account: str, request: Request, authorization: str | None = Header(None)
+    ):
+        check(authorization)
+        try:
+            return setup.autologin_enable(provider, account, await body_of(request))
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.delete("/web/accounts/{provider}/{account}/autologin")
+    async def web_autologin_forget(provider: str, account: str, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return setup.autologin_forget(provider, account)
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.post("/web/accounts/{provider}/{account}/autologin/try")
+    async def web_autologin_try(
+        provider: str, account: str, request: Request, wait: int = 1, authorization: str | None = Header(None)
+    ):
+        check(authorization)
+        try:
+            b = await body_of(request)
+            return await setup.autologin_try(provider, account, wait=bool(wait) and b.get("wait") is not False)
+        except (web_setup.SetupError, KeyError) as e:
+            return fail(e)
+
+    @app.post("/web/accounts/{provider}/{account}/confirm")
+    async def web_account_confirm(
+        provider: str, account: str, request: Request, authorization: str | None = Header(None)
+    ):
+        check(authorization)
+        try:
+            return setup.confirm(provider, account, await body_of(request))
         except (web_setup.SetupError, KeyError) as e:
             return fail(e)
 

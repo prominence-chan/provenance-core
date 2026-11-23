@@ -85,7 +85,15 @@ class Router:
             b = self.bridges[provider] = make_bridge(p.base_url, opts, self.bridge(share) if share else None)
             for one in getattr(b, "bridges", {"": b}).values():
                 one.compactor, one.summarize = self.compactor, self.summarize
+                one.on_revived = lambda p=provider: self.web_revived(p)
         return self.bridges[provider]
+
+    def web_revived(self, provider: str):
+        """An account of this web provider is signed in again (a sign-in window, or automatic sign-in): forget the
+        cooldown its models were given when it was found signed out."""
+        for m in self.catalog.models.values():
+            if m.provider == provider:
+                self.state.health.pop(m.id, None)
 
     def web_ok(self, endpoint: str) -> bool:
         """May tier requests arriving on this front end (responses / messages / chat) use a chatgpt_web provider?"""

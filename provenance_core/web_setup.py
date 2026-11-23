@@ -32,7 +32,11 @@ background browser that can start. If the router itself dies, a watchdog closes 
 
 Accounts are global: POST /web/accounts adds one slot (a new profile) to every web provider, DELETE removes it from
 all of them; both are kept in <PCORE_HOME>/web_accounts.json and merged over the catalog's `accounts:` lists when the
-catalog is loaded, so catalog.yaml is never rewritten."""
+catalog is loaded, so catalog.yaml is never rewritten.
+
+Per provider + account there is also: a saved sign-in with automatic sign-in (web_signin.py; PUT / PATCH / DELETE
+/web/accounts/{provider}/{account}/autologin and POST .../autologin/try), and for ChatGPT the account's plan with a
+confirmation before an account on a paid plan is used (POST /web/accounts/{provider}/{account}/confirm)."""
 
 from __future__ import annotations
 
@@ -47,7 +51,9 @@ import sys
 import time
 from pathlib import Path
 
-from . import browser_host, provider_settings
+from urllib.parse import urlparse
+
+from . import browser_host, pool_help, provider_settings, web_signin
 from .chatgpt_web import Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
 
 ACCOUNT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
@@ -57,6 +63,10 @@ DEFAULT_BOUNDS = {"left": 80, "top": 60, "width": 1000, "height": 800}
 
 class SetupError(Exception):
     """Something the person using the app has to know; `str(e)` is written for them."""
+
+
+class BadRequest(SetupError):
+    """The request itself is not acceptable (answered 400): no agreement, a missing field."""
 
 
 # ---- accounts: the catalog's lists plus what was added or removed from the app ------------------------------------
@@ -489,6 +499,8 @@ class LoginFlow:
         name, kind = self.name, r.get("kind")
         if r.get("ok"):
             self.setup.cleared(self.provider)
+            if r.get("needs_confirmation"):  # connected, and not used until the person has chosen
+                return self._set("signed_in", plain_reason({**r, "kind": r["needs_confirmation"]}, self.bridge))
             return self._set("signed_in")
         if kind in ("limit", "busy", "page"):
             return self._set(
@@ -513,6 +525,61 @@ class LoginFlow:
         self._set("failed", why)
 
 
+# ---- a page opened for the person in an account's signed-in profile ------------------------------------------------
+class OpenFlow(LoginFlow):
+    """POST /web/open: one ordinary, visible window on an account's profile at a page the person asked for (a pool
+    provider's key page, where the profile's sign-in already counts: Google AI Studio with the Gemini account). The
+    same window as a sign-in's, with the same rules: every bridge on the profile is paused and its background
+    browser closed while it is open, one window per profile, and nothing drives it. It has no debugging port: the
+    router cannot click, type, read or copy anything in it. It ends when the person closes it, on cancel, or after
+    `open_timeout_s`; nothing is checked afterwards.
+
+        idle ──POST──> preparing ──> open ──(window closed | timeout)──> closed        any failure ──> failed"""
+
+    def __init__(self, setup: WebSetup, provider: str, account: str, url: str, bounds: dict | None = None):
+        super().__init__(setup, provider, account, bounds)
+        self.url = url
+
+    def view(self) -> dict:
+        return {**super().view(), "url": self.url}
+
+    async def run(self):
+        try:
+            self._set("preparing")
+            app = await self._app()
+            await self._release()
+            if browser_host.window_pid(self.owner.profile):
+                raise SetupError(
+                    "This account's browser is still open in another window. Close that window and try again."
+                )
+            self.window = SigninWindow(app, self.owner.profile, self.url, self.bounds, self.setup.launch,
+                                       self.setup.extra_args)  # fmt: skip
+            await self.window.open()
+            self._set("open")
+            limit = float(self.bridge.o.get("open_timeout_s") or 1800)
+            deadline = time.time() + limit
+            while self.window.alive() and not await asyncio.to_thread(self.window.closed_by_hand):
+                if time.time() >= deadline:
+                    self.how = "timeout"
+                    break
+                await asyncio.sleep(self.setup.poll_s)
+            else:
+                self.how = "closed"
+            await self.window.close()
+            self._set("closed", f"The window was closed after {_duration(limit)}." if self.how == "timeout" else None)
+        except asyncio.CancelledError:
+            raise
+        except SetupError as e:
+            self._set("failed", str(e))
+        except Exception as e:  # noqa: BLE001 - never leave a flow hanging in a working state
+            print(f"web setup: opening a page for {self.provider}/{self.account} failed: {e!r}", file=sys.stderr)
+            self._set("failed", "Something went wrong while opening the window. Try again.")
+        finally:
+            if self.window and self.window.pid:
+                await self.window.close()
+            self._resume()
+
+
 # ---- everything the endpoints need --------------------------------------------------------------------------------
 class WebSetup:
     """The /web/* endpoints' state: sign-in flows per provider + account, and account slots. `launch`,
@@ -524,6 +591,7 @@ class WebSetup:
         self.launch, self.extra_args, self.app, self.close_after = launch, list(extra_args), app, close_after
         self.poll_s, self.cookie_poll_s, self.grace_s, self.release_wait_s = 1.0, 2.0, 3.0, 120.0
         self.flows: dict[tuple[str, str], LoginFlow] = {}
+        self.opens: dict[tuple[str, str], OpenFlow] = {}  # pages opened for the person (POST /web/open)
 
     # -- providers and bridges
     def providers(self) -> list[str]:
@@ -567,12 +635,15 @@ class WebSetup:
 
     # -- sign-in
     def _active_on(self, profile: Path) -> LoginFlow | None:
-        return next((f for f in self.flows.values() if f.state in ACTIVE and f.owner.profile == profile), None)
+        both = [*self.flows.values(), *self.opens.values()]
+        return next((f for f in both if f.state in ACTIVE and f.owner.profile == profile), None)
 
     async def start(self, provider: str, account: str | None, bounds: dict | None = None) -> dict:
         account = account or "main"
         b = self.bridge_for(provider, account)
         busy = self._active_on((b.host or b).profile)
+        if isinstance(busy, OpenFlow):
+            raise SetupError("A window is already open on this account. Close it first.")
         if busy:
             what = "this" if busy.provider == provider else f"the {busy.name}"
             raise SetupError(f"A sign-in window is already open for {what} sign-in on this account. Finish or "
@@ -619,6 +690,152 @@ class WebSetup:
     async def close(self):
         for key in list(self.flows):
             await self.cancel(*key)
+        for key in list(self.opens):
+            await self.open_cancel(*key)
+
+    # -- a pool provider's key page, opened for the person in a profile that is already signed in to that site
+    @staticmethod
+    def key_pages() -> set[str]:
+        """The only pages that may be opened: the `keys_url` / `signup_url` values of pool_help.yaml."""
+        return {p[k] for p in pool_help.load()["providers"] for k in ("keys_url", "signup_url") if p.get(k)}
+
+    def _covers(self, b: Bridge, url: str) -> bool:
+        """Is the page on a site this provider's sign-in is also the sign-in of (`opens` in SITES: Google's pages
+        for Gemini)?"""
+        host = (urlparse(url).hostname or "").lower()
+        domains = [str(d).lower().lstrip(".") for d in b.o.get("opens") or b.site_info.get("opens") or []]
+        return bool(host) and any(host == d or host.endswith("." + d) for d in domains)
+
+    def open_with(self, url: str | None) -> list[dict]:
+        """The signed-in accounts whose profile can open this page: [{provider, account}], from the accounts' state
+        as it is now."""
+        out = []
+        if not url or url not in self.key_pages():
+            return out
+        for n in self.providers():
+            for a in self.accounts():
+                b = self.bridges_of(n).get(a)
+                if b and self._covers(b, url) and b.load().get("signed_in") is True:
+                    out.append({"provider": n, "account": a})
+        return out
+
+    def help_view(self, entry: dict) -> dict:
+        """One /pool/help provider entry, with `open_with` when a signed-in account can open its key page."""
+        who = self.open_with(entry.get("keys_url"))
+        return {**entry, "open_with": who} if who else entry
+
+    async def open_page(self, provider: str, account: str | None, url, bounds: dict | None = None) -> dict:
+        account = account or "main"
+        b = self.bridge_for(provider, account)
+        if not isinstance(url, str) or url not in self.key_pages():
+            raise BadRequest("Only a provider's own key page can be opened here.")
+        if not self._covers(b, url):
+            raise SetupError(f"That page does not use the {b.display_name} sign-in, so it cannot be opened with it.")
+        if b.load().get("signed_in") is not True:
+            raise SetupError(f"This account is not signed in to {b.display_name}. Sign in first.")
+        busy = self._active_on((b.host or b).profile)
+        if busy:
+            raise SetupError("A window is already open on this account. Close it first.")
+        flow = OpenFlow(self, provider, account, url, bounds)
+        self.opens[(provider, account)] = flow
+        flow.task = asyncio.get_running_loop().create_task(flow.run())
+        for _ in range(100):  # answer once the window is up (or it waits for the browser, or it failed)
+            if flow.state not in ("idle", "preparing") or flow.task.done():
+                break
+            if flow.state == "preparing" and flow.reason and "browser ready" in flow.reason:
+                break
+            await asyncio.sleep(0.1)
+        return flow.view()
+
+    def open_state(self, provider: str, account: str | None) -> dict:
+        account = account or "main"
+        self.bridge_for(provider, account)
+        f = self.opens.get((provider, account))
+        if f:
+            return f.view()
+        return {"state": "idle", "reason": None, "provider": provider, "account": account, "url": None}
+
+    async def open_cancel(self, provider: str, account: str | None) -> dict:
+        account = account or "main"
+        self.bridge_for(provider, account)
+        f = self.opens.pop((provider, account), None)
+        if f and f.task and not f.task.done():
+            f.task.cancel()
+            try:
+                await f.task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        return {"state": "idle", "reason": None, "provider": provider, "account": account, "url": None}
+
+    # -- a saved sign-in and automatic sign-in (web_signin.py), and the paid-plan confirmation
+    def account_view(self, provider: str, account: str | None) -> dict:
+        """One account of one provider, as GET /web/accounts lists it."""
+        account = account or "main"
+        return {"provider": provider, **self._account(provider, account, self.bridge_for(provider, account))}
+
+    def _signin_call(self, fn, *a):
+        try:
+            return fn(*a)
+        except web_signin.Invalid as e:
+            raise BadRequest(str(e)) from None
+        except web_signin.Refused as e:
+            raise SetupError(str(e)) from None
+
+    def autologin_save(self, provider: str, account: str | None, body: dict) -> dict:
+        """PUT /web/accounts/{provider}/{account}/autologin {agree: true, username, password}: write-only for the
+        password, which goes straight to the system's credential store."""
+        b = self.bridge_for(provider, account)
+        self._signin_call(web_signin.save_signin, b, body.get("agree"), body.get("username"), body.get("password"))
+        return self.account_view(provider, account)
+
+    def autologin_enable(self, provider: str, account: str | None, body: dict) -> dict:
+        b = self.bridge_for(provider, account)
+        self._signin_call(web_signin.set_enabled, b, body.get("enabled"))
+        return self.account_view(provider, account)
+
+    def autologin_forget(self, provider: str, account: str | None) -> dict:
+        web_signin.forget(self.bridge_for(provider, account))
+        return self.account_view(provider, account)
+
+    async def autologin_try(self, provider: str, account: str | None, wait: bool = True) -> dict:
+        """POST .../autologin/try: one attempt now, under the same rules as an automatic one (409 with the reason
+        when they do not allow it). Answers when it is over, with the account and `try` {at, result, detail}; with
+        wait=false it answers at once and the attempt goes on (the account's autologin.running, then last_try)."""
+        b = self.bridge_for(provider, account)
+        why = web_signin.refusal(b, manual=True)
+        if why:
+            raise SetupError(why)
+        if web_signin.running(b):
+            raise SetupError("A sign-in attempt is already running for this account.")
+        if not wait:
+
+            async def go():
+                try:
+                    await web_signin.attempt(b, "manual")
+                except web_signin.Refused:
+                    pass
+                except Exception as e:  # noqa: BLE001 - never the error's text
+                    print(f"web setup: the sign-in attempt ended with {type(e).__name__}", file=sys.stderr)
+
+            b._autologin_task = asyncio.get_running_loop().create_task(go())
+            await asyncio.sleep(0)
+            return {**self.account_view(provider, account), "try": None}
+        try:
+            last = await web_signin.attempt(b, "manual")
+        except web_signin.Refused as e:
+            raise SetupError(str(e)) from None
+        return {**self.account_view(provider, account), "try": last}
+
+    def confirm(self, provider: str, account: str | None, body: dict) -> dict:
+        """POST /web/accounts/{provider}/{account}/confirm {confirm: "paid_plan"}: use this account although it is
+        on a paid plan."""
+        b = self.bridge_for(provider, account)
+        if body.get("confirm") != "paid_plan":
+            raise BadRequest('Send confirm: "paid_plan".')
+        if not b.confirm_plan():
+            raise SetupError("There is nothing to confirm for this account.")
+        self.cleared(provider)
+        return self.account_view(provider, account)
 
     # -- per-provider settings (provider_settings.py): on / off, daily cap
     async def update_provider(self, provider: str, changes: dict) -> dict:
@@ -681,6 +898,9 @@ class WebSetup:
         for p in self.providers():
             if (p, account) in self.flows:
                 await self.cancel(p, account)
+            if (p, account) in self.opens:
+                await self.open_cancel(p, account)
+            web_signin.forget(self.bridge_for(p, account))  # a saved sign-in goes with the account
         ov = load_overrides()
         if account in ov["added"]:
             ov["added"].remove(account)
@@ -766,28 +986,7 @@ class WebSetup:
             for m in cat.models.values()
             if m.provider == n
         ]
-        accts = []
-        for a in self.accounts():
-            b = bs.get(a)
-            if not b:
-                continue
-            s = b.status()
-            accts.append(
-                {
-                    "id": a,
-                    "signed_in": s["signed_in"],
-                    "checked_at": s["checked_at"],
-                    "blocked": s["blocked"],
-                    "reason": plain_reason(s, b) if s["blocked"] else None,
-                    "blocked_for_s": s["blocked_for_s"],
-                    "today": s["today"],
-                    "daily_cap": s["daily_cap"],
-                    "email": s.get("email"),
-                    "signing_in": s["signing_in"],
-                    "window_open": s["window_open"],
-                    "login": {k: v for k, v in self.login_state(n, a).items() if k in ("state", "reason")},
-                }
-            )
+        accts = [self._account(n, a, bs[a]) for a in self.accounts() if bs.get(a)]
         return {
             "id": n,
             "name": first.display_name,
@@ -802,6 +1001,37 @@ class WebSetup:
             "accounts": accts,
         }
 
+    def _account(self, n: str, a: str, b: Bridge) -> dict:
+        s = b.status()
+        reason = None
+        if s["blocked"]:
+            reason = plain_reason(s, b)
+        elif s["needs_confirmation"]:  # connected, idle until the person has chosen
+            reason = plain_reason({**s, "kind": s["needs_confirmation"]}, b)
+        return {
+            "id": a,
+            "signed_in": s["signed_in"],
+            "checked_at": s["checked_at"],
+            "blocked": s["blocked"],
+            "reason": reason,
+            "blocked_for_s": s["blocked_for_s"],
+            "today": s["today"],
+            "daily_cap": s["daily_cap"],
+            "email": s.get("email"),
+            # the account's plan where the site is checked for it (ChatGPT): "free", "paid" (plan_label: the site's
+            # own word, e.g. "plus") or "unknown" (it could not be read; the account is used as it is); null elsewhere
+            "plan": s["plan"],
+            "plan_label": s["plan_label"],
+            "plan_note": "The plan of this account could not be read, so it is used as it is."
+            if s["plan"] == "unknown" and s["signed_in"]
+            else None,
+            "needs_confirmation": s["needs_confirmation"],  # null or "paid_plan" (POST .../confirm)
+            "autologin": web_signin.view(b),
+            "signing_in": s["signing_in"],
+            "window_open": s["window_open"],
+            "login": {k: v for k, v in self.login_state(n, a).items() if k in ("state", "reason")},
+        }
+
 
 def _duration(s) -> str:
     s = int(float(s or 900))
@@ -812,7 +1042,20 @@ def plain_reason(s: dict, b: Bridge) -> str:
     """Why an account is out for now, in words for the person using the app (the bridge's own reason names
     internals)."""
     name = b.display_name
-    mins = max(1, s["blocked_for_s"] // 60)
+    mins = max(1, (s.get("blocked_for_s") or 0) // 60)
+    if s.get("kind") == "paid_plan":
+        label = f" ({s['plan_label']})" if s.get("plan_label") else ""
+        return (
+            f"This {name} account is on a paid plan{label}. Using it here still spends that account's own usage, "
+            "likely faster than Codex would. It is connected but not used until you choose: use it anyway, or "
+            "connect a different account."
+        )
+    if s.get("kind") == "login":
+        auto = web_signin.note(b)  # where automatic sign-in stands, when it was tried or has stopped
+        if auto:
+            return f"Not signed in to {name}. {auto}"
+        if web_signin.view(b)["enabled"]:
+            return f"Not signed in to {name}. Automatic sign-in is on and will try; you can also sign in yourself."
     return {
         "login": f"Not signed in to {name}. Sign in again.",
         "challenge": f"{name} asked for a human check (such as a captcha). It will be tried again in about "
@@ -820,11 +1063,11 @@ def plain_reason(s: dict, b: Bridge) -> str:
         "limit": f"{name} reports a usage limit on this account. It will be used again in about {mins} minutes.",
         "busy": f"{name} is turning chats away for the moment. It will be tried again in about {mins} minutes.",
         "page": f"The {name} page did not load or respond in time on this computer (the site did not refuse "
-        f"anything). It will be tried again in about {_duration(s['blocked_for_s'])}.",
+        f"anything). It will be tried again in about {_duration(s.get('blocked_for_s'))}.",
         "tempchat": f"Temporary chats are not available on this {name} account, so it is not used.",
         "model": f"The chosen model is not available on this {name} account right now.",
         "closed": "The browser window was closed. It will reopen when needed.",
-        "cap": f"Today's limit of {s['daily_cap']} chats on this account is used up. It resets at midnight.",
+        "cap": f"Today's limit of {s.get('daily_cap')} chats on this account is used up. It resets at midnight.",
         "browser": "The browser could not start. It will be tried again shortly.",
         "setup": "The browser could not start. It will be tried again shortly.",
     }.get(s.get("kind"), f"{name} cannot be used on this account for the moment. It will be tried again later.")

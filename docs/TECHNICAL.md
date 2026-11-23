@@ -396,7 +396,8 @@ different tabs, and a server restart starts a fresh chat. Temporary chats stay o
 chat can't be confirmed, nothing is sent and the provider goes unavailable.
 
 **What it never does:** read cookie values or tokens from any browser profile (the sign-in flow reads only the
-names and dates of the site's session cookie in the bridge's own profile, see "Account setup"), handle your password, forge sentinel /
+names and dates of the site's session cookie in the bridge's own profile, see "Account setup"), handle your password
+(unless you save a sign-in for an account yourself, see "Saved sign-in and automatic sign-in"), forge sentinel /
 proof-of-work / Turnstile tokens, solve or click through captchas or challenges, or call ChatGPT's private backend
 API. With the default driver it also uses no anti-detection measures at all; `driver: patchright` is the one
 exception, described above.
@@ -631,7 +632,12 @@ to the person as it is.
 
 | endpoint | |
 |---|---|
-| `GET /web/accounts` | `browser` (`mode`, `source`, `ready`, `version`, `preparing`, `stage`, `progress` 0-1 while downloading else null, `error`), `accounts` (the global list of ids), `providers`: `id`, `name` ("ChatGPT", "Gemini", ...), `url`, `enabled`, `enabled_by` (`app`, `env`, `catalog`, or `env-off`: PCORE_CHATGPT_WEB=0, not changeable from the app), `daily_cap` (per account), `shares_browser_with`, `models` (`id`, `label`, `tier`, `model`, `accounts`: null = every account), `accounts` (per account: `signed_in` true / false / null = never checked, `checked_at`, `email` (the identity the page showed at the last check, else null), `blocked`, `reason`, `blocked_for_s`, `today`, `daily_cap`, `signing_in`, `window_open`, `login` {`state`, `reason`}) |
+| `GET /web/accounts` | `browser` (`mode`, `source`, `ready`, `version`, `preparing`, `stage`, `progress` 0-1 while downloading else null, `error`), `accounts` (the global list of ids), `providers`: `id`, `name` ("ChatGPT", "Gemini", ...), `url`, `enabled`, `enabled_by` (`app`, `env`, `catalog`, or `env-off`: PCORE_CHATGPT_WEB=0, not changeable from the app), `daily_cap` (per account), `shares_browser_with`, `models` (`id`, `label`, `tier`, `model`, `accounts`: null = every account), `accounts` (per account: `signed_in` true / false / null = never checked, `checked_at`, `email` (the identity the page showed at the last check, else null), `blocked`, `reason`, `blocked_for_s`, `today`, `daily_cap`, `signing_in`, `window_open`, `login` {`state`, `reason`}, `plan`, `plan_label`, `plan_note`, `needs_confirmation`, `autologin`: see the two sections below) |
+| `PUT /web/accounts/{provider}/{account}/autologin` `{agree: true, username, password}` | save a sign-in for this account and turn automatic sign-in on. 400 without `agree: true` (exactly true), a name or a password; 409 with the reason where it is not offered (Gemini, Z.ai) or the system has no credential store. Write-only: the password goes to the system's credential store and no answer carries it. Answers with the account as `GET /web/accounts` lists it, plus `provider` |
+| `PATCH …/autologin` `{enabled}` | on or off, keeping what is saved; 409 when nothing is saved, or after a wrong password (save a new one) |
+| `DELETE …/autologin` | forgets it: the password leaves the credential store; the name, the setting and the record leave the state |
+| `POST …/autologin/try` | one attempt now, under the same rules as an automatic one (409 with the reason when they do not allow it, or the account is signed in). Answers when it is over (up to a minute or two) with the account plus `try` {`at`, `result`, `detail`}; `?wait=0` answers at once (`try`: null) and the attempt goes on: poll the account's `autologin.running`, then `last_try` |
+| `POST /web/accounts/{provider}/{account}/confirm` `{confirm: "paid_plan"}` | "use it anyway" for an account on a paid plan; 400 for another `confirm`, 409 when there is nothing to confirm |
 | `POST /web/login` `{provider, account, bounds?}` | start a sign-in; answers once the window is open (`{"state": "open"}`), or `preparing` while the browser is downloaded; 409 when a sign-in already holds that account's browser. `bounds` `{left, top, width, height}` places the window (default 80, 60, 1000x800), e.g. beside the app |
 | `GET /web/login?provider=&account=` | `{state, reason}` (plus `provider`, `account`, `since`, `how`: cookie / closed / timeout); poll about once a second |
 | `POST /web/login/cancel` `{provider, account}` | closes the window, nothing is checked: `{"state": "idle"}` |
@@ -703,6 +709,104 @@ window headless and directly (`WebSetup.launch = "exec"`) so nothing shows. Once
 plain copy opened with `open -n -a`, small in a corner, came to the front, signed in on the mock page, was detected,
 quit and verified in 10 s. **Not verified:** a real sign-in on any site (the cookie names above, Google's reaction to
 this window, the identity selectors, and how each site's sign-in page behaves when opened directly).
+
+### The account's plan, and the paid-plan confirmation
+
+For ChatGPT (`"plan": True` in `CHATGPT_SITE`; no other site is checked, a Gemini account on a paid plan included),
+the account's plan is read from the page whenever a check finds it signed in, after an automatic sign-in, and again
+on the first new chat `plan_refresh_s` (6 h) after the last reading. It comes from the data chatgpt.com serves with
+the page (`#client-bootstrap`, where the bridge already reads the e-mail address): `session.account.planType`, else
+the same key a few levels down (`PLAN_JS`). Nothing is clicked or fetched, and only that one label is kept:
+
+- `plan`: `free` (the label is `free`), `paid` (any other label; `plan_label` is the site's own word: `plus`, `pro`,
+  `team`, `enterprise`, `edu`, ...), or `unknown` (the page did not show it and nothing is known for this identity;
+  `plan_note` says the account is used as it is). null for sites that are not checked. A page that does not show the
+  plan leaves what was known for the same identity.
+- `needs_confirmation: "paid_plan"`: a paid plan the person has not agreed to use. The account stays connected and
+  idle: `_precheck` skips it without penalty, it counts as no capacity, and `reason` says in plain words that using
+  it still spends that account's own usage, likely faster than Codex would, and that the person can use it anyway
+  (`POST …/confirm`) or connect a different account. The sign-in flow ends `signed_in` with the same words as its
+  `reason`. `unknown` never holds an account back.
+- The agreement is withdrawn when the account is seen on the free plan, or another identity is seen on the slot: a
+  later paid plan is asked about again. Moving between paid plans is not.
+
+**Not verified:** the key on the real site with a signed-in account (it is the one the site's session data is known
+to use; a paid account whose page carries the plan under another key reads as `unknown` and is used). **On
+upgrade:** a ChatGPT account already in use that turns out to be on a paid plan goes idle at its next reading until
+it is confirmed in the app.
+
+### Saved sign-in and automatic sign-in (`web_signin.py`, `credstore.py`)
+
+The sites sign an account out from time to time, and then a person has to open the sign-in window again. A person
+can instead save the account's sign-in and agree to have it used: off by default, per provider + account, only
+through `PUT …/autologin` with `agree: true`.
+
+**Where things are kept.** The password: only in the operating system's credential store, under the service
+"provenance-core web sign-in" and the name `<site>/<account>@<8 hex of the router home>`. `credstore.py` is the
+interface (`get`, `set`, `delete`): the `keyring` package when installed (Keychain, Windows Credential Manager,
+Secret Service), else on macOS the `security` tool, with the secret written on its standard input (its interactive
+mode; base64-encoded so no character of a password can be read as a command), never in a command line or the
+environment; no store, no feature (`supported: false`). It is read at the moment of an attempt, typed into the
+site's password field and dropped. The user name, the setting and the record of attempts are in the account's state
+file under `autologin`. The password is never in a state file, the settings, a log line, an event, an exception
+(errors from the browser driver are reported by their type only, since their text can quote what was typed), an API
+answer or a debug dump: `_dump` keeps nothing of a sign-in page or of a page with a filled password or code field,
+and the routine itself never reads or records text from a sign-in page (the page reports flags, see below).
+
+**When it runs.** When the bridge has established that the account is signed out: `Bridge._block` with kind `login`
+after its doubt logic, so never on the first sightings on an account that worked. Also on "try now". Never while a
+sign-in window is open on the account, and never when the account is signed in. At most `autologin_max_per_day` (3)
+attempts per account per local day, the next no sooner than `autologin_gap_s` (15 min) after the first and twice
+that after the second; then it stays signed out and `reason` / `autologin.note` say so. Saving the sign-in again
+waives the gap once, not the day's count.
+
+**How.** In the background browser and profile the bridge uses, in a tab of its own that is always closed
+afterwards: open the site's sign-in page, type the saved name and password into the form its `signin` description
+names (in `SITES` / `CHATGPT_SITE`: `url`, `hosts`, `start`, `email`, `continue`, `password`, `submit`, `failure`; a
+control is a CSS selector or `{css, text}`), send it, and confirm with the check used for any page
+(`Bridge._open_chat`: a fresh chat opens signed in; nothing is sent). One routine (`web_signin._drive`) for every
+site; each field is typed into at most once per attempt.
+
+**Hard stops.** The page is looked at before every step (`LOOK_JS` returns flags only) and the attempt ends there,
+touching nothing more, on: a captcha or human check (an automatic browser check gets `challenge_wait_s` to pass by
+itself, as elsewhere; nothing is clicked), a prompt for a code (two-step, e-mail, SMS), a passkey prompt, a
+suspicious-sign-in or locked-account notice, a terms or consent screen, a page on a host that is not the site's own
+(single sign-on), the site still asking to sign in after the form was accepted, or an unexpected page after
+something was typed. The result is `needs_person` with the reason in `detail`, and nothing automatic happens again
+until the person has signed in (the sign-in window) or saved the sign-in again. Nothing solves or works around a
+check, reads a code, or loops. When the site says the name or password is wrong the result is `wrong_password` and
+automatic sign-in turns off for the account until a new password is saved, so a stale password cannot lock the
+account. `error` (the page did not load, the browser could not start) is the only result tried again, within the
+limits.
+
+**What the app sees.** `autologin` per account: `supported`, `reason` (why not), `enabled`, `saved`, `username`,
+`attempts_today`, `last_try` {`at` (epoch s), `result`: `ok` / `wrong_password` / `needs_person` / `error`,
+`detail`}, and also `attempts_per_day`, `history` (the last ten, with `trigger`: auto / manual), `paused` (null,
+`wrong_password`, `needs_person`), `note` (one sentence when the person should know something), `next_try_in_s`,
+`running`. Each attempt is one line in `<PCORE_HOME>/web-events.jsonl` (`kind: "autologin"`, `result`, `trigger`).
+Removing an account forgets its saved sign-ins.
+
+**Which sites.**
+
+| site | automatic sign-in | the form's description |
+|---|---|---|
+| ChatGPT | yes | e-mail step read off `chatgpt.com/auth/login` signed out (2026-11-23): `input[type=email][name=username]`, one submit button "Continue". The password step (on `auth.openai.com`) could not be seen without typing an address: taken to be a password field and a submit button "Continue" / "Log in". The wrong-password wording is web_signin's general pattern plus `aria-invalid` on the field |
+| Qwen | yes | read off `chat.qwen.ai/auth` signed out: opens on "Login with verification code"; the button "Log in with a password" shows one form with `input[name=email]`, `input[type=password][name=password]`, submit "Log in". Wrong-password wording: the general pattern |
+| Gemini | no (`supported: false`) | never a Google account: Google's sign-in guards against automated browsers and the password opens far more than this app |
+| Z.ai | no (`supported: false`) | its own e-mail + password form (behind "Continue with Email"), but with a human verification in the form every time |
+
+**Verified** against the mock site's sign-in form (`tests/test_web_signin.py`; headless, scratch profiles, a
+credential store in memory): off by default; 400 without agreement; write-only; forget; an account found signed out
+is signed in again and the next request is served; each hard stop ends the attempt with nothing typed past it; a
+wrong password turns it off until a new one is saved; the daily limit and the growing gaps; a slow form; the
+two-field form behind a switch; the plan (free, plus, team, missing) and the confirmation; and the test password
+searched for, as UTF-8 and UTF-16, in every file the run leaves (state, events, dumps, the browser profile) and in
+the output, the API answers and the error texts. The Keychain adapter was tried once on this Mac with a throwaway
+item (written, read back, deleted). **Not verified:** a sign-in on any real site. ChatGPT's password page and both
+sites' wrong-password wording are assumptions; if a page differs, the attempt ends as `needs_person` (unexpected
+page) or `error` rather than typing anywhere else. **Risks:** it is automation of a sign-in form, which the sites'
+terms do not allow, like the rest of the bridge; a site may answer repeated automatic sign-ins with a check or a
+lock, which is why the limits are low and every stop waits for a person.
 
 ## Provenance.app's router
 

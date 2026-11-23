@@ -4,7 +4,10 @@ reply is parsed back into text and tool calls.
 
 How it stays honest and gentle (read docs/TECHNICAL.md before turning it on):
 - a real, visible Chrome window on its own profile (~/.tierlm/chatgpt-web-profile) that you sign into by hand once
-  (`provenance-core weblogin`); nothing is read from any other browser profile and no password is ever handled
+  (`provenance-core weblogin`); nothing is read from any other browser profile. No password is handled, unless you
+  turn on automatic sign-in for an account and save its sign-in yourself (web_signin.py: the password then lives in
+  the system's credential store only, and is typed into the site's own sign-in form when the site has signed the
+  account out)
 - the page is driven like a user would: open, type, press send, read the answer. No forged sentinel /
   proof-of-work / Turnstile tokens, no captcha solving or clicking, no calls to the private backend API
 - two drivers. `playwright` (default) is stock: the window says it is automated, and chatgpt.com answers it with a
@@ -1157,6 +1160,10 @@ SITES = {
         "login": None,
         "login_url": "/auth",
         "session": {"domains": ["chat.z.ai"], "names": ["token"]},  # not confirmed with a real sign-in
+        # chat.z.ai/auth, "Continue with Email" (looked at signed out, 2026-11-23): its own e-mail + password form,
+        # but with a human verification ("Click to start verification") in the form itself, every time
+        "signin_unsupported": "Z.ai asks for a human verification every time you sign in, which this app never does "
+        "for you. Sign in yourself in the window.",
     },
     "qwen": {  # chat.qwen.ai, signed in; temporary chats, like ChatGPT's
         "name": "Qwen",
@@ -1179,6 +1186,17 @@ SITES = {
         "copy": 'button[aria-label="Copy"]',
         # the free plan's daily cap on a model is written under the chat, in place of a reply
         "limit": "You(?:'|’)ve reached today(?:'|’)s [^.\\n]{0,60}limit[^\\n]{0,120}",
+        # the sign-in form, for automatic sign-in (web_signin.py). Read off chat.qwen.ai/auth signed out
+        # (2026-11-23): the page opens on "Login with verification code"; "Log in with a password" switches to one
+        # form with input[name=email], input[type=password][name=password] and a submit button "Log in". Not seen:
+        # what the page says to a wrong password (`failure` is web_signin's general wording), or anything after it
+        "signin": {
+            "url": "/auth",
+            "start": {"css": "button", "text": "^log in with (?:a )?password$"},
+            "email": 'input[name="email"]',
+            "password": 'input[type="password"]',
+            "submit": {"css": 'button[type="submit"]', "text": "^(?:log in|sign in|continue)$"},
+        },
     },
     "gemini": {  # gemini.google.com, signed in; temporary chats via the page's toggle
         "name": "Gemini",
@@ -1201,7 +1219,13 @@ SITES = {
         # the Google account's own session cookies (a Google sign-in made in this profile for another site counts)
         "session": {"domains": ["google.com"], "names": ["SID", "__Secure-1PSID", "__Secure-3PSID"]},
         "identity": 'a[aria-label^="Google Account"]',
+        # the sign-in is the Google account's: a pool provider's key page on these domains (Google AI Studio) can be
+        # opened for the person in this profile, already signed in (POST /web/open, web_setup.py)
+        "opens": ["google.com"],
         "copy": 'button[aria-label="Copy"]',
+        # deliberately no `signin`: never an automatic sign-in to a Google account
+        "signin_unsupported": "Automatic sign-in is not offered for Google accounts: Google's sign-in guards against "
+        "automated browsers, and a Google password opens far more than this app. Sign in yourself in the window.",
     },
 }
 
@@ -1213,7 +1237,54 @@ CHATGPT_SITE = {
     "name": "ChatGPT",
     "login_url": "/auth/login",
     "session": {"domains": ["chatgpt.com"], "names": ["__Secure-next-auth.session-token*"]},
+    # the sign-in form, for automatic sign-in (web_signin.py): the e-mail address first, then the password on
+    # auth.openai.com. Read off chatgpt.com/auth/login signed out (2026-11-23): input[type=email][name=username] and
+    # one submit button "Continue". Not seen (it needs an e-mail address typed): the password page, taken to be a
+    # password field and a submit button "Continue" / "Log in", and what it says to a wrong password. Keys: "url";
+    # "hosts" (the site's own other hosts the form may be on: any other host is another sign-in provider, a hard
+    # stop); "start" (a button that switches the page to the password form, pressed first when it shows); "email";
+    # "continue" (sends the e-mail step when the password field is not on the same page); "password"; "submit";
+    # "failure" (a regex for the page's wrong-name-or-password words; default: web_signin's general one). A control
+    # is a CSS selector, or {"css", "text"} with a regex the control's own text must match
+    "signin": {
+        "url": "/auth/login",
+        "hosts": ["auth.openai.com"],
+        "email": 'input[type="email"], input[name="username"], input[name="email"]',
+        "continue": {"css": 'button[type="submit"]', "text": "^continue$"},
+        "password": 'input[type="password"]',
+        "submit": {"css": 'button[type="submit"]', "text": "^(?:continue|log in|sign in)$"},
+    },
+    "plan": True,  # the account's plan is read from the page (PLAN_JS); a paid one must be acknowledged before use
 }
+
+# The plan label of the signed-in account, from the data chatgpt.com serves with the page (#client-bootstrap; nothing
+# is clicked or fetched): session.account.planType ("free", "plus", "pro", "team", "enterprise", "edu", ...), else the
+# same key a few levels down. Only that one short label is returned; null when the page does not carry it. Not
+# confirmed on the real site with a signed-in account (the key is the one its /api/auth/session answer is known for).
+PLAN_JS = r"""() => {
+  const boot = document.getElementById('client-bootstrap');
+  if (!boot) return null;
+  let j; try { j = JSON.parse(boot.textContent); } catch (e) { return null; }
+  const ok = v => typeof v === 'string' && /^[A-Za-z][A-Za-z0-9 _-]{0,23}$/.test(v) ? v.toLowerCase() : null;
+  const from = o => o && typeof o === 'object' ? (ok(o.planType) || ok(o.plan_type)) : null;
+  const s = (j && j.session) || {};
+  const direct = from(s.account) || from(j.account) || from(s.user) || from(j.user) || from(s);
+  if (direct) return direct;
+  let budget = 4000;
+  const walk = (o, d) => { if (!o || typeof o !== 'object' || d > 5 || --budget < 0) return null;
+    const here = from(o); if (here) return here;
+    for (const k of Object.keys(o).slice(0, 80)) { const r = walk(o[k], d + 1); if (r) return r; }
+    return null; };
+  return walk(j, 0);
+}"""
+FREE_PLANS = ("free", "chatgptfreeplan")  # every other label is a paid plan
+
+# True when the page holds something that must never be written to disk: a filled password or one-time-code field, or
+# it is a sign-in page at all. _dump keeps nothing of such a page.
+SECRET_PAGE_JS = r"""() => {
+  if (/(^|\.)auth\.openai\.com$|(^|\.)auth0\.|(^|\.)accounts\.google\.com$/.test(location.hostname) || /^\/(auth(\/|$)|log-?in|sign-?in)/.test(location.pathname)) return true;
+  return [...document.querySelectorAll('input[type="password"], input[autocomplete="current-password"], input[autocomplete="new-password"], input[autocomplete="one-time-code"]')].some(e => !!e.value);
+}"""
 
 # Which identity is signed in, read from the page as it is (after a check opened it; nothing is clicked or fetched):
 # the e-mail address in the data chatgpt.com serves with the page (#client-bootstrap), else in the site's account
@@ -1357,6 +1428,14 @@ DEFAULTS = {
     "browser_fallback": None,
     "browser_watch_s": 2.0,  # bundled: how often to check that every window is still off screen (and put it back)
     "login_timeout_s": 900.0,  # a sign-in window left open this long is closed (then the account is checked)
+    # automatic sign-in with a saved sign-in (web_signin.py; off unless the person turned it on for the account)
+    "autologin_max_per_day": 3,  # attempts per account per local day; then it stays signed out until a person acts
+    "autologin_gap_s": 900.0,  # shortest time between two attempts; doubles after each attempt of the day
+    "autologin_step_s": 30.0,  # how long each step of the sign-in form may take to appear
+    "signin": None,  # the sign-in form's description; default: the site's (`signin` in SITES / CHATGPT_SITE)
+    "open_timeout_s": 1800.0,  # a key page opened for the person (POST /web/open) is closed after this long
+    "opens": None,  # domains whose pages this provider's sign-in also signs in to; default: the site's
+    "plan_refresh_s": 6 * 3600.0,  # the account's plan is read from the page again this long after the last time
     "name": None,  # what the app calls this provider; default: the site's name ("ChatGPT", "Gemini", ...)
     "login_url": None,  # where the sign-in window opens; default: the site's sign-in page
     "session_cookies": None,  # {domains, names}: the cookie that means "signed in"; default: the site's
@@ -1454,6 +1533,11 @@ class Bridge:
         self.signin: str | None = None
         self._parker: asyncio.Task | None = None  # bundled: keeps every window of the browser off screen
         self._repark: asyncio.Event | None = None
+        # automatic sign-in (web_signin.py): the attempt in the background, and what to tell once it worked (the
+        # router forgets the cooldown it gave this provider's models)
+        self._autologin_task: asyncio.Task | None = None
+        self._autologin_running = False
+        self.on_revived = None
         # summarising compaction: the router hands over its own (shared cache, and `summarize`, which asks a cheap
         # API model of its pool for the narrative; never this bridge)
         self.compactor = compact.Compactor()
@@ -1516,12 +1600,71 @@ class Bridge:
                 m: self.model_usage(m, s) for m in {**(self.o.get("model_caps") or {}), **(s.get("models") or {})}
             },
             "email": s.get("identity"),
+            "plan": s.get("plan") if self.site_info.get("plan") else None,
+            "plan_label": s.get("plan_label") if self.site_info.get("plan") else None,
+            "needs_confirmation": self.needs_confirmation(s),
             "window_open": self._page is not None,
             "browser": self.browser_in_use(),
             "signing_in": self.signing_in(),
             "profile": str(self.profile),
             **({"account": self.account} if self.account else {}),
         }
+
+    # ---- the account's plan (sites with `plan`: ChatGPT) --------------------------------------------------------
+    def needs_confirmation(self, s: dict | None = None) -> str | None:
+        """ "paid_plan" while the account is on a paid plan the person has not said to use anyway: it stays connected
+        but no request goes to it. A plan that could not be read ("unknown") does not hold anything back."""
+        s = self.load() if s is None else s
+        if self.site_info.get("plan") and s.get("plan") == "paid" and not s.get("plan_ack"):
+            return "paid_plan"
+        return None
+
+    def confirm_plan(self) -> bool:
+        """The person's "use it anyway" for the paid plan this account is on. False when there is nothing to confirm."""
+        s = self.load()
+        if not (self.site_info.get("plan") and s.get("plan") == "paid"):
+            return False
+        self.save(plan_ack=True)
+        return True
+
+    def _note_plan(self, label: str | None):
+        """Keep the plan as free / paid / unknown (and the site's own label for a paid one). A page that does not
+        show it leaves what was known for the same identity. Seeing the account on the free plan, or another identity,
+        withdraws an earlier "use it anyway": a later paid plan is asked about again."""
+        s = self.load()
+        who = s.get("identity")
+        same = not who or not s.get("plan_for") or who == s.get("plan_for")  # not known to be someone else
+        ch: dict = {"plan_checked_at": int(self.clock())}
+        if label:
+            free = label in FREE_PLANS
+            ch.update(plan="free" if free else "paid", plan_label=label, plan_for=who or s.get("plan_for"))
+            if free or not same:
+                ch["plan_ack"] = False
+        elif not same or s.get("plan") not in ("free", "paid"):
+            ch.update(plan="unknown", plan_label=None, plan_for=who or s.get("plan_for"))
+            if not same:
+                ch["plan_ack"] = False
+        self.save(**ch)
+
+    async def _read_plan(self, page, stale_only: bool = False):
+        if not self.site_info.get("plan"):
+            return
+        if stale_only and self.clock() - (self.load().get("plan_checked_at") or 0) < float(self.o["plan_refresh_s"]):
+            return
+        try:
+            label = await page.evaluate(PLAN_JS)
+        except Exception:  # noqa: BLE001
+            label = None
+        self._note_plan(label if isinstance(label, str) and label.strip() else None)
+
+    def _seen_signed_in(self):
+        """A page showed the account signed in. Automatic sign-in that had stopped for a person (a code, a captcha)
+        may run again the next time: the person has signed in since."""
+        ch: dict = {"signed_in": True, "checked_at": int(self.clock())}
+        al = self.load().get("autologin")
+        if al and al.get("hold") == "needs_person":
+            ch["autologin"] = {**al, "hold": None}
+        self.save(**ch)
 
     def browser_in_use(self) -> str | None:
         """What runs this bridge's window now: "bundled <version>", "chrome", or None when no window is open."""
@@ -1587,7 +1730,7 @@ class Bridge:
         s = self.status()
         cap, used = self._left(model)
         unchecked = bool(self.o.get("skip_unchecked")) and s["signed_in"] is None
-        out = s["blocked"] or s["signing_in"] or unchecked
+        out = s["blocked"] or s["signing_in"] or unchecked or bool(s["needs_confirmation"])
         left = 0.0 if out or not cap else max(0, cap - used) / cap
         return {"remaining": left, "busy": self.busy, "accounts": 0 if out else 1, "available": left > 0,
                 "signed_in": s["signed_in"] is True}  # fmt: skip
@@ -1621,13 +1764,18 @@ class Bridge:
         if e.kind == "login":
             ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
         self.save(**ch)
+        if e.kind == "login":  # established (not a first sighting): a saved sign-in, if the person agreed to one
+            from . import web_signin
+
+            web_signin.kick(self)
         if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy", "page"):
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
 
-    def _event(self, kind: str, reason: str):
-        """One dated line per sign-out / challenge / lost temporary chat in <home>/web-events.jsonl, with how long
-        this process had been up: what is needed to tell later whether they follow restarts, hours or load."""
+    def _event(self, kind: str, reason: str, **more):
+        """One dated line per sign-out / challenge / lost temporary chat / automatic sign-in attempt in
+        <home>/web-events.jsonl, with how long this process had been up: what is needed to tell later whether they
+        follow restarts, hours or load. Never anything typed or read on a sign-in page."""
         try:
             line = {
                 "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1637,6 +1785,7 @@ class Bridge:
                 "reason": reason[:200],
                 "up_s": int(time.monotonic() - STARTED),
                 "today": self.load().get("used"),
+                **more,
             }
             self.home.mkdir(parents=True, exist_ok=True)
             with open(self.home / "web-events.jsonl", "a") as f:
@@ -1655,6 +1804,11 @@ class Bridge:
         s = self.load()
         if self.o.get("skip_unchecked") and s.get("signed_in") is None:
             raise WebSkip(f"no one has signed in on this account ({self.account or 'main'}) yet")
+        if self.needs_confirmation(s):
+            raise WebSkip(
+                f"this account ({self.account or 'main'}) is on a paid plan ({s.get('plan_label')}) and has not been "
+                "confirmed for use"
+            )
         left = (s.get("blocked_until") or 0) - self.clock()
         if left > 0:
             raise WebUnavailable(s.get("reason") or "unavailable", left, s.get("kind") or "blocked")
@@ -2128,7 +2282,7 @@ class Bridge:
                 raise WebError(f"chatgpt.com did not load a usable page (title {p.get('title')!r})")
             await asyncio.sleep(0.6)
         self._notices(p)
-        self.save(signed_in=True, checked_at=int(self.clock()))
+        self._seen_signed_in()
         if p.get("temp") is not True:  # the url flag didn't take: try the page's own toggle once
             toggle = page.locator('button[aria-label*="temporary chat" i]').first
             try:
@@ -2369,6 +2523,8 @@ class Bridge:
     async def _dump(self, page, probe: dict, why: str):
         """Keep what the page looked like when a reply could not be read (the last few, for fixing the markers)."""
         try:
+            if self._autologin_running or await page.evaluate(SECRET_PAGE_JS):
+                return  # a sign-in page, or a filled password field: nothing of it is ever written down
             d = self.home / "chatgpt-web-debug"
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
             for old in sorted(d.glob("*.json"))[:-4]:
@@ -2556,6 +2712,9 @@ class Bridge:
                         )
                 else:
                     await self._open_chat(model, page)
+                    await self._read_plan(page, stale_only=True)
+                    if self.needs_confirmation():  # it turned out to be on a paid plan: nothing is sent
+                        raise WebSkip(f"this account ({self.account or 'main'}) is on a paid plan: not confirmed")
                 r = await self._send(page, prompt, heard if on_text else None)
                 repaired = False
                 try:
@@ -2710,6 +2869,7 @@ class Bridge:
                 p = await self._guarded(lambda: self._open_chat(model, probe_page))
                 self.reset()
                 await self._read_identity(probe_page or self._page)
+                await self._read_plan(probe_page or self._page)
                 return {**self.status(), "ok": True, "page_model": p.get("model")}
             except WebUnavailable as e:
                 return {**self.status(), "ok": False, "reason": e.reason, "kind": e.kind}
@@ -2748,7 +2908,10 @@ class BridgePool:
     def add(self, account: str, host: Bridge | None = None) -> Bridge:
         """One more account (POST /web/accounts): its own profile, state and window, made on first use."""
         if account not in self.bridges:
-            self.bridges[account] = Bridge(self.base_url, self.options, account=account, host=host, **self.kw)
+            first = next(iter(self.bridges.values()), None)
+            b = self.bridges[account] = Bridge(self.base_url, self.options, account=account, host=host, **self.kw)
+            if first:  # what the router gave the others
+                b.compactor, b.summarize, b.on_revived = first.compactor, first.summarize, first.on_revived
         return self.bridges[account]
 
     async def remove(self, account: str):

@@ -96,10 +96,70 @@ btn.onclick = async () => {
 # The sign-in page (state login="cookie"): signed in means the browser sends the session cookie. With signin_auto the
 # page signs itself in after a moment, the way a person would by typing a password; `flush` more cookies are set as
 # well, which makes Chrome write its cookie store at once instead of within 30 s (it writes after 512 changes).
+#
+# It also carries the site's own sign-in form, for automatic sign-in (web_signin.py): the e-mail address first
+# (/auth/login), then the password (/auth/password), as chatgpt.com does; /auth/single is the other shape (Qwen's):
+# a page that opens on another way in, with a "Log in with a password" button that shows one form with both fields.
+# state["signin_trouble"] switches what the site answers with: "wrong_password", "code" (a verification-code prompt
+# after the password), "captcha" (a challenge frame beside the form), "sso" (the e-mail step sends the browser to
+# another host's sign-in), "passkey", "terms", "suspicious", "odd" (a page nobody expects after the password);
+# state["signin_slow_ms"] delays the form. Every field typed into on any of these pages is reported to the mock
+# (Mock.touched: page and field name, never the value) and every form sent is kept (Mock.posted), so a test can say
+# exactly what an attempt typed and where it stopped.
 SIGNIN = r"""<!doctype html><html><head><meta charset="utf-8"><title>Log in</title></head><body>
-<h1>Log in</h1><p id="s">waiting</p><script>
-const S = __STATE__;
-if (S.signin_auto) setTimeout(async () => {
+<h1>Log in</h1><p id="s">waiting</p><div id="slot"></div><script>
+const S = __STATE__; const T = S.signin_trouble || ''; const PAGE = __PAGE__;
+const slot = document.getElementById('slot');
+const post = async (path, body) => (await fetch(path, {method: 'POST', body: JSON.stringify(body)})).json();
+const watch = () => slot.querySelectorAll('input').forEach(i => i.addEventListener('input', () => post('/__typed', {page: PAGE, field: i.name})));
+const val = n => slot.querySelector('input[name="' + n + '"]').value;
+const pages = {
+  login() {
+    if (T === 'passkey') { slot.innerHTML = '<p>Use your passkey to sign in to this account</p><button type="button">Try another way</button>'; return; }
+    slot.innerHTML = '<button type="button">Continue with Google</button><form onsubmit="return false">'
+      + '<input type="email" name="username" autocomplete="email" placeholder="Email address">'
+      + '<button type="submit" id="go">Continue</button></form><a href="/terms">Terms of use</a>';
+    if (T === 'captcha') slot.innerHTML += '<iframe title="Widget containing a security challenge" src="/__frame?challenge=1" width="300" height="65"></iframe>';
+    document.getElementById('go').onclick = async () => { location.href = (await post('/__auth/email', {email: val('username')})).next; };
+  },
+  password() {
+    slot.innerHTML = '<form onsubmit="return false"><input type="text" name="username" style="display:none">'
+      + '<input type="password" name="password" autocomplete="current-password" placeholder="Password">'
+      + '<button type="submit" name="intent" value="code">Log in with a one-time code</button>'
+      + '<button type="submit" id="go">Continue</button></form><p id="err" role="alert"></p>';
+    document.getElementById('go').onclick = async () => {
+      const r = await post('/__auth/password', {password: val('password')});
+      if (r.error) { document.getElementById('err').textContent = r.error; slot.querySelector('input[type=password]').setAttribute('aria-invalid', 'true'); }
+      else location.href = r.next;
+    };
+  },
+  single() {
+    slot.innerHTML = '<h2>Login with verification code</h2><p>Enter an email address that can receive verification codes</p>'
+      + '<input type="text" name="email" placeholder="Enter Your Email"><button type="button">Continue</button>'
+      + '<button type="button" id="pw">Log in with a password</button><p>By continuing, you agree to our Terms of Service and Privacy Policy.</p>';
+    document.getElementById('pw').onclick = () => {
+      slot.innerHTML = '<form onsubmit="return false"><input type="text" name="email" placeholder="Enter Your Email">'
+        + '<input type="password" name="password" placeholder="Enter Your Password">'
+        + '<button type="button">Login with verification code</button><button type="submit" id="go">Log in</button></form>'
+        + '<p id="err"></p><p>By continuing, you agree to our Terms of Service and Privacy Policy.</p>';
+      watch();
+      document.getElementById('go').onclick = async () => {
+        await post('/__auth/email', {email: val('email')});
+        const r = await post('/__auth/password', {password: val('password')});
+        if (r.error) document.getElementById('err').textContent = r.error; else location.href = r.next;
+      };
+    };
+  },
+  code() { slot.innerHTML = '<h2>Check your inbox</h2><p>Enter the verification code we just sent to your email.</p>'
+      + '<input type="text" name="code" autocomplete="one-time-code" inputmode="numeric"><button type="submit">Continue</button>'; },
+  terms() { slot.innerHTML = '<h2>We have updated our terms</h2><p>Please review them to continue.</p><button type="button">I agree</button>'; },
+  suspicious() { slot.innerHTML = '<h2>Suspicious sign-in blocked</h2><p>Verify it’s you to continue.</p><input type="text" name="answer"><button>Continue</button>'; },
+  odd() { slot.innerHTML = '<h2>One more thing</h2><p>Tell us about yourself.</p><input type="text" name="birthday"><button>Next</button>'; },
+  sso() { slot.innerHTML = '<h2>Example Identity</h2><p>Sign in with your organisation account.</p><form onsubmit="return false">'
+      + '<input type="email" name="username"><input type="password" name="password"><button type="submit">Continue</button></form>'; },
+};
+setTimeout(() => { pages[PAGE](); watch(); }, S.signin_slow_ms || 0);
+if (S.signin_auto && PAGE === 'login') setTimeout(async () => {
   await fetch('/__signin', {method: 'POST', body: '{}'});
   for (let i = 0; i < S.flush; i++) document.cookie = 'pad' + (i % 40) + '=' + i + '; path=/';
   document.getElementById('s').textContent = 'signed in';
@@ -147,7 +207,14 @@ class Mock:
             "signin_after_ms": 300,
             "flush": 0,
             "email": "person@example.com",  # shown in the page's bootstrap data when signed in
+            "plan": "free",  # the account's plan in the bootstrap data ("plus", "team", ...); None: not shown
+            "signin_trouble": "",  # see SIGNIN
+            "signin_slow_ms": 0,
         }
+        self.accounts = {"person@example.com": "mock-password"}  # who the sign-in form lets in
+        self.touched: list[tuple[str, str]] = []  # (page, field) typed into on the sign-in pages
+        self.posted: list[tuple[str, dict]] = []  # (step, what was sent)
+        self._email = None
         self.replies: list = ["<p>ok</p>"]
         self.sent: list[dict] = []
         mock = self
@@ -168,7 +235,13 @@ class Mock:
                 path = urlparse(self.path).path
                 if path == "/auth/login":
                     mock.signin_pages += 1
-                    return self._out(SIGNIN.replace("__STATE__", json.dumps(mock.state)))
+                if path.startswith("/auth/") and path[6:] in (
+                    "login", "password", "single", "code", "terms", "suspicious", "odd", "sso"
+                ):  # fmt: skip
+                    page = SIGNIN.replace("__STATE__", json.dumps(mock.state)).replace("__PAGE__", json.dumps(path[6:]))
+                    return self._out(page)
+                if path == "/__frame":
+                    return self._out("<!doctype html><title>check</title><p>checking</p>")
                 if path != "/":
                     self.send_response(404)
                     self.end_headers()
@@ -183,7 +256,10 @@ class Mock:
                     st["model"] = want
                 page = PAGE.replace("__STATE__", json.dumps(st))
                 if st["login"] and st.get("email"):
-                    boot = json.dumps({"session": {"user": {"email": st["email"]}}})
+                    session = {"user": {"email": st["email"]}}
+                    if st.get("plan"):
+                        session["account"] = {"id": "acct-1", "planType": st["plan"], "structure": "personal"}
+                    boot = json.dumps({"session": session})
                     page = page.replace(
                         "<body>", f'<body><script type="application/json" id="client-bootstrap">{boot}</script>', 1
                     )
@@ -200,6 +276,36 @@ class Mock:
                     self.wfile.write(b"{}")
                     return
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                path = urlparse(self.path).path
+                if path == "/__typed":
+                    mock.touched.append((req.get("page"), req.get("field")))
+                    return self._out("{}", "application/json")
+                if path == "/__auth/email":
+                    mock.posted.append(("email", req))
+                    mock._email = req.get("email")
+                    nxt = "/auth/password"
+                    if mock.state["signin_trouble"] == "sso":  # the same server under another host name
+                        nxt = f"http://localhost:{mock.httpd.server_address[1]}/auth/sso"
+                    return self._out(json.dumps({"next": nxt}), "application/json")
+                if path == "/__auth/password":
+                    mock.posted.append(("password", req))
+                    t = mock.state["signin_trouble"]
+                    right = mock.accounts.get(mock._email) == req.get("password")
+                    if t == "wrong_password" or not right:
+                        return self._out(
+                            json.dumps({"error": "Incorrect email address or password"}), "application/json"
+                        )
+                    if t in ("code", "terms", "suspicious", "odd"):
+                        return self._out(json.dumps({"next": "/auth/" + t}), "application/json")
+                    mock.signins += 1
+                    data = json.dumps({"next": "/"}).encode()
+                    self.send_response(200)
+                    self.send_header("Set-Cookie", f"{SESSION}=1; Max-Age=86400; Path=/; HttpOnly")
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 mock.sent.append(req)
                 r = (
                     mock.replies[min(len(mock.sent), len(mock.replies)) - 1]
