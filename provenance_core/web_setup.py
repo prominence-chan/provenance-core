@@ -490,7 +490,7 @@ class LoginFlow:
         if r.get("ok"):
             self.setup.cleared(self.provider)
             return self._set("signed_in")
-        if kind in ("limit", "busy"):
+        if kind in ("limit", "busy", "page"):
             return self._set(
                 "signed_in",
                 f"Signed in. {name} says this account is limited right now; it will be used when that clears.",
@@ -819,6 +819,8 @@ def plain_reason(s: dict, b: Bridge) -> str:
         f"{mins} minutes, or sign in again to deal with it now.",
         "limit": f"{name} reports a usage limit on this account. It will be used again in about {mins} minutes.",
         "busy": f"{name} is turning chats away for the moment. It will be tried again in about {mins} minutes.",
+        "page": f"The {name} page did not load or respond in time on this computer (the site did not refuse "
+        f"anything). It will be tried again in about {_duration(s['blocked_for_s'])}.",
         "tempchat": f"Temporary chats are not available on this {name} account, so it is not used.",
         "model": f"The chosen model is not available on this {name} account right now.",
         "closed": "The browser window was closed. It will reopen when needed.",

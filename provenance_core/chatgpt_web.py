@@ -1282,6 +1282,7 @@ DEFAULTS = {
     # window, e.g. {qwen4-max: 6}. The real figure is learned each time the site says the limit is reached.
     "model_caps": None,
     "model_window_s": 86400.0,  # a model's count starts again this long after its first reply
+    "page_backoff_max_s": 120.0,  # longest wait after repeated page errors (nothing the site said)
     "min_gap_s": 4.0,  # pause between requests: a random time in [min_gap_s, max_gap_s]
     "max_gap_s": 9.0,
     "queue_wait_s": 45.0,  # a request waits this long for the one in flight, then goes to the normal pool
@@ -1575,7 +1576,7 @@ class Bridge:
         if e.kind == "login":
             ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
         self.save(**ch)
-        if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy"):
+        if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy", "page"):
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
 
@@ -2331,7 +2332,7 @@ class Bridge:
             model = getattr(self, "_model", None)
             if e.kind == "limit" and self.site and model and self.model_usage(model) is not None:
                 self._model_limited(model, e)  # this model's allowance only: the account's other models go on
-            elif e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy"):
+            elif e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy", "page"):
                 self._block(e)
             raise
         except WebError:
@@ -2572,7 +2573,10 @@ class Bridge:
                     # the page failed without saying why (an error banner, nothing sent, no reply): the second
                     # time in a row is treated like a temporary limit
                     if int(self.load().get("strikes", 0)) >= 1:
-                        self._block(WebUnavailable(f"repeated page errors ({str(e)[:120]})", self._strike(), "busy"))
+                        # its own kind: the site said nothing, the page just did not work (often this computer
+                        # being too busy to load it in time), so the wait stays short
+                        wait = min(self._strike(), float(self.o["page_backoff_max_s"]))
+                        self._block(WebUnavailable(f"repeated page errors ({str(e)[:120]})", wait, "page"))
                     else:
                         self.save(strikes=1)
                 raise

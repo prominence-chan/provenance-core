@@ -1381,3 +1381,27 @@ def test_a_chat_title_that_quotes_a_notice_is_not_a_notice(mock, tmp_path):
 
     d, st = scenario(mock, tmp_path, go)
     assert d["choices"][0]["message"]["content"] == "fine" and not st["blocked"]
+
+
+@browser
+def test_repeated_page_errors_are_a_short_wait_of_their_own_kind(mock, tmp_path):
+    """The page failing twice without the site saying anything (often this computer being too slow to load it) is
+    not "the site is turning chats away": its own kind, and never the long back-off."""
+    mock.replies = [{"error": "Something went wrong while generating the response."}]
+
+    async def go(b):
+        b.save(strikes=6)  # as after a run of failures: a notice would now wait backoff_max_s
+        with pytest.raises(cw.WebError, match="Something went wrong"):
+            await b.complete("luna", dict(USER))
+        return b.status()
+
+    st = scenario(mock, tmp_path, go)
+    assert st["blocked"] and st["kind"] == "page" and 0 < st["blocked_for_s"] <= 120, st
+    r = ws_plain(st)
+    assert "did not load or respond" in r and "turning chats away" not in r, r
+
+
+def ws_plain(st):
+    from provenance_core import web_setup as ws
+
+    return ws.plain_reason({**st, "daily_cap": 200}, cw.Bridge("https://chatgpt.com", {}))

@@ -454,7 +454,7 @@ def test_park_windows_puts_moved_and_new_windows_back():
 
 def test_reasons_are_plain_words():
     b = cw.Bridge("https://gemini.google.com", {"site": "gemini", "notify": False})
-    for kind in ("login", "challenge", "limit", "busy", "tempchat", "model", "closed", "cap", "browser", "x"):
+    for kind in ("login", "challenge", "limit", "busy", "page", "tempchat", "model", "closed", "cap", "browser", "x"):
         r = ws.plain_reason({"kind": kind, "blocked_for_s": 600, "daily_cap": 200}, b)
         assert r and not any(w in r for w in ("chatgpt-web", "profile", "weblogin", "bridge", "_")), r
     assert b.display_name == "Gemini" and b.login_url.startswith("https://accounts.google.com/")
