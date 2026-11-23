@@ -832,6 +832,15 @@ files, in `Provenance.app/Contents/Resources/router/` (`ui/scripts/fetch-router.
   `keys.env`, cannot be removed from there: 409). `catalog.load` puts `keys.json` into the environment; a key set
   from the app wins over the same variable from the shell. Nothing logs a value: uvicorn logs request lines only,
   and errors name variables, never their contents.
+- **How to get the keys** (`pool_help.py`, `pool_help.yaml`): `GET /pool/help` returns `{checked, assistant_notes,
+  providers: [...]}`, one entry per API provider in the order worth doing them (most free capacity for least
+  effort): `id`, `name`, `free_tier` (`anonymous` | `free` | `trial` | `none`), `what_you_get`, `needs`,
+  `time_minutes`, `signup_url`, `keys_url`, `key_var` and `extra_fields[].var` (the names `PUT /pool/keys/{id}`
+  takes), `steps`, `key_format`, `key_pattern` (a regex, only where the provider documents the shape), `gotchas`,
+  `terms_note`, `confidence` (`seen` | `docs-only` | `uncertain`), `checked`, `sources`.
+  `GET /pool/help?provider=<id>` returns `{checked, provider}` (404 for an unknown id). The text is for the app and
+  for an assistant walking someone through the sign-ups; [pool-keys.md](pool-keys.md) is the same data, written by
+  `python -m provenance_core.pool_help` (a test fails when the two differ).
 - **`serve --watch-stdin`**: the app keeps the write end of the router's stdin; when the app goes away, however it
   goes (quit, crash, `kill -9`), stdin reaches EOF and the router shuts down as on Ctrl+C: the sign-in window and
   every background browser are closed on shutdown (they also have watchdogs of their own). If that hangs, it exits

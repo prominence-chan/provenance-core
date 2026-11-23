@@ -29,6 +29,9 @@ provenance-core = "provenance_core.__main__:main"
 [tool.setuptools]
 packages = ["provenance_core", "tierlm"]
 
+[tool.setuptools.package-data]
+provenance_core = ["*.yaml"]
+
 [tool.setuptools.dynamic]
 version = { attr = "provenance_core.__version__" }
 
