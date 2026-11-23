@@ -903,7 +903,7 @@ PROBE_JS = r"""(fresh) => {
   // the whole page is read for notices only while it holds no conversation: a chat still on screen (the tab's last
   // one, before the new chat has loaded) may itself say "try again later"
   const empty = !document.querySelector('[data-turn-key], [data-message-author-role], [data-response-body], [data-dil-response]');
-  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
+  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + (document.title.length <= 80 ? document.title : '');  // a chat's title is its first message: never read that for notices
   const m = (re, s) => { const x = (s === undefined ? text : s).match(re); return x ? x[0] : null; };
   out.challenge = m(/just a moment|verify (?:that )?you are (?:a )?human|unusual activity|suspicious activity|confirm you(?:'|’)re (?:not a robot|human)|are you a robot|complete the captcha|checking your browser|you have been blocked|access denied/i);
   if (!out.challenge) for (const f of document.querySelectorAll('iframe')) {
@@ -1239,7 +1239,7 @@ SITE_PROBE_JS = r"""([cfg, fresh]) => {
   const scoped = [...document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"], [data-sonner-toast], [class*="toast" i], [class*="error" i]')]
     .filter(vis).filter(el => !el.closest(cfg.user + ', ' + cfg.assistant)).map(el => el.innerText || '').join('\n');
   const empty = !document.querySelector(cfg.user + ', ' + cfg.assistant);   // see PROBE_JS
-  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + document.title;
+  const text = (fresh && empty && document.body ? document.body.innerText + '\n' : '') + scoped + '\n' + (document.title.length <= 80 ? document.title : '');  // a chat's title is its first message: never read that for notices
   const m = (re, s) => { const x = (s === undefined ? text : s).match(re); return x ? x[0] : null; };
   out.challenge = m(/just a moment|verify (?:that )?you are (?:a )?human|unusual activity|suspicious activity|confirm you(?:'|’)re (?:not a robot|human)|are you a robot|complete the captcha|checking your browser|you have been blocked|access denied|slide to (?:verify|complete)/i);
   out.busy = m(/try again (?:later|in a (?:few|couple)[^.\n]{0,20})|at capacity|(?:high|heavy) (?:demand|traffic|load)|server (?:is )?busy|too many (?:requests|users)|rate limit/i, scoped);

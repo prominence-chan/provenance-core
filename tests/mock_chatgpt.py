@@ -29,6 +29,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>ChatGPT</titl
 </main>
 <script>
 const S = __STATE__;
+if (S.title) document.title = S.title;
 const q = new URLSearchParams(location.search);
 let temp = S.temp && q.get('temporary-chat') === 'true';
 let model = S.model;

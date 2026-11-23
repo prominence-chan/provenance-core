@@ -1366,3 +1366,18 @@ def test_the_sites_too_long_error_is_seen_at_once_and_the_message_resent_shorter
     assert len(mock.sent) == 2 and len(mock.sent[1]["prompt"]) < 0.75 * len(mock.sent[0]["prompt"])
     assert st["page_chars"] == int(len(mock.sent[0]["prompt"]) * 0.7)
     assert "and now the last question" in mock.sent[1]["prompt"]
+
+
+@browser
+def test_a_chat_title_that_quotes_a_notice_is_not_a_notice(mock, tmp_path):
+    """The site titles a chat with its first message; one that happens to say "try again later" or "access denied"
+    is conversation text, not the site turning chats away."""
+    mock.state["title"] = "The run said: unable to load the page, access denied, please try again later. " + "x" * 300
+    mock.replies = ["<p>fine</p>"]
+
+    async def go(b):
+        d = await b.complete("luna", dict(USER))
+        return d, b.status()
+
+    d, st = scenario(mock, tmp_path, go)
+    assert d["choices"][0]["message"]["content"] == "fine" and not st["blocked"]
