@@ -715,7 +715,14 @@ _STALL = re.compile(
     r"|\bno longer (?:accessible|available)\b"
     r"|\bI(?:['’]ll| will| am going to|['’]m going to)(?: \w+){0,2} (?:use|run|inspect|check|look|read|open|start|begin|apply|"
     r"patch|create|add|implement|update|fix|search|list|examine|proceed|continue|try|write|edit|verify|test|reproduce)\b"
-    r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b",
+    r"|\b(?:next|now),? I(?:['’]ll| will)\b|\blet me (?:\w+ )?(?:run|check|inspect|look|read|try|start|open)\b"
+    # its own sandbox's tool failed, so it reports that nothing happened ("the local command execution interface
+    # returned an error before confirming that either file was written. No successful changes are verified.")
+    r"|\bI(?:['’]m| am) ready to (?:create|write|run|make|apply|edit|start|begin|implement|test|proceed)\b"
+    r"|\b(?:interface|tool|command|execution|environment|sandbox|shell|session)\b[^.\n]{0,40}\b(?:returned|gave|hit|threw|"
+    r"raised|produced|reported|encountered) an? (?:\w+ )?error\b"
+    r"|\bno (?:successful |file |code )?(?:changes?|edits?|files?|writes?) (?:are|were|was|have been|has been) "
+    r"(?:verified|made|written|applied|confirmed|saved)\b",
     re.I,
 )
 STALL_MAX = 1500  # longer than this is a real answer that happens to mention a limitation or a next step

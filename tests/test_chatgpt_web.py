@@ -757,6 +757,20 @@ def test_page_tool_call_and_repair(mock, tmp_path):
     )
 
 
+def test_a_reply_about_its_own_sandbox_failing_is_a_stall():
+    for t in [
+        "I’m ready to create and test the two files, but the local command execution interface returned an error "
+        "before confirming that either file was written. No successful changes are verified.",
+        "The execution environment hit an internal error. No changes were made.",
+    ]:
+        assert cw.stalled(t, SCHEMAS), t
+    for t in [
+        "Both files are written and the tests pass: 6 passed.",
+        "The command returned exit code 1 because the fixture is missing; I fixed the path and the tests pass now.",
+    ]:
+        assert not cw.stalled(t, SCHEMAS), t
+
+
 def test_stalled_replies():
     for t in (
         "I’m ready to fix it, but the local shell execution interface isn't available to me in this turn. Please retry with the tool enabled.",
