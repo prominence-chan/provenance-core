@@ -55,7 +55,9 @@ def main():
         _web_boot(cat)
         if a.watch_stdin:
             _exit_with_parent()
-        uvicorn.run(create_app(router=Router(cat)), host=a.host, port=a.port)
+        # a stop must reach the shutdown hooks (which close the browsers cleanly, so their cookies are written) before
+        # launchd gives up on the process: do not wait on open streams for longer than this
+        uvicorn.run(create_app(router=Router(cat)), host=a.host, port=a.port, timeout_graceful_shutdown=4)
     elif a.cmd == "calibrate":
         from .calibrate import calibrate
 

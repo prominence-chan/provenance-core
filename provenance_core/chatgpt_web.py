@@ -58,6 +58,9 @@ class WebUnsent(WebError):
     sent, so the same request can go to a fresh chat."""
 
 
+STARTED = time.monotonic()  # when this process loaded the bridge
+
+
 class WebUnavailable(WebError):
     """The provider is out until `cooldown` seconds pass (or the login is redone): login, challenge, limit, ..."""
 
@@ -1590,12 +1593,33 @@ class Bridge:
                 e.cooldown, e.kind = float(self.o["page_backoff_max_s"]), "page"  # what the caller waits by, too
                 return
         ch = {"blocked_until": self.clock() + e.cooldown, "reason": e.reason, "kind": e.kind}
+        if e.kind in ("login", "challenge", "tempchat"):
+            self._event(e.kind, e.reason)
         if e.kind == "login":
             ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
         self.save(**ch)
         if self.o["notify"] and self._notified != e.kind and e.kind not in ("closed", "busy", "page"):
             self._notified = e.kind
             notify(f"ChatGPT web is out: {e.reason}" + (f" ({LOGIN_HINT})" if e.kind == "login" else ""))
+
+    def _event(self, kind: str, reason: str):
+        """One dated line per sign-out / challenge / lost temporary chat in <home>/web-events.jsonl, with how long
+        this process had been up: what is needed to tell later whether they follow restarts, hours or load."""
+        try:
+            line = {
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "site": self.site["name"] if self.site else "ChatGPT",
+                "account": self.account or "main",
+                "kind": kind,
+                "reason": reason[:200],
+                "up_s": int(time.monotonic() - STARTED),
+                "today": self.load().get("used"),
+            }
+            self.home.mkdir(parents=True, exist_ok=True)
+            with open(self.home / "web-events.jsonl", "a") as f:
+                f.write(json.dumps(line) + "\n")
+        except OSError:
+            pass
 
     def _precheck(self, model: str | None = None):
         u = self.model_usage(model)
