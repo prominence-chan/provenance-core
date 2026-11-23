@@ -10,6 +10,7 @@
 #   docs-only  the docs say where the key is made, but the page is behind a sign-in and its labels could not be read;
 #              steps name only what the docs name
 #   uncertain  the only walkthrough found is dated, or the docs contradict each other
+# recommended: false = not worth setting up for the free pool (shown last, with the reason); default true
 # free_tier: anonymous (no key at all) | free (a standing free allowance) | trial (one-time credit or tokens) | none
 # key_var / extra_fields[].var are the names to send to PUT /pool/keys/{id} as {"values": {"<var>": "<value>"}}.
 checked: 2026-11-23
@@ -215,6 +216,8 @@ providers:
   - id: inception
     name: Inception Labs (Mercury)
     free_tier: trial
+    recommended: false
+    why_not: "The API shuts down after 2026-12-28."
     confidence: docs-only
     what_you_get: >-
       mercury-3: 100 million free tokens for a new account, at up to 1,000 requests/minute, 1,000,000 input
@@ -303,7 +306,6 @@ providers:
       - NVIDIA's only written walkthrough is old (its screenshots show an earlier model), so the labels above may have moved; look for **Get API Key** on a model page or under your account at the top right.
       - "Access is \"for prototyping, research, development and testing purposes only\", not production, which NVIDIA defines as \"any non-testing activity including activity serving real end-users\"."
       - Whether the key expires and whether it is shown only once are not stated; save it when it appears.
-      - The catalog's deepseek-ai/deepseek-v3.1 is not in NVIDIA's current model reference (which lists deepseek-v4-flash and deepseek-v4-pro), so that model may no longer answer.
       - NVIDIA's own pages do not say how free-tier prompts are used; through Kilo, NVIDIA's free endpoints are described as logged "to improve NVIDIA products and services".
     terms_note: Free access through the Developer Program is for prototyping and testing only; production use needs an NVIDIA AI Enterprise license.
     checked: 2026-11-23
@@ -382,6 +384,8 @@ providers:
   - id: cerebras
     name: Cerebras Inference
     free_tier: trial
+    recommended: false
+    why_not: "Needs a card and has no standing free tier."
     confidence: seen
     what_you_get: >-
       gpt-oss-120b on a Free Trial: US$5 of credit that expires 30 days after it is granted, at 5 requests/minute
@@ -402,7 +406,6 @@ providers:
       - "A card (or other payment method) is required: \"New accounts receive $5 in free credits after adding a verified payment method.\""
       - "\"Is there a permanently free tier?\" \"No.\" API access pauses when the credit is used up or 30 days have passed, unless you buy credit."
       - Keys do not expire, and the full key can be copied again later from the list.
-      - The catalog's qwen-3-235b-a22b-instruct-2507 is no longer in Cerebras's shared model list (it has gpt-oss-120b and qwen-3.8-27b), so that model may no longer answer.
       - "Cerebras's terms say it has no right to use your content \"for the purpose of training or fine-tuning models\"."
       - Trial credits "may be withheld or revoked in cases of fraud, abuse, or duplicate accounts".
     terms_note: Cerebras's terms forbid buying, selling or transferring API keys without its written consent.
@@ -419,6 +422,8 @@ providers:
   - id: ovh
     name: OVHcloud AI Endpoints
     free_tier: anonymous
+    recommended: false
+    why_not: "Works without a key; a key is pay-per-token."
     confidence: seen
     what_you_get: >-
       Without a key: the OVH models at a published 2 requests/minute per IP address and per model (in practice the
@@ -453,6 +458,8 @@ providers:
   - id: mistral
     name: Mistral AI (Studio)
     free_tier: none
+    recommended: false
+    why_not: "No free API tier."
     confidence: seen
     what_you_get: >-
       Nothing for free any more. Mistral's docs today say the free mode "doesn't include API access"; a key for

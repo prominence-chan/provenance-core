@@ -253,7 +253,6 @@ Good to know:
 - NVIDIA's only written walkthrough is old (its screenshots show an earlier model), so the labels above may have moved; look for **Get API Key** on a model page or under your account at the top right.
 - Access is "for prototyping, research, development and testing purposes only", not production, which NVIDIA defines as "any non-testing activity including activity serving real end-users".
 - Whether the key expires and whether it is shown only once are not stated; save it when it appears.
-- The catalog's deepseek-ai/deepseek-v3.1 is not in NVIDIA's current model reference (which lists deepseek-v4-flash and deepseek-v4-pro), so that model may no longer answer.
 - NVIDIA's own pages do not say how free-tier prompts are used; through Kilo, NVIDIA's free endpoints are described as logged "to improve NVIDIA products and services".
 
 Terms: Free access through the Developer Program is for prototyping and testing only; production use needs an NVIDIA AI Enterprise license.
@@ -340,7 +339,6 @@ Good to know:
 - A card (or other payment method) is required: "New accounts receive $5 in free credits after adding a verified payment method."
 - "Is there a permanently free tier?" "No." API access pauses when the credit is used up or 30 days have passed, unless you buy credit.
 - Keys do not expire, and the full key can be copied again later from the list.
-- The catalog's qwen-3-235b-a22b-instruct-2507 is no longer in Cerebras's shared model list (it has gpt-oss-120b and qwen-3.8-27b), so that model may no longer answer.
 - Cerebras's terms say it has no right to use your content "for the purpose of training or fine-tuning models".
 - Trial credits "may be withheld or revoked in cases of fraud, abuse, or duplicate accounts".
 
