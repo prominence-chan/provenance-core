@@ -1464,3 +1464,12 @@ def test_the_sidebar_is_not_read_for_notices(mock, tmp_path):
 
     d, st = scenario(mock, tmp_path, go)
     assert d["choices"][0]["message"]["content"] == "ok" and not st["blocked"], st
+
+
+def test_a_raw_fence_around_text_with_braces_is_taken_off():
+    """The page drops curly braces outside code blocks, so the model is asked to fence such text as raw."""
+    line = "RUN: python3 -c 'p=[{\"word\":\"a\"}]; print(f\"t{1:02d}\")'"
+    assert cw.parse_reply(f"```raw\n{line}\n```", {})[0] == line
+    assert cw.parse_reply(f"Two actions.\n\n```raw\n{line}\n```\n\nREAD: a.py", {})[0] == f"Two actions.\n\n{line}\n\nREAD: a.py"
+    assert cw.parse_reply("```python\nx = {1}\n```", {})[0] == "```python\nx = {1}\n```"  # other fences stay
+    assert "tagged raw" in cw.REMINDER_PLAIN

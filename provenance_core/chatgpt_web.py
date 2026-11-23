@@ -131,7 +131,15 @@ tools). Stop after the call blocks and wait for results. If the task is complete
 
 FRAME_PLAIN = """This message was put together by a program on my computer, which will read your reply and pass it on. Below are its instructions and the conversation so far. Write the assistant's next turn. Do not use your built-in tools (code execution, web search, canvas, memory, image generation) and do not mention this framing in your answer."""
 
-REMINDER_PLAIN = "Now write the assistant's next turn (only the turn's content, no <<<assistant>>> line)."
+# The chat page eats curly braces written outside a code block (a reply "RUN: python3 -c 'p=[{...}]'" arrives as
+# "RUN: python3 -c 'p=["; its own Copy button gives the same), so text with braces travels in a fence tagged raw,
+# which parse_reply takes off again.
+BRACES = (
+    " This chat page drops anything in curly braces that is outside a code block: if a part of your turn contains "
+    "{ or } (a command, JSON, code, a format string), put that part, or the whole turn, in a fenced block tagged "
+    "raw (```raw ... ```); the program removes the fence and keeps the text exactly."
+)
+REMINDER_PLAIN = "Now write the assistant's next turn (only the turn's content, no <<<assistant>>> line)." + BRACES
 
 TOOL_TAGS = ("tool_call", "tool-call", "toolcall", "tool_calls", "tool")
 SHELL_TOOLS = ("exec_command", "shell_command", "shell", "local_shell", "container.exec")
@@ -562,6 +570,7 @@ def summarised_prompt(
 _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*([\w+#.-]*)[^\n]*\n(.*?)\n[ \t]*\1[ \t]*$", re.S | re.M)
 
 
+_RAW = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*raw[ \t]*\n(.*?)\n[ \t]*\1[ \t]*$", re.S | re.M | re.I)
 _TURN = re.compile(r"^[ \t]*<<<(?:user|assistant|tool result[^>\n]*)>>>[ \t]*$", re.M)
 
 
@@ -682,6 +691,7 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                 ) from None
             calls = [_check(c, tools)]
             text = md[: m.start() if m else start].strip()
+    text = _RAW.sub(lambda m: m.group(2), text)  # the fence asked for around text with curly braces (BRACES)
     if rules.get("only") and any(c["name"] != rules["only"] for c in calls):
         raise Malformed(f"this turn must call the tool {rules['only']}")
     if rules.get("must") and not calls:
