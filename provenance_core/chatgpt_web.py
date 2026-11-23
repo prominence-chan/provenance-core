@@ -1283,6 +1283,7 @@ DEFAULTS = {
     "model_caps": None,
     "model_window_s": 86400.0,  # a model's count starts again this long after its first reply
     "page_backoff_max_s": 120.0,  # longest wait after repeated page errors (nothing the site said)
+    "doubt_tries": 3,  # a missing temporary chat / a sign-in page is believed the third time in a row
     "min_gap_s": 4.0,  # pause between requests: a random time in [min_gap_s, max_gap_s]
     "max_gap_s": 9.0,
     "queue_wait_s": 45.0,  # a request waits this long for the one in flight, then goes to the normal pool
@@ -1572,6 +1573,22 @@ class Bridge:
         self.save(blocked_until=0, reason=None, kind=None, strikes=0)
 
     def _block(self, e: WebUnavailable):
+        if e.kind in ("tempchat", "login") and e.cooldown > float(self.o["page_backoff_max_s"]):
+            # "no temporary chat" and "signed out" are read off the page, and a page that has not finished loading
+            # (a busy computer) looks the same. These cost hours, so on an account where they worked before the
+            # first sightings are only a short wait; the long one starts when it keeps being seen.
+            s = self.load()
+            seen = int((s.get("doubts") or {}).get(e.kind, 0)) + 1
+            worked = s.get("signed_in") if e.kind == "login" else s.get("temp_ok")
+            if worked and seen < int(self.o["doubt_tries"]):
+                self.save(
+                    doubts={**(s.get("doubts") or {}), e.kind: seen},
+                    blocked_until=self.clock() + float(self.o["page_backoff_max_s"]),
+                    reason=f"{e.reason} (seen {seen} time{'s' if seen != 1 else ''}; trying again before believing it)",
+                    kind="page",
+                )
+                e.cooldown, e.kind = float(self.o["page_backoff_max_s"]), "page"  # what the caller waits by, too
+                return
         ch = {"blocked_until": self.clock() + e.cooldown, "reason": e.reason, "kind": e.kind}
         if e.kind == "login":
             ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
@@ -2580,8 +2597,9 @@ class Bridge:
                     else:
                         self.save(strikes=1)
                 raise
-            if self.load().get("strikes"):
-                self.save(strikes=0)
+            st = self.load()
+            if st.get("strikes") or st.get("doubts") or not st.get("temp_ok"):
+                self.save(strikes=0, doubts={}, temp_ok=True)  # a reply came back, in a temporary chat
             self._model_replied(model)
             fmt = (body.get("response_format") or {}).get("type")
             if fmt in ("json_schema", "json_object") and not calls:

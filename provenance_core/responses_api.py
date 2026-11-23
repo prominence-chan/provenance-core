@@ -515,6 +515,13 @@ def register(app, router: Router, token: str | None):
         return s["response"]
 
 
+EMPTY_REPLY_COOLDOWN_S = 300.0
+
+
+class EmptyReply(RuntimeError):
+    """The upstream finished without any text or tool call."""
+
+
 async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, custom, shell, single, note=None):
     seq = 0
 
@@ -612,6 +619,10 @@ async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, cust
                 yield ev("response.output_item.added", output_index=i, item={**item, "status": "in_progress"})
             yield ev("response.output_item.done", output_index=i, item=item)
             output.append(item)
+        if not output:
+            # a reply with no text and no tool call (some free models spend the whole reply on hidden reasoning):
+            # a failure, so the client asks again, and this model sits out so the next try goes to another one
+            raise EmptyReply("the model sent an empty reply")
         inp = int((up.usage or {}).get("prompt_tokens") or estimate_input(body))
         incomplete = "max_output_tokens" if up.finish_reason == "length" else None
         final = response_obj(
@@ -632,7 +643,11 @@ async def _stream(router, store, resp, m, t0, rid, req, model, body, convo, cust
         # hard error and would drop the partial turn
         yield ev("response.completed", response=final)
     except Exception as e:  # noqa: BLE001
-        router.state.failure(m)
+        router.state.failure(
+            m, **({"retry_after": EMPTY_REPLY_COOLDOWN_S, "rate_limited": True} if isinstance(e, EmptyReply) else {})
+        )
+        if isinstance(e, EmptyReply):
+            print(f"empty reply: {m.id} sits out {int(EMPTY_REPLY_COOLDOWN_S)} s", flush=True)
         failed = response_obj(rid, req, model, "failed", output, None)
         failed["error"] = {"code": "server_error", "message": f"{m.id}: {e}"[:500]}
         yield ev("response.failed", response=failed)

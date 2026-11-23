@@ -944,7 +944,8 @@ def test_page_end_to_end_through_the_responses_api(mock, tmp_path, monkeypatch):
         r = c.post("/v1/responses", json={"model": "luna/nova", "input": "hi"})
         assert r.headers["x-pcore-model"] == "a/big" and r.json()["output"][0]["content"][0]["text"] == "from the pool"
         st = c.get("/chatgpt-web/status").json()
-        assert st["blocked"] and st["kind"] == "login" and st["models"][0]["available"] is False
+        # it worked a moment ago, so the first sighting is a short wait, not yet "signed out"
+        assert st["blocked"] and st["kind"] == "page" and st["models"][0]["available"] is False
         mock.state["login"] = True  # signed in again: a live check clears the block
         st = c.get("/chatgpt-web/status?probe=1").json()
         assert st["ok"] and not st["blocked"] and st["models"][0]["available"]
@@ -1405,3 +1406,25 @@ def ws_plain(st):
     from provenance_core import web_setup as ws
 
     return ws.plain_reason({**st, "daily_cap": 200}, cw.Bridge("https://chatgpt.com", {}))
+
+
+@browser
+@pytest.mark.parametrize("trouble,kind,flag", [({"temp": False}, "tempchat", "temp_ok"), ({"login": False}, "login", "signed_in")])
+def test_a_lost_temp_chat_or_sign_in_is_doubted_before_the_long_block(mock, tmp_path, trouble, kind, flag):
+    """On an account where it worked before, a page without temporary chat / with a sign-in button may just be a
+    page that did not finish loading: two short waits first, the hours-long block on the third sighting."""
+    mock.state.update(trouble)
+
+    async def go(b):
+        b.save(**{flag: True})
+        seen = []
+        for _ in range(3):
+            with pytest.raises(cw.WebUnavailable) as e:
+                await b.complete("luna", dict(USER))
+            seen.append((e.value.kind, e.value.cooldown <= 120, b.status()["kind"]))
+            b.save(blocked_until=0)  # the wait passes
+        return seen
+
+    seen = scenario(mock, tmp_path, go)
+    assert seen == [("page", True, "page"), ("page", True, "page"), (kind, False, kind)], seen
+    assert mock.sent == []

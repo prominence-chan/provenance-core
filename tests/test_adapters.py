@@ -722,3 +722,21 @@ def test_responses_stream_upstream_error_and_unknown_model(env):
     assert evs[-1][0] == "response.failed" and "boom" in evs[-1][1]["response"]["error"]["message"]
     r = c.post("/v1/responses", json={"model": "gpt-5-codex", "input": "x"})
     assert r.status_code == 200 and r.headers["x-pcore-tier"] == "nova"  # unknown -> strongest tier
+
+
+def test_responses_stream_with_no_text_and_no_tool_call_fails_and_the_next_try_goes_elsewhere(env):
+    """Some free models finish a reply with nothing in it (all hidden reasoning). That is a failure the client can
+    retry, and the model sits out so the retry is served by another one."""
+    c, up, _ = env
+    empty = [
+        {"choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": "thinking"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"completion_tokens": 900}},
+    ]
+    req = {"model": "solstice", "stream": True, "input": "go", "store": False}
+    assert c.post("/v1/responses", json={**req, "stream": False}).status_code == 200
+    first = up.last["model"]  # whichever model is asked first gets the empty reply
+    up.script[first] = [empty]
+    evs = parse_sse(c.post("/v1/responses", json=req).text)
+    assert evs[-1][0] == "response.failed" and "empty reply" in evs[-1][1]["response"]["error"]["message"]
+    evs = parse_sse(c.post("/v1/responses", json=req).text)
+    assert evs[-1][0] == "response.completed" and up.bodies[-1]["model"] != first
