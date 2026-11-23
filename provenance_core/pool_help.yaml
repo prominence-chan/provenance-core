@@ -80,6 +80,8 @@ providers:
       - "Free-tier prompts and answers are used by Google: \"Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products and services and machine learning technologies\", and \"human reviewers may read, annotate, and process your API input and output\". Google says not to submit sensitive, confidential or personal information to the unpaid service."
       - In the EEA, Switzerland and the UK the paid-service data terms apply to the free quota too (no such use of your content).
       - Limits are per project, not per key, so a second key in the same project adds nothing.
+      - Each Google account's key has its own free allowance, but the pool keeps one Google key; it does not combine the keys of several Google accounts.
+      - If you signed in to Gemini in the app, the app can open this page in that same signed-in Google window (`open_with` in GET /pool/help, POST /web/open). You still create and copy the key yourself; nothing on the page is clicked or read for you.
       - If you already have a Google Cloud account, AI Studio creates no default project; import one under **Dashboard** > **Projects** > **Import projects**, then create the key on the **API Keys** page. An imported project may need the phone verification before it gets the free tier.
       - Do not attach a Cloud Billing account to the project unless you mean to pay; with billing on, the project is on the paid tier.
       - Flash models often answer 503 under load; the router treats that as temporary.

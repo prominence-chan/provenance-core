@@ -556,3 +556,93 @@ def test_try_now_and_the_paid_plan_through_the_api(mock, tmp_path, home):
     assert plans["free"] == ("free", "free", None)
     assert asked_again == "paid_plan"
     assert not any(SECRET in t for t in texts) and not leaks(tmp_path)
+
+
+# ---- a pool provider's key page, opened in a signed-in profile (POST /web/open) ---------------------------------------
+def key_help(monkeypatch, url):
+    from provenance_core import pool_help
+
+    data = {
+        "checked": "2026-11-23",
+        "providers": [
+            {"id": "google", "name": "G", "keys_url": url + "/", "signup_url": url + "/auth/login"},
+            {"id": "other", "name": "O", "keys_url": "https://example.com/keys", "signup_url": "https://example.com"},
+        ],
+    }
+    monkeypatch.setattr(pool_help, "load", lambda: data)
+    return data
+
+
+def test_only_key_pages_of_the_signed_in_site_can_be_opened(tmp_path, home, monkeypatch):
+    url = "http://127.0.0.1:9"
+    data = key_help(monkeypatch, url)
+    router, app, setup = client_for(catalog(tmp_path, url, opens=["127.0.0.1"]))
+    ask = {"provider": "chatgpt-web", "account": "b"}
+    with TestClient(app) as c:
+        assert c.get("/pool/help").json() == data  # nobody signed in: no open_with anywhere
+        anywhere = c.post("/web/open", json={**ask, "url": "https://evil.example/steal"})
+        near = c.post("/web/open", json={**ask, "url": url + "/other"})  # the right site, not a listed page
+        none = c.post("/web/open", json=ask)
+        signed_out = c.post("/web/open", json={**ask, "url": url + "/"})
+        setup.bridge_for("chatgpt-web", "b").save(signed_in=True)
+        wrong_site = c.post("/web/open", json={**ask, "url": "https://example.com/keys"})
+        all_ = c.get("/pool/help").json()["providers"]
+        one = c.get("/pool/help", params={"provider": "google"}).json()["provider"]
+        unknown = c.post("/web/open", json={"provider": "nope", "account": "b", "url": url + "/"})
+        idle = c.get("/web/open", params=ask).json()
+    for r in (anywhere, near, none):
+        assert r.status_code == 400 and "key page" in r.json()["detail"]
+    assert signed_out.status_code == 409 and "not signed in" in signed_out.json()["detail"]
+    assert wrong_site.status_code == 409 and "does not use" in wrong_site.json()["detail"]
+    # the two test providers keep one state per account, so both list b; main is not signed in
+    who = [{"provider": "chatgpt-web", "account": "b"}, {"provider": "other-web", "account": "b"}]
+    assert all_[0]["open_with"] == who and one["open_with"] == who and "open_with" not in all_[1]
+    assert unknown.status_code == 404 and idle["state"] == "idle" and not setup.opens
+    assert cw.SITES["gemini"]["opens"] == ["google.com"] and "opens" not in cw.CHATGPT_SITE
+    real = cw.Bridge("https://gemini.google.com", {"site": "gemini"}, home=tmp_path)
+    assert setup._covers(real, "https://aistudio.google.com/api-keys")
+    assert not setup._covers(real, "https://console.groq.com/keys")
+    assert not setup._covers(real, "https://google.com.evil.example/api-keys")
+
+
+@browser
+def test_key_page_window_opens_is_left_alone_and_closes(mock, tmp_path, home, monkeypatch):
+    import signal
+
+    key_help(monkeypatch, mock.url)
+    router, app, setup = client_for(catalog(tmp_path, mock.url, opens=["127.0.0.1"]))
+    ask = {"provider": "chatgpt-web", "account": "b"}
+    with TestClient(app) as c:
+        try:
+            b = setup.bridge_for("chatgpt-web", "b")
+            b.save(signed_in=True)
+            r = c.post("/web/open", json={**ask, "url": mock.url + "/"})
+            st = c.get("/web/open", params=ask).json()
+            flow = setup.opens[("chatgpt-web", "b")]
+            pid = flow.window.pid
+            during = (b.signing_in(), setup.bridge_for("other-web", "b").signing_in(), b.capacity()["available"])
+            second = c.post("/web/open", json={"provider": "other-web", "account": "b", "url": mock.url + "/"})
+            signin = c.post("/web/login", json=ask)
+            login_view = c.get("/web/login", params=ask).json()["state"]
+            cancelled = c.post("/web/open/cancel", json=ask).json()
+            gone = os.system(f"kill -0 {pid} 2>/dev/null") != 0
+            after = (b.signing_in(), c.get("/web/open", params=ask).json()["state"])
+            # again; this time the person closes the window
+            assert c.post("/web/open", json={**ask, "url": mock.url + "/"}).json()["state"] == "open"
+            os.kill(setup.opens[("chatgpt-web", "b")].window.pid, signal.SIGTERM)
+            end = time.time() + 30
+            while c.get("/web/open", params=ask).json()["state"] == "open" and time.time() < end:
+                time.sleep(0.2)
+            closed = c.get("/web/open", params=ask).json()
+            free = not b.signing_in()
+        finally:
+            c.post("/web/open/cancel", json=ask)
+            c.post("/chatgpt-web/release")
+    assert r.status_code == 200 and r.json()["state"] == "open" and r.json()["url"] == mock.url + "/"
+    assert st["state"] == "open" and "--remote-debugging" not in " ".join(flow.window.args())  # nothing drives it
+    assert during == (True, True, False)  # the account's bridges keep out of the profile meanwhile
+    assert second.status_code == 409 and signin.status_code == 409 and "already open" in signin.json()["detail"]
+    assert login_view == "idle"  # it is not a sign-in
+    assert cancelled["state"] == "idle" and gone and after == (False, "idle")
+    assert closed["state"] == "closed" and closed["reason"] is None and free
+    assert not mock.sent and not mock.touched and not mock.posted  # the page was only shown

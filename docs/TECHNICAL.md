@@ -645,6 +645,9 @@ to the person as it is.
 | `PATCH /web/providers/{id}` `{enabled?, daily_cap?}` | turns the site on or off, sets its daily cap (per account, 1-10000); kept in `<PCORE_HOME>/settings.json` and applied to the running bridges at once; answers with the provider as `GET /web/accounts` lists it. A browser no enabled site uses any more is closed. 409 with a `detail` for anything else (another key, a wrong type, PCORE_CHATGPT_WEB=0) |
 | `POST /web/accounts` `{account}` | a new account slot (a new browser profile) on every web provider |
 | `DELETE /web/accounts/{id}` | removes it from every provider; its profile directory is never deleted (`profile_kept`, `note` say so) |
+| `POST /web/open` `{provider, account, url, bounds?}` | opens a pool provider's key page for the person in a visible window of that account's profile, already signed in (see "A key page in the signed-in window"): `{state: "open", url, …}`; 400 when `url` is not a `keys_url` / `signup_url` of `pool_help.yaml`; 409 when the page is not on a site that provider's sign-in covers, the account is not signed in, or a window is already open on the account |
+| `GET /web/open?provider=&account=` | `{state, reason, url}`: idle / preparing / open / closed / failed |
+| `POST /web/open/cancel` `{provider, account}` | closes that window: `{"state": "idle"}` |
 | `POST /web/browser/prepare` | start preparing the bundled browser if it is not ready; answers with `browser` |
 
 **Accounts are global.** One account is one browser profile, shared by every site (`share:`), so the same ids are
@@ -709,6 +712,29 @@ window headless and directly (`WebSetup.launch = "exec"`) so nothing shows. Once
 plain copy opened with `open -n -a`, small in a corner, came to the front, signed in on the mock page, was detected,
 quit and verified in 10 s. **Not verified:** a real sign-in on any site (the cookie names above, Google's reaction to
 this window, the identity selectors, and how each site's sign-in page behaves when opened directly).
+
+### A key page in the signed-in window (`POST /web/open`, `OpenFlow`)
+
+A person who signed in to Gemini in the app signed in with a Google account, and Google AI Studio, where the free
+Gemini API key is made, uses the same sign-in. So the app can open that page in the profile that is already signed
+in. `OpenFlow` is the sign-in window's machinery (`LoginFlow`) without the watching and the check: the bridges on
+the profile are paused and their background browser closed, one ordinary window opens at the page, and it ends when
+the person closes it, on cancel, or after `open_timeout_s` (30 min); then the pause lifts. One window per profile,
+sign-in windows included; while it is open the account reports `signing_in` and takes no requests.
+
+- **Only listed pages.** `url` must be exactly a `keys_url` or `signup_url` of `pool_help.yaml`, and on a site the
+  provider's sign-in covers: `opens` in `SITES` (Gemini: `google.com` and its subdomains, so today only
+  aistudio.google.com). The account must be signed in (`signed_in` true in its state).
+- **The window is the person's.** It has no debugging port and nothing is attached to it: the router cannot click,
+  type, read or copy anything on the page. The person makes the key and pastes it into the app's key field.
+- **`open_with`.** `GET /pool/help` adds `open_with: [{provider, account}, …]` to an entry whose `keys_url` a
+  signed-in account can open, worked out at request time; absent otherwise.
+- Each Google account's key has its own free allowance, but nothing pools the keys of several Google accounts: the
+  pool keeps one Google key, as before.
+
+Verified against the mock (`tests/test_web_signin.py`): refusals (a URL that is not listed, a listed page on another
+site, an account that is not signed in), open / status / cancel, closing by hand, the pause while it is open, and
+`open_with` only for matching signed-in accounts. Not verified: AI Studio itself in that window.
 
 ### The account's plan, and the paid-plan confirmation
 

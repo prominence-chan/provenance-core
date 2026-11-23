@@ -50,7 +50,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
 from urllib.parse import urlparse
 
 from . import browser_host, pool_help, provider_settings, web_signin

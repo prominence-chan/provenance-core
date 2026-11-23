@@ -386,6 +386,36 @@ def create_app(
         except KeyError as e:
             return fail(e)
 
+    # a pool provider's key page, opened for the person in a visible window of a profile already signed in to that
+    # site (Google AI Studio with the Gemini account). Only pages listed in pool_help.yaml; nothing drives the window
+    @app.post("/web/open")
+    async def web_open(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        b = await body_of(request)
+        try:
+            return await setup.open_page(str(b.get("provider") or ""), b.get("account"), b.get("url"), b.get("bounds"))
+        except web_setup.SetupError as e:
+            return fail(e, setup.open_state(str(b.get("provider")), b.get("account"))["state"])
+        except KeyError as e:
+            return fail(e)
+
+    @app.get("/web/open")
+    async def web_open_state(provider: str, account: str | None = None, authorization: str | None = Header(None)):
+        check(authorization)
+        try:
+            return setup.open_state(provider, account)
+        except KeyError as e:
+            return fail(e)
+
+    @app.post("/web/open/cancel")
+    async def web_open_cancel(request: Request, authorization: str | None = Header(None)):
+        check(authorization)
+        b = await body_of(request)
+        try:
+            return await setup.open_cancel(str(b.get("provider") or ""), b.get("account"))
+        except KeyError as e:
+            return fail(e)
+
     @app.patch("/web/providers/{provider}")
     async def web_provider_update(provider: str, request: Request, authorization: str | None = Header(None)):
         check(authorization)
@@ -437,10 +467,13 @@ def create_app(
     @app.get("/pool/help")
     async def pool_help_view(provider: str | None = None, authorization: str | None = Header(None)):
         check(authorization)
+        # `open_with` [{provider, account}] on an entry: the signed-in web accounts whose browser profile can open
+        # its key page already signed in (POST /web/open); worked out now, absent when there is none
         if provider is None:
-            return pool_help.load()
+            d = pool_help.load()
+            return {**d, "providers": [setup.help_view(p) for p in d["providers"]]}
         try:
-            return {"checked": pool_help.load()["checked"], "provider": pool_help.provider(provider)}
+            return {"checked": pool_help.load()["checked"], "provider": setup.help_view(pool_help.provider(provider))}
         except KeyError as e:
             return fail(e)
 
