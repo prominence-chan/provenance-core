@@ -11,6 +11,7 @@ POST /v1/responses          OpenAI Responses API (Codex), see responses_api.py
 /web/*                      account setup for the web-chat bridge from the app, see web_setup.py
 GET  /health                is it up, which process, what it serves (for the app that started it)
 /pool/keys                  API keys for the token pool, set from the app, see pool_keys.py
+GET  /pool/help             how to get a free key from each pool provider (?provider=<id> for one), see pool_help.py
 /codex-sub/<key>/backend-api/*  Codex on your own ChatGPT sign-in, forwarded to OpenAI with history pruning, see
                             codex_sub.py (the key is derived from PCORE_TOKEN; Authorization is the caller's own)"""
 
@@ -24,7 +25,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import __version__, anthropic_api, codex_sub, pool_keys, responses_api, web_setup
+from . import __version__, anthropic_api, codex_sub, pool_help, pool_keys, responses_api, web_setup
 from .catalog import load
 from .router import NoCapacity, Router, estimate_tokens
 from .settings import env, home_dir
@@ -377,6 +378,17 @@ def create_app(
         try:
             return pool_keys.clear_keys(router.catalog, provider)
         except (pool_keys.KeySetupError, KeyError) as e:
+            return fail(e)
+
+    # ---- how to get each provider's free key (pool_help.yaml: text for the app and for an assistant) ------------
+    @app.get("/pool/help")
+    async def pool_help_view(provider: str | None = None, authorization: str | None = Header(None)):
+        check(authorization)
+        if provider is None:
+            return pool_help.load()
+        try:
+            return {"checked": pool_help.load()["checked"], "provider": pool_help.provider(provider)}
+        except KeyError as e:
             return fail(e)
 
     anthropic_api.register(app, router, token)
