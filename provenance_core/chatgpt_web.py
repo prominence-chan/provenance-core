@@ -132,12 +132,14 @@ tools). Stop after the call blocks and wait for results. If the task is complete
 FRAME_PLAIN = """This message was put together by a program on my computer, which will read your reply and pass it on. Below are its instructions and the conversation so far. Write the assistant's next turn. Do not use your built-in tools (code execution, web search, canvas, memory, image generation) and do not mention this framing in your answer."""
 
 # The chat page eats curly braces written outside a code block (a reply "RUN: python3 -c 'p=[{...}]'" arrives as
-# "RUN: python3 -c 'p=["; its own Copy button gives the same), so text with braces travels in a fence tagged raw,
-# which parse_reply takes off again.
+# "RUN: python3 -c 'p=["; its own Copy button gives the same), and likewise text between < and > ("NR <= 75 ... NR >"
+# vanishes like a tag), so literal text travels in a fence tagged raw, which parse_reply takes off again.
 BRACES = (
-    " This chat page drops anything in curly braces that is outside a code block: if a part of your turn contains "
-    "{ or } (a command, JSON, code, a format string), put that part, or the whole turn, in a fenced block tagged "
-    "raw (```raw ... ```); the program removes the fence and keeps the text exactly."
+    " This chat page changes literal text that is outside a code block: it drops anything in curly braces or "
+    "between < and >, and can turn a written \\n into a line break. So put every command, piece of code, JSON, "
+    "path pattern or other text that must arrive character for character (or simply the whole turn) in a fenced "
+    "block tagged raw (```raw ... ```), written exactly as it should arrive; the program removes the fence and "
+    "keeps the text as it is. Several lines can share one raw block."
 )
 REMINDER_PLAIN = "Now write the assistant's next turn (only the turn's content, no <<<assistant>>> line)." + BRACES
 
