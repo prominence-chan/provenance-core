@@ -7,10 +7,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 CAT = {
     "tiers": [
@@ -299,6 +299,27 @@ def test_messages_system_role_inside_messages_becomes_user(env):
     )
     assert r.status_code == 200
     assert [m["role"] for m in up.last["messages"]] == ["system", "user", "user", "assistant", "user"]
+
+
+def test_messages_compacts_old_image_history_and_keeps_current_image(env):
+    client, up, router = env
+    router.catalog.compact = {"messages": {"image_request_tokens": 2000}}
+    messages = []
+    for index in range(20):
+        messages.extend([
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "A" * 1200}}]},
+            {"role": "assistant", "content": f"Inspection {index}"},
+        ])
+    latest = {"type": "image", "source": {"type": "url", "url": "https://example.test/current.png"}}
+    messages.append({"role": "user", "content": [latest]})
+
+    response = client.post("/v1/messages", json={"model": "opus", "max_tokens": 100, "messages": messages})
+
+    assert response.status_code == 200
+    assert len(up.last["messages"]) < len(messages)
+    assert up.last["messages"][-1]["content"] == [
+        {"type": "image_url", "image_url": {"url": "https://example.test/current.png"}}
+    ]
 
 
 def test_messages_model_mapping(env, monkeypatch):

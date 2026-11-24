@@ -46,7 +46,7 @@ import json
 import posixpath
 import re
 
-from .settings import scoped
+from ..settings import scoped
 
 RULES = (
     "dup_system",

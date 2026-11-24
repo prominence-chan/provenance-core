@@ -11,11 +11,11 @@ import httpx
 import pytest
 import yaml
 
-from provenance_core import chatgpt_web as cw
-from provenance_core import prune
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.state import State
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.context import prune
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.routing.state import State
 
 CWD = "/repo"
 

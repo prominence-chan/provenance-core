@@ -1,6 +1,6 @@
 """OpenAI-compatible HTTP API.
 
-POST /v1/chat/completions   model = a tier name or alias (see catalog.yaml) | "auto" | a concrete catalog id
+POST /v1/chat/completions   model = a tier name or alias (see config/catalog.yaml) | "auto" | a concrete catalog id
                             optional body fields: "pcore": {"fallback": "none|down1|any",
                                                              "ensemble": {"k": 3, "strategy": "judge|majority|first"}}
                             optional header X-PCore-Session: sticky model per conversation
@@ -28,17 +28,23 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import __version__, anthropic_api, codex_sub, pool_help, pool_keys, responses_api, web_setup
-from .catalog import load
-from .router import NoCapacity, Router, estimate_tokens
-from .settings import env, home_dir
+from .. import __version__
+from . import anthropic_api, codex_sub, responses_api
+from ..keys import pool_help, pool_keys
+from ..web import web_setup
+from ..routing.catalog import load
+from ..routing.router import NoCapacity, Router, estimate_tokens
+from ..settings import config_path, env, home_dir
 
 
 def create_app(
     catalog_path: str | None = None, scores_path: str | None = None, router: Router | None = None
 ) -> FastAPI:
     if router is None:
-        catalog = load(catalog_path or env("CATALOG", "catalog.yaml"), scores_path or env("SCORES", "scores.yaml"))
+        catalog = load(
+            config_path(catalog_path or env("CATALOG"), "catalog.yaml"),
+            config_path(scores_path or env("SCORES"), "scores.yaml"),
+        )
         router = Router(catalog)
     app = FastAPI(title="provenance-core")
     token = env("TOKEN")  # optional bearer token for the proxy itself

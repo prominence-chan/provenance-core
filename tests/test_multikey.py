@@ -16,13 +16,13 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core import catalog as catalog_mod
-from provenance_core import pool_help, pool_keys
-from provenance_core.catalog import Limits, load
-from provenance_core.ledger import Ledger
-from provenance_core.router import NoCapacity, Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.routing import catalog as catalog_mod
+from provenance_core.keys import pool_help, pool_keys
+from provenance_core.routing.catalog import Limits, load
+from provenance_core.accounting.ledger import Ledger
+from provenance_core.routing.router import NoCapacity, Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -490,7 +490,7 @@ def test_no_answer_and_no_file_but_the_keys_file_holds_a_key(home, tmp_path, mon
 
 # ---- terms ---------------------------------------------------------------------------------------------------------
 def test_the_terms_note_comes_before_a_second_key(home, tmp_path):
-    router, c, up, _ = make(tmp_path, path=ROOT / "catalog.yaml")
+    router, c, up, _ = make(tmp_path, path=ROOT / "config" / "catalog.yaml")
     with c:
         keys = {p["id"]: p for p in c.get("/pool/keys").json()["providers"]}
         helps = {p["id"]: p for p in c.get("/pool/help").json()["providers"]}
@@ -523,12 +523,12 @@ def test_removed_providers_and_a_key_left_over(home, tmp_path, monkeypatch):
     (home / "keys.json").write_text(
         json.dumps({"MISTRAL_API_KEY": left, "@keys": {"cerebras": [{"id": "k1", "key": K3}]}})
     )
-    for path in (ROOT / "catalog.yaml", ROOT / "catalog.app.yaml"):
+    for path in (ROOT / "config" / "catalog.yaml", ROOT / "config" / "catalog.app.yaml"):
         cat = load(path, tmp_path / "none.yaml")
         assert not {"mistral", "cerebras"} & set(cat.providers)
         assert not [m for m in cat.models if m.startswith(("mistral/", "cerebras/"))]
         assert {"kilo", "groq", "openrouter", "cloudflare", "inception", "requesty", "ovh"} <= set(cat.providers)
-    router, c, up, _ = make(tmp_path, path=ROOT / "catalog.app.yaml")
+    router, c, up, _ = make(tmp_path, path=ROOT / "config" / "catalog.app.yaml")
     with c:
         r = c.get("/pool/keys")
         assert r.status_code == 200 and left not in r.text and K3 not in r.text
@@ -549,20 +549,20 @@ def test_removed_providers_and_a_key_left_over(home, tmp_path, monkeypatch):
         h = c.get("/pool/help").json()
         assert [x["id"] for x in h["removed"]] == ["mistral", "cerebras"] and len(h["considered"]) >= 15
     # OVH: its anonymous models stay; the instructions no longer walk anyone to its pay-per-token key
-    owner = load(ROOT / "catalog.yaml", tmp_path / "none.yaml")
+    owner = load(ROOT / "config" / "catalog.yaml", tmp_path / "none.yaml")
     assert owner.providers["ovh"].no_auth and [k.id for k in owner.providers["ovh"].slots()] == ["anon"]
     ovh = pool_help.provider("ovh")
     assert len(ovh["steps"]) == 1 and ovh["time_minutes"] == 0 and ovh["key_var"] == "OVH_AI_ENDPOINTS_ACCESS_TOKEN"
     monkeypatch.setenv("OVH_AI_ENDPOINTS_ACCESS_TOKEN", K2)  # one that is set is still used
     assert [k.id for k in owner.providers["ovh"].slots()] == ["main", "anon"]
-    assert load(ROOT / "catalog.app.yaml", tmp_path / "none.yaml").providers["ovh"].usable
+    assert load(ROOT / "config" / "catalog.app.yaml", tmp_path / "none.yaml").providers["ovh"].usable
 
 
 def test_a_provider_is_used_until_its_date(home, tmp_path, monkeypatch):
     monkeypatch.setenv("INCEPTION_API_KEY", K1)
     now = {"t": datetime.datetime(2026, 12, 28, 23, 30, tzinfo=datetime.UTC).timestamp()}
     monkeypatch.setattr(catalog_mod, "clock", lambda: now["t"])  # the clock is injected
-    router, c, up, _ = make(tmp_path, path=ROOT / "catalog.yaml")
+    router, c, up, _ = make(tmp_path, path=ROOT / "config" / "catalog.yaml")
     inc, m = router.catalog.providers["inception"], router.catalog.models["inception/mercury-3"]
     tier = router.catalog.tier_of(m)
 
@@ -591,7 +591,7 @@ def test_a_provider_is_used_until_its_date(home, tmp_path, monkeypatch):
 
 
 def test_the_kept_and_the_new_providers(home, tmp_path):
-    cat = load(ROOT / "catalog.yaml", tmp_path / "none.yaml")
+    cat = load(ROOT / "config" / "catalog.yaml", tmp_path / "none.yaml")
     ids = set(cat.models)
     assert "cloudflare/@cf/nvidia/nemotron-3-120b-a12b" not in ids  # deprecated 2026-11-20
     assert "nvidia/meta/llama-3.3-70b-instruct" not in ids and "nvidia/moonshotai/kimi-k3.1-pro" in ids
@@ -756,12 +756,12 @@ def test_review_prints_what_disagrees_with_the_written_steps(home, tmp_path):
     assert "labels seen on the page that the steps do not mention: Display Name (1x)" in groq  # the others are there
     assert "no step was reported as wrong" in out[out.index("== cloudflare") :]
     r = subprocess.run(
-        [sys.executable, "-m", "provenance_core.pool_help", "--review", str(home)],
+        [sys.executable, "-m", "provenance_core.keys.pool_help", "--review", str(home)],
         capture_output=True,
         text=True,
         cwd=ROOT,
         env={**os.environ, "PYTHONPATH": str(ROOT)},
     )
     assert r.returncode == 0 and r.stdout == out
-    before = (ROOT / "provenance_core" / "pool_help.yaml").read_text(encoding="utf-8")
+    before = (ROOT / "provenance_core" / "keys" / "pool_help.yaml").read_text(encoding="utf-8")
     assert "Create API Key, at the top right" not in before  # reviewing changes nothing

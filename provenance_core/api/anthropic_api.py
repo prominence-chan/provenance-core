@@ -36,8 +36,9 @@ from .adapters import (
     session_key,
     text_of,
 )
-from .router import NoCapacity, Router
-from .settings import env
+from ..context import compact
+from ..routing.router import NoCapacity, Router, has_images
+from ..settings import env
 
 FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("ember", 2)}  # (tier, position)
 
@@ -278,6 +279,13 @@ def register(app, router: Router, token: str | None):
         target = map_model(router, model_name)
         body = to_openai(req)
         session = session_key(request, target, body["messages"])
+        options = None if target.concrete else compact.config("messages", router.catalog.compact)
+        if options and (limit := options.get("image_request_tokens")) and has_images(body["messages"]):
+            history = body["messages"]
+            budget = max(0, (int(limit) - body["max_tokens"]) * 4)
+            body["messages"], report = router.compactor.compact(history, history, budget, options, scope="messages")
+            if report:
+                print(f"compact: Anthropic image request history {compact.summary(report)}", flush=True)
         single = single_call(req)
         try:
             if req.get("stream"):

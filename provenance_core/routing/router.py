@@ -17,7 +17,8 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import compact, context_signal, pool_keys, prune
+from ..context import compact, context_signal, prune
+from ..keys import pool_keys
 from .catalog import Catalog, Model
 from .state import State
 
@@ -27,7 +28,7 @@ class NoCapacity(Exception):
 
 
 def _home():
-    from .settings import home_dir
+    from ..settings import home_dir
 
     return home_dir()
 
@@ -35,6 +36,15 @@ def _home():
 def estimate_tokens(body: dict) -> int:
     text = json.dumps(body.get("messages", []))
     return len(text) // 4 + int(body.get("max_tokens") or body.get("max_completion_tokens") or 1024)
+
+
+def has_images(messages: list[dict]) -> bool:
+    return any(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
 
 
 @dataclass
@@ -74,7 +84,7 @@ class Router:
         return [tier]
 
     def bridge(self, provider: str):
-        from .chatgpt_web import make_bridge
+        from ..web.chatgpt_web import make_bridge
 
         if provider not in self.bridges:
             p = self.catalog.providers[provider]
@@ -97,7 +107,7 @@ class Router:
 
     def web_ok(self, endpoint: str) -> bool:
         """May tier requests arriving on this front end (responses / messages / chat) use a chatgpt_web provider?"""
-        from .chatgpt_web import DEFAULTS
+        from ..web.chatgpt_web import DEFAULTS
 
         return any(
             endpoint in (p.options.get("endpoints") or DEFAULTS["endpoints"])
@@ -344,7 +354,7 @@ class Router:
     async def _web_call(self, m: Model, body: dict, stream: bool, wait: float | None = None):
         """A chatgpt_web model: the whole reply is read from the page first, so a failure (login wall, challenge,
         closed window, bad tool call) surfaces here and the caller can still fail over."""
-        from .chatgpt_web import LiveStream, WebSkip, WebUnavailable
+        from ..web.chatgpt_web import LiveStream, WebSkip, WebUnavailable
 
         t0 = time.time()
         size = len(json.dumps(body.get("messages", []), default=str))
@@ -413,9 +423,9 @@ class Router:
         web: bool = False,
         source: str | None = None,
     ) -> tuple[dict, Model]:
-        tokens = estimate_tokens(self.api_view(body)[0])  # the size an API model would be sent
+        tokens = estimate_tokens(self.api_view(body)[0])
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web, source, self.compact_options())[:attempts]:
+        for m in self._request_candidates(body, tier, tokens, session, fallback, web, source)[:attempts]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 data = await self.call(m, body)
@@ -426,6 +436,15 @@ class Router:
             finally:
                 self.inflight[m.id] -= 1
         raise NoCapacity(f"no model in {tier} (fallback={fallback}) could serve this: {errors or 'none available'}")
+
+    def _request_candidates(
+        self, body: dict, tier: str, tokens: int, session: str | None, fallback: str, web: bool, source: str | None
+    ) -> list[Model]:
+        models = self.candidates(tier, tokens, session, fallback, web, source, self.compact_options())
+        if not source and has_images(body.get("messages", [])):
+            # Spend the attempt budget on known vision routes first, including allowed fallback tiers.
+            models.sort(key=lambda model: "vision" not in model.tags)
+        return models
 
     async def stream(
         self,
@@ -438,7 +457,7 @@ class Router:
     ):
         tokens = estimate_tokens(self.api_view(body)[0])
         errors = []
-        for m in self.candidates(tier, tokens, session, fallback, web, source, self.compact_options())[:4]:
+        for m in self._request_candidates(body, tier, tokens, session, fallback, web, source)[:4]:
             self.inflight[m.id] = self.inflight.get(m.id, 0) + 1
             try:
                 resp, t0 = await self.call(m, body, stream=True)

@@ -8,11 +8,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core import pool_help, pool_keys
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.keys import pool_help, pool_keys
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = (
@@ -24,7 +24,7 @@ DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 @pytest.fixture(scope="module")
 def catalog():
-    return load(ROOT / "catalog.yaml", ROOT / "no-scores.yaml")
+    return load(ROOT / "config" / "catalog.yaml", ROOT / "no-scores.yaml")
 
 
 @pytest.fixture(scope="module")

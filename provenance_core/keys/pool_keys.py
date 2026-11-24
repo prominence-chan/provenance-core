@@ -39,7 +39,7 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .settings import home_dir
+from ..settings import home_dir
 
 _VAR = re.compile(r"\$\{(\w+)\}")
 MAX_LEN = 4096

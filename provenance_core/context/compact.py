@@ -34,7 +34,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from . import prune
-from .settings import scoped
+from ..settings import scoped
 
 VERSION = 1  # part of the cache key: a change to what the brief says makes old cached briefs unused
 
@@ -61,7 +61,7 @@ SCOPE_DEFAULTS = {"web": {"step": 4, "use_room": True}}
 def config(scope: str, value) -> dict | None:
     """The options for "api" (requests to API models whose context window is smaller than the history) or "web" (the
     web bridge's fresh prompts), or None when it is off there. Same forms as prune.config; PCORE_COMPACT overrides."""
-    return scoped("COMPACT", scope, value, {**DEFAULTS, **SCOPE_DEFAULTS.get(scope, {})})
+    return scoped("COMPACT", scope, value, {**DEFAULTS, **SCOPE_DEFAULTS.get(scope, {})}, scopes=("api", "web", "messages"))
 
 
 # ---- sizes ------------------------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """chatgpt_web provider: the text protocol (prompt out, tool calls back), the router wiring (opt-in, failover,
-cooldowns, daily cap) and the page driver against a local mock page (tests/mock_chatgpt.py) in headless Chrome."""
+cooldowns, daily cap) and the page driver against a local mock page (tests/fixtures/mock_chatgpt.py) in headless Chrome."""
 
 import asyncio
 import json
@@ -10,14 +10,14 @@ import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
-from mock_chatgpt import Mock, code, tool_call
+from fixtures.mock_chatgpt import Mock, code, tool_call
 
-from provenance_core import chatgpt_web as cw
-from provenance_core.adapters import UpstreamStream
-from provenance_core.catalog import load
-from provenance_core.router import NoCapacity, Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.api.adapters import UpstreamStream
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import NoCapacity, Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 TOOLS = [
     {
@@ -510,7 +510,7 @@ def test_status_endpoint_and_calibration_skip(wired, tmp_path):
     c = TestClient(create_app(router=router))
     st = c.get("/chatgpt-web/status").json()
     assert st["enabled"] and st["signed_in"] is None and st["today"] == 0 and st["models"][0]["tier"] == "nova"
-    from provenance_core.calibrate import calibrate
+    from provenance_core.routing.calibrate import calibrate
 
     router.bridges["chatgpt-web"] = fake
     scores = run(calibrate(router, tmp_path / "scores.yaml"))
@@ -984,7 +984,7 @@ def test_reads_the_2026_11_markup():
 
     from playwright.async_api import async_playwright
 
-    html = (Path(__file__).parent / "real_page_2026_11.html").read_text()
+    html = (Path(__file__).parent / "fixtures" / "real_page_2026_11.html").read_text()
 
     async def go():
         async with async_playwright() as pw:
@@ -1157,21 +1157,21 @@ def test_live_stream_fails_over_before_any_text_and_reports_after():
 # ---- the bundled browser (`browser: bundled`), against the mock page ---------------------------------------------------
 def _bundled_ready():
     """The bundled browser already prepared under <PCORE_HOME>/browser, new enough for the installed Chrome. These
-    tests never download or prepare one (`python -m provenance_core.browser_host` does)."""
+    tests never download or prepare one (`python -m provenance_core.web.browser_host` does)."""
     if not _chrome_ok():
         return None
-    from provenance_core import browser_host as bh
+    from provenance_core.web import browser_host as bh
 
     return bh.current(need=bh.required_major())
 
 
 bundled = pytest.mark.skipif(
-    not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.browser_host)"
+    not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.web.browser_host)"
 )
 
 
 def _bundled_bridge(mock, tmp_path, monkeypatch, source="cft", **opts):
-    from provenance_core import browser_host as bh
+    from provenance_core.web import browser_host as bh
 
     if source == "cft":
         rec = _bundled_ready()
@@ -1289,7 +1289,7 @@ def test_bundled_browser_goes_when_the_bridge_goes(mock, tmp_path, monkeypatch):
 
 
 def test_browser_option_picks_the_browser(tmp_path, monkeypatch):
-    from provenance_core import browser_host as bh
+    from provenance_core.web import browser_host as bh
 
     rec = {"exe": "/nonexistent/bundled", "version": "157.0.1.2"}
     monkeypatch.setattr(bh, "ensure", lambda profile=None, **k: rec)
@@ -1428,7 +1428,7 @@ def test_repeated_page_errors_are_a_short_wait_of_their_own_kind(mock, tmp_path)
 
 
 def ws_plain(st):
-    from provenance_core import web_setup as ws
+    from provenance_core.web import web_setup as ws
 
     return ws.plain_reason({**st, "daily_cap": 200}, cw.Bridge("https://chatgpt.com", {}))
 

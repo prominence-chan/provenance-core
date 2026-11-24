@@ -15,11 +15,12 @@ import yaml
 from fastapi.testclient import TestClient
 from test_adapters import CAT
 
-from provenance_core import codex_sub, prune_responses
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.api import codex_sub
+from provenance_core.context import prune_responses
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 ACCESS = "eyJhbGciOiJSUzI1NiJ9.SECRET-ACCESS-TOKEN.sig"
 ACCOUNT = "acct-SECRET-ACCOUNT-1234"

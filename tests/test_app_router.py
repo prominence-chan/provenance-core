@@ -15,12 +15,12 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core import chatgpt_web as cw
-from provenance_core import pool_keys
-from provenance_core.catalog import load, overlay
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.keys import pool_keys
+from provenance_core.routing.catalog import load, overlay
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -104,8 +104,8 @@ def test_app_catalog_for_a_new_user(home, monkeypatch):
     monkeypatch.setenv("PCORE_CHATGPT_WEB", "1")
     for n in ("OVH_AI_ENDPOINTS_ACCESS_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(n, raising=False)
-    cat = load(ROOT / "catalog.app.yaml")
-    owner = load(ROOT / "catalog.yaml")
+    cat = load(ROOT / "config" / "catalog.app.yaml")
+    owner = load(ROOT / "config" / "catalog.yaml")
     web = {n: p for n, p in cat.providers.items() if p.type == "chatgpt_web"}
     assert set(web) == {"chatgpt-web", "qwen-web", "gemini-web"} and "zai-web" in owner.providers
     assert all(p.options["accounts"] == ["main"] and p.usable for p in web.values())

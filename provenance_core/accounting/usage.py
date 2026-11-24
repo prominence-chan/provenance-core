@@ -22,7 +22,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from .settings import env
+from ..settings import env
 
 HOME = Path(env("HOME") or Path.home() / ".tierlm")  # state dir; keeps the pre-rename location
 CLAUDE_FILE = HOME / "claude_limits.json"

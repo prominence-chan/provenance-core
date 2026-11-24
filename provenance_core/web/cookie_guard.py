@@ -38,7 +38,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .settings import env
+from ..settings import env
 
 SUFFIXES = ("", "-journal", "-wal")
 DB_PATHS = ("Default/Network/Cookies", "Default/Cookies")

@@ -51,7 +51,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import browser_host, cookie_guard, pool_help, provider_settings, web_signin
+from . import browser_host, cookie_guard, web_signin
+from ..keys import pool_help
+from ..routing import provider_settings
 from .chatgpt_web import Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
 
 ACCOUNT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
@@ -1086,7 +1088,7 @@ def cli_login(call, provider: str, account: str | None, out=print, sleep=time.sl
 def local_call(cat):
     """`call` for cli_login when no server is running: the same flow in this process (the window, then a check in
     a background browser that is closed again before the command ends)."""
-    from .router import Router
+    from ..routing.router import Router
 
     loop = asyncio.new_event_loop()
     setup = WebSetup(Router(cat), close_after=True)

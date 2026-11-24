@@ -12,7 +12,7 @@ os.environ.pop("TIERLM_HOME", None)
 @pytest.fixture(autouse=True)
 def _no_keys_left_over():
     """Keys one test set from "the app" (pool_keys keeps them in the process) do not reach the next."""
-    from provenance_core import pool_keys
+    from provenance_core.keys import pool_keys
 
     yield
     pool_keys.EXTRA.clear()
@@ -28,7 +28,7 @@ def _ledger_in_tmp(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_real_credential_store(monkeypatch):
     """Tests never reach the system's credential store (the macOS Keychain): a store in memory stands in for it."""
-    from provenance_core import credstore
+    from provenance_core.web import credstore
 
     store = credstore.MemoryStore()
     credstore.use(store)

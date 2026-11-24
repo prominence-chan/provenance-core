@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .settings import home_dir
+from ..settings import home_dir
 
 DAILY_CAP_MAX = 10000
 

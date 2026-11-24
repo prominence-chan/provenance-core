@@ -1,8 +1,8 @@
 """provenance-core CLI (`python -m provenance_core ...`; `python -m tierlm ...` still works).
 
-serve [--catalog catalog.yaml] [--scores scores.yaml] [--host 127.0.0.1] [--port 4141] [--watch-stdin]
+serve [--catalog config/catalog.yaml] [--scores config/scores.yaml] [--host 127.0.0.1] [--port 4141] [--watch-stdin]
                                 --watch-stdin: shut down when stdin closes (the app that started it went away)
-calibrate [--only id1,id2]      run the probe set, write scores.yaml
+calibrate [--only id1,id2]      run the probe set, write config/scores.yaml
 tiers                           show tiers, models, scores and which providers are usable
 discover <provider>             list the provider's /models (to update the catalog)
 usage                           Claude Code / Codex subscription headroom (JSON)
@@ -18,9 +18,9 @@ import asyncio
 
 import httpx
 
-from .catalog import load
-from .router import Router
-from .settings import env
+from .routing.catalog import load
+from .routing.router import Router
+from .settings import config_path, env
 
 
 def main():
@@ -35,13 +35,14 @@ def main():
     ap.add_argument("--probe", action="store_true")
     ap.add_argument("--boot", action="store_true")
     ap.add_argument("--account", default=None, help="weblogin: which of the provider's `accounts` to sign in")
-    ap.add_argument("--catalog", default=env("CATALOG", "catalog.yaml"))
-    ap.add_argument("--scores", default=env("SCORES", "scores.yaml"))
+    ap.add_argument("--catalog", default=env("CATALOG"), help="default: config/catalog.yaml")
+    ap.add_argument("--scores", default=env("SCORES"), help="default: config/scores.yaml")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=int(env("PORT", 4141)))
     ap.add_argument("--only", default="")
     ap.add_argument("--watch-stdin", action="store_true", help="serve: shut down when stdin reaches EOF")
     a, extra = ap.parse_known_args()
+    a.catalog, a.scores = config_path(a.catalog, "catalog.yaml"), config_path(a.scores, "scores.yaml")
     if a.cmd in ("usage", "env", "statusline-tee"):
         return _usage_cmd(a, extra)
     cat = load(a.catalog, a.scores)
@@ -50,7 +51,7 @@ def main():
     if a.cmd == "serve":
         import uvicorn
 
-        from .server import create_app
+        from .api.server import create_app
 
         _web_boot(cat)
         if a.watch_stdin:
@@ -59,7 +60,7 @@ def main():
         # launchd gives up on the process: do not wait on open streams for longer than this
         uvicorn.run(create_app(router=Router(cat)), host=a.host, port=a.port, timeout_graceful_shutdown=4)
     elif a.cmd == "calibrate":
-        from .calibrate import calibrate
+        from .routing.calibrate import calibrate
 
         asyncio.run(calibrate(Router(cat), a.scores, [x for x in a.only.split(",") if x] or None))
     elif a.cmd == "tiers":
@@ -105,8 +106,8 @@ def _exit_with_parent():
 
 def _web_boot(cat):
     """Server start: say where the chatgpt-web provider stands (from the last check; the page isn't opened)."""
-    from . import browser_host
-    from .chatgpt_web import LOGIN_HINT, make_bridge, notify
+    from .web import browser_host
+    from .web.chatgpt_web import LOGIN_HINT, make_bridge, notify
 
     # bundled / auto: have the bridge's own browser ready before the first request (a ~200 MB download the first
     # time, in the background; its progress is in GET /web/accounts)
@@ -153,7 +154,7 @@ def _web_cmd(a, cat):
     import sys
     import time
 
-    from .chatgpt_web import LOGIN_HINT, make_bridge, notify
+    from .web.chatgpt_web import LOGIN_HINT, make_bridge, notify
 
     name = next((n for n, p in cat.providers.items() if p.type == "chatgpt_web"), None)
     if not name:
@@ -171,7 +172,7 @@ def _web_cmd(a, cat):
 
     bridge = make_bridge(p.base_url, p.options)
     if a.cmd == "weblogin":  # the same sign-in flow as the app's (web_setup.py): through the server when it runs
-        from .web_setup import cli_login, local_call
+        from .web.web_setup import cli_login, local_call
 
         prov = a.arg or name
         if prov not in cat.providers or cat.providers[prov].type != "chatgpt_web":
@@ -237,7 +238,7 @@ def _usage_cmd(a, extra):
     import subprocess
     import sys
 
-    from . import usage
+    from .accounting import usage
 
     if a.cmd == "usage":
         print(json.dumps(usage.status(), indent=2))

@@ -27,7 +27,8 @@ tiers:
 prune: {web: true}
 # Context compaction (compact.py): when a new web chat cannot take the whole history, the old part becomes a brief
 # (the user's messages, changed files and their state, failures, the last plan) instead of being cut blindly.
-compact: {web: true}
+# Bound image-heavy Anthropic requests so base64 history does not exhaust the fallback pool's request budget.
+compact: {web: true, messages: {image_request_tokens: 64000}}
 
 aliases: {corona: nova, flare: solstice, supernova: nova, blaze: solstice, cinder: spark, tier-1: nova, tier-2: solstice, tier-3: ember, tier-4: spark, auto: solstice, default: solstice}
 
@@ -115,10 +116,10 @@ models:
   # free quota. Flash models often return 503 under load, which the router treats as a transient failure.
   - {provider: google, model: gemini-3.8-flash, score: 86, context: 1000000, limits: {rpm: 10, rpd: 250}}
   - {provider: google, model: gemini-3.7-flash, score: 84, context: 1000000, limits: {rpm: 10, rpd: 250}}
-  - {provider: google, model: gemini-3.5-flash, score: 82, context: 1000000, limits: {rpm: 10, rpd: 250}}
+  - {provider: google, model: gemini-3.5-flash, score: 82, context: 1000000, tags: [vision], limits: {rpm: 10, rpd: 250}}
   - {provider: google, model: gemini-4-hydrogen, score: 84, context: 1000000, limits: {rpm: 5, rpd: 100}}
-  - {provider: google, model: gemini-3.5-flash-lite, score: 70, context: 1000000, limits: {rpm: 15, rpd: 1000}}
-  - {provider: google, model: gemini-3.1-flash-lite, score: 64, context: 1000000, limits: {rpm: 15, rpd: 1000}}
+  - {provider: google, model: gemini-3.5-flash-lite, score: 70, context: 1000000, tags: [vision], limits: {rpm: 15, rpd: 1000}}
+  - {provider: google, model: gemini-3.1-flash-lite, score: 64, context: 1000000, tags: [vision], limits: {rpm: 15, rpd: 1000}}
   - {provider: google, model: gemma-4-31b-it, score: 66, context: 262144, limits: {rpm: 30, rpd: 14400}}
   # Groq free plan (its rate-limits page, 2026-11-23): 30 rpm, 1000 rpd, 8000 tpm, 200000 tpd for each of these
   - {provider: groq, model: openai/gpt-oss-120b, score: 80, context: 131072, limits: {rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000}}

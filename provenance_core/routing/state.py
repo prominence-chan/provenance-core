@@ -88,7 +88,7 @@ class State:
         """(the model's limits, its provider's pool limits) as they apply to this key."""
         if key is None or not key.limits:
             return m.limits, m.pool
-        from .pool_keys import limits_for
+        from ..keys.pool_keys import limits_for
 
         return limits_for(key, m.limits, m.model, m.pool)
 

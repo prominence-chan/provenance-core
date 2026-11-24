@@ -10,12 +10,12 @@ from fastapi.testclient import TestClient
 from test_adapters import parse_sse
 from test_compact import session
 
-from provenance_core import context_signal
-from provenance_core.catalog import load
-from provenance_core.ledger import Ledger
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.context import context_signal
+from provenance_core.routing.catalog import load
+from provenance_core.accounting.ledger import Ledger
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 
 def test_notes_only_inside_a_request_that_asked():

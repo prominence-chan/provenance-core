@@ -2,14 +2,14 @@
 
 The text is data, in pool_help.yaml beside this file: one entry per API provider, in the order that gives the most
 free capacity for the least effort. The app shows it, and an assistant walking someone through the sign-ups is
-handed it. `python -m provenance_core.pool_help [path]` writes docs/pool-keys.md from the same data (a test compares
+handed it. `python -m provenance_core.keys.pool_help [path]` writes docs/pool-keys.md from the same data (a test compares
 the two, so they cannot drift).
 
 Outcomes: each time someone goes through a provider's steps (with the app's assistant, or by hand), the app reports
 how it went (POST /pool/help/{provider}/outcome) and a dated line is appended to <PCORE_HOME>/pool-help-outcomes.jsonl:
 the result, the minutes it took, notes per step, the labels seen on the page. Never a key and nothing personal: a
 report holding anything shaped like a key or an email address is refused whole. GET /pool/help gives each provider
-its `experience` from that file, and `python -m provenance_core.pool_help --review` prints, per provider, the step
+its `experience` from that file, and `python -m provenance_core.keys.pool_help --review` prints, per provider, the step
 notes that disagree with the written steps, for a person (or an agent) to correct pool_help.yaml by. Nothing here
 rewrites the instructions."""
 
@@ -27,10 +27,10 @@ from pathlib import Path
 
 import yaml
 
-from .settings import home_dir
+from ..settings import home_dir
 
 FILE = Path(__file__).with_name("pool_help.yaml")
-DOC = Path(__file__).resolve().parents[1] / "docs" / "pool-keys.md"
+DOC = Path(__file__).resolve().parents[2] / "docs" / "pool-keys.md"
 
 
 def _plain(x):
@@ -320,7 +320,7 @@ def render(data: dict | None = None) -> str:
     out = [
         "# Free API keys for the token pool",
         "",
-        "<!-- Generated from provenance_core/pool_help.yaml by `python -m provenance_core.pool_help`. Edit the YAML. -->",
+        "<!-- Generated from provenance_core/keys/pool_help.yaml by `python -m provenance_core.keys.pool_help`. Edit the YAML. -->",
         "",
         f"How to get a free key from each provider the pool can use, most capacity for least effort first. Read from "
         f"the providers' own public pages on {d['checked']}; free tiers and button labels change often, so where a "

@@ -4,7 +4,7 @@ import json
 
 from test_adapters import env, parse_sse  # noqa: F401  (fixture)
 
-from provenance_core.ledger import Ledger, request_keys
+from provenance_core.accounting.ledger import Ledger, request_keys
 
 
 def test_request_keys_prefers_thread_and_turn():
@@ -72,7 +72,7 @@ def test_responses_requests_land_in_ledger(env):  # noqa: F811
 
 
 def test_usage_endpoint_needs_token(env, monkeypatch):  # noqa: F811
-    from provenance_core.server import create_app
+    from provenance_core.api.server import create_app
 
     _, _, router = env
     monkeypatch.setenv("PCORE_TOKEN", "sekrit")

@@ -1,5 +1,5 @@
 """A real provenance-core for Provenance.app's end-to-end check (ui/scripts/router-e2e.ts): the server `serve` runs,
-with its web chats pointed at the mock page (tests/mock_chatgpt.py) instead of the real sites, all state in a
+with its web chats pointed at the mock page (tests/fixtures/mock_chatgpt.py) instead of the real sites, all state in a
 scratch PCORE_HOME, and every browser headless, so nothing shows on screen and nothing reaches a real site:
 
 - the background browser: `headless: true` (the installed Google Chrome on a scratch profile);
@@ -7,7 +7,7 @@ scratch PCORE_HOME, and every browser headless, so nothing shows on screen and n
   one thing the router's own tests change too). The mock's sign-in page signs itself in when `signin_auto` is on, as
   a person would; the router then sees the session cookie, closes the window and checks the page as always.
 
-    PYTHONPATH=. python tests/serve_mock.py [--port 0] [--home DIR]
+    PYTHONPATH=. python tests/fixtures/serve_mock.py [--port 0] [--home DIR]
 
 prints one JSON line, {"url", "mock", "home", "pid"}, once the server answers, and shuts down when stdin closes.
 Set PCORE_BROWSER_APP to a Chrome for Testing app (or the folder holding one) to let "prepare the browser" copy it
@@ -106,9 +106,9 @@ def main():
     import uvicorn
 
     from provenance_core.__main__ import _exit_with_parent
-    from provenance_core.catalog import load
-    from provenance_core.router import Router
-    from provenance_core.server import create_app
+    from provenance_core.routing.catalog import load
+    from provenance_core.routing.router import Router
+    from provenance_core.api.server import create_app
 
     mock = Mock()
     mock.state.update(login="cookie", signin_auto=False, signin_after_ms=800, flush=600)

@@ -12,11 +12,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.server import create_app
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
 from provenance_core.settings import env
-from provenance_core.state import State
+from provenance_core.routing.state import State
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -163,14 +163,14 @@ def test_legacy_tierlm_env_still_maps(cat, monkeypatch):
 
 
 def test_tierlm_shim_reexports_usage():
-    import provenance_core.usage
+    import provenance_core.accounting.usage
 
     tierlm = importlib.import_module("tierlm")
     from tierlm import usage
 
-    assert usage is provenance_core.usage and tierlm.catalog is importlib.import_module("provenance_core.catalog")
+    assert usage is provenance_core.accounting.usage and tierlm.catalog is importlib.import_module("provenance_core.routing.catalog")
     out = subprocess.run(
-        [sys.executable, "-m", "tierlm", "tiers", "--catalog", str(ROOT / "catalog.yaml"), "--scores", "/nonexistent"],
+        [sys.executable, "-m", "tierlm", "tiers", "--catalog", str(ROOT / "config" / "catalog.yaml"), "--scores", "/nonexistent"],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -179,7 +179,7 @@ def test_tierlm_shim_reexports_usage():
 
 
 def test_catalog_yaml_loads():
-    c = load(ROOT / "catalog.yaml")
+    c = load(ROOT / "config" / "catalog.yaml")
     assert c.providers["ovh"].no_auth and c.providers["kilo"].no_auth
     assert c.models["kilo/nvidia/nemotron-3-ultra-550b-a55b:free"].pool.rph == 200
     assert "${CLOUDFLARE_ACCOUNT_ID}" in c.providers["cloudflare"].url

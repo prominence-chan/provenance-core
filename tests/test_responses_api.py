@@ -1,5 +1,5 @@
 def test_a_call_to_a_namespaced_tool_names_its_namespace_again():
-    from provenance_core.responses_api import call_item, tools_to_openai
+    from provenance_core.api.responses_api import call_item, tools_to_openai
 
     tools, custom, shell = tools_to_openai(
         [

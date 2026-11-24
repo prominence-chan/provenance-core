@@ -6,10 +6,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from provenance_core.catalog import load
-from provenance_core.router import NoCapacity, Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import NoCapacity, Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 CAT = {
     "tiers": [
@@ -88,6 +88,21 @@ def test_stays_in_tier_and_falls_over_within_it(setup):
     assert calls == ["big2"]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_image_request_prefers_vision_in_allowed_fallback_tier(setup, stream):
+    router, calls, _, _ = setup
+    router.catalog.models["c/mid"].tags = ["vision"]
+    body = {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "image"}}]}]}
+
+    if stream:
+        _, model, _ = run(router.stream(body, "tier-1", fallback="any"))
+    else:
+        _, model = run(router.complete(body, "tier-1", fallback="any"))
+
+    assert model.id == "c/mid"
+    assert calls == ["mid"]
+
+
 def test_no_silent_downgrade_unless_allowed(setup):
     router, calls, behavior, _ = setup
     behavior["big"] = behavior["big2"] = "500"
@@ -157,7 +172,7 @@ def test_http_api(setup):
 
 
 def test_calibration_grading():
-    from provenance_core.calibrate import grade
+    from provenance_core.routing.calibrate import grade
 
     assert grade("so the answer is\n391", r"^\s*391\s*$")
     assert grade("6/(1-3/4)", "EVAL24:1346") and not grade("4*6*1*3", "EVAL24:1346")
@@ -211,7 +226,7 @@ def test_sources_share_by_usage_left_and_can_be_pinned(tmp_path, monkeypatch):
 
 
 def test_pinned_model_names_resolve(tmp_path, monkeypatch):
-    from provenance_core.adapters import resolve_target
+    from provenance_core.api.adapters import resolve_target
 
     router = web_setup(tmp_path, monkeypatch)
     t = resolve_target(router, "luna/tier-1", "down1")

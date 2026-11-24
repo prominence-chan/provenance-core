@@ -41,7 +41,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from .settings import env
+from ..settings import env
 
 CHROME_APP = Path("/Applications/Google Chrome.app")
 CFT_INDEX = "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json"
@@ -675,7 +675,7 @@ def disk_usage(root=None) -> int:
         return 0
 
 
-if __name__ == "__main__":  # python -m provenance_core.browser_host [--no-download | --chrome]: prepare, print it
+if __name__ == "__main__":  # python -m provenance_core.web.browser_host [--no-download | --chrome]: prepare, print it
     rec = ensure_chrome_clone() if "--chrome" in sys.argv else ensure(download="--no-download" not in sys.argv)
     print(json.dumps(rec, indent=1) if rec else "no bundled browser could be prepared")
     sys.exit(0 if rec else 1)

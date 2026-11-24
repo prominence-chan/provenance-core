@@ -67,13 +67,13 @@ class Provider:
     # from the app; one usable without a key has its anonymous access as one more slot.
     @property
     def keys(self) -> list:
-        from . import pool_keys
+        from ..keys import pool_keys
 
         return pool_keys.keys_of(self)
 
     def slots(self) -> list:
         """What a request can be sent with right now: the usable keys, then the anonymous slot if there is one."""
-        from . import pool_keys
+        from ..keys import pool_keys
 
         return pool_keys.slots(self)
 
@@ -103,7 +103,7 @@ class Provider:
         if self.expired:
             return False
         if self.type == "chatgpt_web":  # off unless turned on (enabled: true, or PCORE_CHATGPT_WEB=1)
-            from .chatgpt_web import enabled
+            from ..web.chatgpt_web import enabled
 
             return enabled(self.options)
         return bool(self.slots())
@@ -253,8 +253,9 @@ def load(path: str | Path, scores_path: str | Path | None = None) -> Catalog:
         )
     # web accounts are global (one browser profile each, shared by every site): the catalog's `accounts:` lists,
     # merged, plus the ones added or removed from the app (<PCORE_HOME>/web_accounts.json; see web_setup.py)
-    from . import pool_keys, provider_settings
-    from .web_setup import apply_accounts
+    from ..keys import pool_keys
+    from . import provider_settings
+    from ..web.web_setup import apply_accounts
 
     apply_accounts(providers)
     # what was changed from the app: providers turned on or off, daily caps (<PCORE_HOME>/settings.json), and API

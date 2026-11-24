@@ -15,12 +15,12 @@ import time
 from pathlib import Path
 
 import pytest
-from mock_chatgpt import SESSION, Mock
+from fixtures.mock_chatgpt import SESSION, Mock
 
-from provenance_core import browser_host as bh
-from provenance_core import chatgpt_web as cw
-from provenance_core import cookie_guard as cg
-from provenance_core import web_setup as ws
+from provenance_core.web import browser_host as bh
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.web import cookie_guard as cg
+from provenance_core.web import web_setup as ws
 
 SPECS = {"Site": {"domains": ["site.test"], "names": ["sid*"]}, "Other": {"domains": ["other.test"], "names": ["SID"]}}
 SECRET = "c00kie-value-" + secrets.token_hex(8)
@@ -497,7 +497,7 @@ def _bundled_ready():
     return bh.current(need=bh.required_major())
 
 
-@pytest.mark.skipif(not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.browser_host)")
+@pytest.mark.skipif(not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.web.browser_host)")
 def test_bundled_browser_wiped_store_is_put_back(mock, tmp_path, monkeypatch, capfd):
     rec = _bundled_ready()
     monkeypatch.setattr(bh, "ensure", lambda profile=None, **k: rec)

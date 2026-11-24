@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from provenance_core import browser_host as bh
+from provenance_core.web import browser_host as bh
 
 mac = pytest.mark.skipif(sys.platform != "darwin", reason="macOS app bundles")
 INDEX = {

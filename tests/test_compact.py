@@ -11,11 +11,11 @@ import pytest
 import yaml
 from test_prune import CWD, Convo, PagelessBridge, agent_run
 
-from provenance_core import chatgpt_web as cw
-from provenance_core import compact, prune
-from provenance_core.catalog import load
-from provenance_core.router import NoCapacity, Router
-from provenance_core.state import State
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.context import compact, prune
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import NoCapacity, Router
+from provenance_core.routing.state import State
 
 API = compact.config("api", True)
 WEB = compact.config("web", True)

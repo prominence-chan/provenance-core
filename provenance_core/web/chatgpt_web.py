@@ -35,8 +35,10 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import compact, cookie_guard, prune, settings
-from .settings import env
+from ..context import compact, prune
+from . import cookie_guard
+from .. import settings
+from ..settings import env
 
 
 # ---- errors ---------------------------------------------------------------------------------------------------------

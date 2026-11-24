@@ -41,7 +41,7 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .settings import env, home_dir
+from ..settings import env, home_dir
 
 DEFAULT_PATH = Path.home() / ".tierlm" / "usage-ledger.jsonl"  # where it is when PCORE_HOME is not set
 

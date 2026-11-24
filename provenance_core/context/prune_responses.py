@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 
 from . import prune
-from .settings import scoped
+from ..settings import scoped
 
 # the rules that only touch tool outputs and old write calls
 SAFE_RULES = tuple(r for r in prune.RULES if r not in ("dup_system", "filler"))

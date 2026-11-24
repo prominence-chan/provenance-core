@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 PREFIXES = ("PCORE_", "TIERLM_")
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"  # catalog.yaml, catalog.app.yaml, scores.yaml
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -16,6 +17,19 @@ def env(name: str, default: str | None = None) -> str | None:
         if v is not None:
             return v
     return default
+
+
+def config_path(given: str | None, name: str) -> str:
+    """The catalog / scores file to use. `given` (--catalog / PCORE_CATALOG, ...) is used as written; when it is a
+    relative path that does not exist but config/<given> of this checkout does, that one. Without one: ./<name> when
+    the working directory has it, else config/<name> of the checkout (when there is a config/ dir, as in a source
+    checkout), else <name> as before."""
+    if given:
+        p, c = Path(given), CONFIG_DIR / given
+        return str(c) if not p.is_absolute() and not p.exists() and c.exists() else given
+    if Path(name).exists() or not CONFIG_DIR.is_dir():
+        return name
+    return str(CONFIG_DIR / name)
 
 
 def home_dir() -> Path:

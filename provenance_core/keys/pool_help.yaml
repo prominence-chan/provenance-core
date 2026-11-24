@@ -1,5 +1,5 @@
 # How to get a free API key from each provider in the token pool. Served by GET /pool/help (pool_help.py) and
-# rendered to docs/pool-keys.md by `python -m provenance_core.pool_help` (a test keeps the two the same).
+# rendered to docs/pool-keys.md by `python -m provenance_core.keys.pool_help` (a test keeps the two the same).
 #
 # Order: the most free capacity for the least effort first. Everything here was read from the providers' own public
 # pages on the `checked` date, without signing in anywhere: free tiers, labels and limits change often, so the page
@@ -26,7 +26,7 @@
 # removed: providers taken out of the pool, with the reason and the date, so the app can say why one vanished; a
 #   key saved for one is ignored. considered: providers looked at for the pool and not added, and why.
 # Outcomes of people following these steps are recorded apart (POST /pool/help/{id}/outcome; pool_help.py) and
-# reviewed with `python -m provenance_core.pool_help --review`; this file is corrected by hand from that.
+# reviewed with `python -m provenance_core.keys.pool_help --review`; this file is corrected by hand from that.
 checked: 2026-11-23
 assistant_notes:
   - "A provider with `setup: person` needs something only the person can do (a phone code, an email approval, their own details or a payment step). Do not walk it step by step or wait on it: say what it gives, point to its written steps, let the person do it on their own and paste the key into the key card when they have it, and move on to the next provider meanwhile."

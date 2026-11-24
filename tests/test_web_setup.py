@@ -1,6 +1,6 @@
 """web_setup: the /web/* endpoints (accounts, sign-in windows, the bundled browser) and `weblogin`'s use of them.
 
-The sign-in window is the real flow against the mock page (tests/mock_chatgpt.py, login="cookie": signed in means the
+The sign-in window is the real flow against the mock page (tests/fixtures/mock_chatgpt.py, login="cookie": signed in means the
 browser sends the mock's session cookie) on scratch profiles, with one difference: the window is a headless Chrome
 started directly (WebSetup.launch = "exec"), so nothing shows. Its sign-in page signs itself in, as a person would."""
 
@@ -16,15 +16,15 @@ import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
-from mock_chatgpt import SESSION, Mock
+from fixtures.mock_chatgpt import SESSION, Mock
 
-from provenance_core import browser_host as bh
-from provenance_core import chatgpt_web as cw
-from provenance_core import web_setup as ws
-from provenance_core.catalog import load
-from provenance_core.router import Router
-from provenance_core.server import create_app
-from provenance_core.state import State
+from provenance_core.web import browser_host as bh
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.web import web_setup as ws
+from provenance_core.routing.catalog import load
+from provenance_core.routing.router import Router
+from provenance_core.api.server import create_app
+from provenance_core.routing.state import State
 
 CHROME_APP = Path("/Applications/Google Chrome.app")
 
@@ -500,7 +500,7 @@ def _bundled_ready():
     return bh.current(need=bh.required_major())
 
 
-@pytest.mark.skipif(not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.browser_host)")
+@pytest.mark.skipif(not _bundled_ready(), reason="no bundled browser prepared (python -m provenance_core.web.browser_host)")
 def test_bundled_window_moved_on_screen_goes_back(mock, tmp_path, monkeypatch):
     rec = _bundled_ready()
     monkeypatch.setattr(bh, "ensure", lambda profile=None, **k: rec)

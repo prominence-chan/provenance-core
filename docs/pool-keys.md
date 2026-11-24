@@ -1,6 +1,6 @@
 # Free API keys for the token pool
 
-<!-- Generated from provenance_core/pool_help.yaml by `python -m provenance_core.pool_help`. Edit the YAML. -->
+<!-- Generated from provenance_core/keys/pool_help.yaml by `python -m provenance_core.keys.pool_help`. Edit the YAML. -->
 
 How to get a free key from each provider the pool can use, most capacity for least effort first. Read from the providers' own public pages on 2026-11-23; free tiers and button labels change often, so where a page differs from this, the page is right. Paste each key into the app's field for that provider (or `PUT /pool/keys/{id}` with `{"values": {"<VARIABLE>": "<key>"}}`; a further key from another account of yours with `POST /pool/keys/{id}` `{"key": "<key>"}`). The same data is served as JSON by `GET /pool/help`.
 

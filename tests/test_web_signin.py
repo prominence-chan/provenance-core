@@ -1,6 +1,6 @@
 """A saved sign-in and automatic sign-in (web_signin.py, credstore.py), and the account's plan with the paid-plan
 confirmation: the rules without a browser, then the real routine against the mock site's sign-in form
-(tests/mock_chatgpt.py) in headless Chrome on scratch profiles. The credential store is one in memory (conftest.py):
+(tests/fixtures/mock_chatgpt.py) in headless Chrome on scratch profiles. The credential store is one in memory (conftest.py):
 no test touches the system's. The test password is searched for in everything the run leaves behind."""
 
 import asyncio
@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from mock_chatgpt import Mock
+from fixtures.mock_chatgpt import Mock
 from test_web_setup import catalog, client_for
 
-from provenance_core import chatgpt_web as cw
-from provenance_core import credstore
-from provenance_core import web_setup as ws
-from provenance_core import web_signin as si
+from provenance_core.web import chatgpt_web as cw
+from provenance_core.web import credstore
+from provenance_core.web import web_setup as ws
+from provenance_core.web import web_signin as si
 
 SECRET = "Zx9-leakcheck/Pa55 w0rd\"'$(x)"
 WHO = "person@example.com"
@@ -561,7 +561,7 @@ def test_try_now_and_the_paid_plan_through_the_api(mock, tmp_path, home):
 
 # ---- a pool provider's key page, opened in a signed-in profile (POST /web/open) ---------------------------------------
 def key_help(monkeypatch, url):
-    from provenance_core import pool_help
+    from provenance_core.keys import pool_help
 
     data = {
         "checked": "2026-11-23",
