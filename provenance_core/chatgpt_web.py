@@ -136,10 +136,10 @@ FRAME_PLAIN = """This message was put together by a program on my computer, whic
 # vanishes like a tag), so literal text travels in a fence tagged raw, which parse_reply takes off again.
 BRACES = (
     " This chat page changes literal text that is outside a code block: it drops anything in curly braces or "
-    "between < and >, and can turn a written \\n into a line break. So put every command, piece of code, JSON, "
-    "path pattern or other text that must arrive character for character (or simply the whole turn) in a fenced "
-    "block tagged raw (```raw ... ```), written exactly as it should arrive; the program removes the fence and "
-    "keeps the text as it is. Several lines can share one raw block."
+    "between < and >, and can turn a written \\n into a line break. Text inside any fenced code block is safe. "
+    "So when a line that is NOT already in a code block must arrive character for character (a command, JSON, a "
+    "path pattern), put just that line or those lines in a fenced block tagged raw (```raw ... ```); the program "
+    "removes that fence and keeps the text. Do not put raw around other code blocks or around the whole turn."
 )
 REMINDER_PLAIN = "Now write the assistant's next turn (only the turn's content, no <<<assistant>>> line)." + BRACES
 
@@ -573,6 +573,34 @@ _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*([\w+#.-]*)[^\n]*\n(.*?)\n[ \t]*
 
 
 _RAW = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*raw[ \t]*\n(.*?)\n[ \t]*\1[ \t]*$", re.S | re.M | re.I)
+_FENCE_LINE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*([\w+#.:/-]*)[^\n]*$")
+
+
+def unraw(text: str) -> str:
+    """Take off the fences tagged raw, keeping their content. A model sometimes wraps other code blocks (or its
+    whole turn) in one: a tagged fence line inside opens a nested block and the next bare fence closes that one,
+    so the raw block ends at ITS closing fence and the inner blocks stay whole."""
+    out, in_raw, depth = [], False, 0
+    for line in text.split("\n"):
+        m = _FENCE_LINE.match(line)
+        if not in_raw:
+            if m and m.group(2).lower() == "raw":
+                in_raw, depth = True, 0
+                continue
+            out.append(line)
+            continue
+        if m:
+            if m.group(2):  # ```bash inside the raw block
+                depth += 1
+            elif depth:  # the bare fence closing that inner block
+                depth -= 1
+            else:  # the raw block's own closing fence
+                in_raw = False
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 _TURN = re.compile(r"^[ \t]*<<<(?:user|assistant|tool result[^>\n]*)>>>[ \t]*$", re.M)
 
 
@@ -693,7 +721,7 @@ def parse_reply(md: str, tools: dict, rules: dict | None = None) -> tuple[str, l
                 ) from None
             calls = [_check(c, tools)]
             text = md[: m.start() if m else start].strip()
-    text = _RAW.sub(lambda m: m.group(2), text)  # the fence asked for around text with curly braces (BRACES)
+    text = unraw(text)  # the fence asked for around literal text (BRACES)
     if rules.get("only") and any(c["name"] != rules["only"] for c in calls):
         raise Malformed(f"this turn must call the tool {rules['only']}")
     if rules.get("must") and not calls:

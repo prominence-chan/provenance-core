@@ -1473,3 +1473,9 @@ def test_a_raw_fence_around_text_with_braces_is_taken_off():
     assert cw.parse_reply(f"Two actions.\n\n```raw\n{line}\n```\n\nREAD: a.py", {})[0] == f"Two actions.\n\n{line}\n\nREAD: a.py"
     assert cw.parse_reply("```python\nx = {1}\n```", {})[0] == "```python\nx = {1}\n```"  # other fences stay
     assert "tagged raw" in cw.REMINDER_PLAIN
+    # raw wrapped around a turn that has code blocks of its own: both of its fences go, the inner blocks stay whole
+    inner = "Write the file:\n\n```file:run.py\nprint({1})\n```\n\nThen:\n\n```bash\npython3 run.py\n```"
+    assert cw.parse_reply(f"```raw\n{inner}\n```", {})[0] == inner
+    assert cw.parse_reply(f"Plan.\n\n```raw\n{inner}\n```\n\nDone.", {})[0] == f"Plan.\n\n{inner}\n\nDone."
+    assert cw.parse_reply(inner, {})[0] == inner
+    assert cw.parse_reply("```raw\nA {x}\n```\n\n```raw\nB <y>\n```", {})[0] == "A {x}\n\nB <y>"
