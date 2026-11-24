@@ -29,6 +29,30 @@ CLAUDE_FILE = HOME / "claude_limits.json"
 BASE = env("BASE_URL", "http://127.0.0.1:4141").rstrip("/").removesuffix("/v1")
 LOW_PCT = float(env("LOW_PCT", 95))
 
+_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_RESET_RE = re.compile(
+    r"resets\s+(?:on\s+|at\s+)?(?:(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\w*,?\s+)?"
+    r"(?:(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*|\s+at\s+|\s+))?"
+    r"(?:at\s+)?(\d{1,2})(?::(\d\d))?\s*(am|pm)"
+    r"(?:\s*\(([^)]+)\))?",
+    re.I,
+)
+
 
 def _save(d: dict):
     HOME.mkdir(parents=True, exist_ok=True)
@@ -84,20 +108,52 @@ def record_claude_event(evt: dict):
     _save(d)
 
 
-def record_claude_blocked(message: str = ""):
-    """The CLI said the limit is hit ("You've hit your weekly limit · resets 8pm (America/New_York)"). The reset time
-    in the text is parsed when possible; otherwise it's treated as out for an hour and checked again."""
-    until = time.time() + 3600
-    m = re.search(r"resets\s+(?:at\s+)?(\w+\s+\d+,?\s+)?(\d{1,2})(?::(\d\d))?\s*(am|pm)", message or "", re.I)
-    if m:
-        import datetime as dt
+def _parse_reset_text(message: str, now: float | None = None) -> float | None:
+    """Parse a reset timestamp from a Claude CLI limit notice, e.g. 'resets Nov 27, 8pm (America/New_York)' or
+    'resets 8pm (America/New_York)' or 'Claude AI usage limit reached|1795827600'."""
+    if not message:
+        return None
+    pipe = re.search(r"usage limit reached\|(\d{10,13})\b", message, re.I)
+    if pipe:
+        return _ts(int(pipe.group(1)))
+    m = _RESET_RE.search(message)
+    if not m:
+        return None
+    import datetime as dt
 
-        h = int(m.group(2)) % 12 + (12 if m.group(4).lower() == "pm" else 0)
-        now = dt.datetime.now()
-        t = now.replace(hour=h, minute=int(m.group(3) or 0), second=0, microsecond=0)
-        if t <= now:
-            t += dt.timedelta(days=1)
-        until = t.timestamp()
+    hour_12, minute = int(m.group(3)), int(m.group(4) or 0)
+    if not (1 <= hour_12 <= 12 and 0 <= minute < 60):
+        return None
+    tz = None
+    if m.group(6):
+        try:
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo(m.group(6).strip())
+        except Exception:  # noqa: BLE001
+            tz = None
+    ref = dt.datetime.fromtimestamp(now, tz=tz) if now is not None else dt.datetime.now(tz)
+    h = hour_12 % 12 + (12 if m.group(5).lower() == "pm" else 0)
+    if m.group(1) and m.group(2):
+        month, day = _MONTHS[m.group(1)[:3].lower()], int(m.group(2))
+        for year in (ref.year, ref.year + 1):
+            try:
+                t = dt.datetime(year, month, day, h, minute, tzinfo=tz)
+            except ValueError:
+                continue
+            if t > ref:
+                return t.timestamp()
+        return None
+    t = ref.replace(hour=h, minute=minute, second=0, microsecond=0)
+    if t <= ref:
+        t += dt.timedelta(days=1)
+    return t.timestamp()
+
+
+def record_claude_blocked(message: str = ""):
+    """The CLI said the limit is hit ("You've hit your weekly limit · resets Nov 27, 8pm (America/New_York)"). The
+    reset time in the text is parsed when possible; otherwise it's treated as out for an hour and checked again."""
+    until = _parse_reset_text(message) or time.time() + 3600
     d = _load()
     d.update(blocked_until=until, at=time.time())
     _save(d)
@@ -107,15 +163,20 @@ def record_claude_blocked(message: str = ""):
 def claude_status() -> dict:
     d, now = _load(), time.time()
     worst, resets = 0.0, None
+    low_resets = []
     for w in (d.get("windows") or {}).values():
         if w.get("resets_at") and w["resets_at"] < now:
             continue  # that window already reset
         if w["pct"] >= worst:
             worst, resets = w["pct"], w.get("resets_at")
+        if w["pct"] >= LOW_PCT and w.get("resets_at"):
+            low_resets.append(w["resets_at"])
     blocked = (d.get("blocked_until") or 0) > now
+    if blocked:
+        low_resets.append(d["blocked_until"])
     return {
         "pct": worst,
-        "resets_at": d.get("blocked_until") if blocked else resets,
+        "resets_at": max(low_resets) if low_resets else resets,
         "blocked": blocked,
         "low": blocked or worst >= LOW_PCT,
         "seen": d.get("at"),
@@ -191,5 +252,5 @@ def fallback_env(tool: str, force: bool = False) -> dict | None:
             "ANTHROPIC_API_KEY": "",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
-    # Provenance (the codex fork) still reads the TIERLM_ names
+    # Provenance still reads the TIERLM_ names
     return {"PCORE_BASE_URL": f"{BASE}/v1", "PCORE_TOKEN": tok, "TIERLM_BASE_URL": f"{BASE}/v1", "TIERLM_TOKEN": tok}
