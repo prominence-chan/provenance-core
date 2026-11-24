@@ -1082,10 +1082,11 @@ Every setting is read as `PCORE_<NAME>`, falling back to the pre-rename `TIERLM_
 | `PCORE_CATALOG` | `catalog.yaml` | catalog path |
 | `PCORE_SCORES` | `scores.yaml` | calibrated scores path |
 | `PCORE_PORT` | `4141` | `serve` port |
-| `PCORE_MAP_OPUS` | `nova` | tier for opus-family requests |
-| `PCORE_MAP_SONNET` | `solstice` | sonnet-family requests |
-| `PCORE_MAP_HAIKU` | `ember` | haiku-family requests (Claude Code's side calls) |
-| `PCORE_MAP_DEFAULT` | sonnet mapping | any other model name (on `/v1/responses` the default is the strongest tier) |
+| `PCORE_MAP_FABLE` | `nova` | tier for fable-family requests |
+| `PCORE_MAP_OPUS` | `solstice` | opus-family requests |
+| `PCORE_MAP_SONNET` | `ember` | sonnet-family requests |
+| `PCORE_MAP_HAIKU` | `spark` | haiku-family requests (Claude Code's side calls) |
+| `PCORE_MAP_DEFAULT` | opus mapping | any other model name (on `/v1/responses` the default is the strongest tier) |
 | `PCORE_ANTHROPIC_FALLBACK` | `any` | fallback for `/v1/messages` |
 | `PCORE_RESPONSES_FALLBACK` | `down1` | fallback for `/v1/responses` |
 | `PCORE_ADAPTER_MAX_TOKENS` | `16384` | cap on agents' max_tokens (they ask for 32k-64k, which free tiers reject or count against tokens/minute) |

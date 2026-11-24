@@ -7,9 +7,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from provenance_core.api.server import create_app
 from provenance_core.routing.catalog import load
 from provenance_core.routing.router import Router
-from provenance_core.api.server import create_app
 from provenance_core.routing.state import State
 
 CAT = {
@@ -85,7 +85,7 @@ class Upstream:
 def env(tmp_path, monkeypatch):
     for k in ("A_KEY", "B_KEY"):
         monkeypatch.setenv(k, "x")
-    for k in ("TOKEN", "MAP_OPUS", "MAP_SONNET", "MAP_HAIKU", "MAP_DEFAULT"):
+    for k in ("TOKEN", "MAP_FABLE", "MAP_OPUS", "MAP_SONNET", "MAP_HAIKU", "MAP_DEFAULT"):
         for prefix in ("PCORE_", "TIERLM_"):
             monkeypatch.delenv(prefix + k, raising=False)
     p = tmp_path / "catalog.yaml"
@@ -169,10 +169,10 @@ def test_messages_text_round_trip(env):
         },
     )
     assert r.status_code == 200, r.text
-    assert r.headers["x-pcore-tier"] == "solstice" and r.headers["x-pcore-model"] == "a/front"
+    assert r.headers["x-pcore-tier"] == "ember" and r.headers["x-pcore-model"] == "b/mid"
     j = r.json()
     assert j["type"] == "message" and j["role"] == "assistant" and j["model"] == "claude-sonnet-4-5-20250929"
-    assert j["content"] == [{"type": "text", "text": "answer from front"}]
+    assert j["content"] == [{"type": "text", "text": "answer from mid"}]
     assert j["stop_reason"] == "end_turn" and j["usage"]["input_tokens"] == 11 and j["usage"]["output_tokens"] == 7
     b = up.last
     assert b["messages"] == [
@@ -196,7 +196,7 @@ def test_messages_tool_round_trip_and_tool_result_translation(env):
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 1000,
             "tools": [
                 {
@@ -269,7 +269,7 @@ def test_messages_tool_round_trip_and_tool_result_translation(env):
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 100,
             "messages": [
                 {"role": "user", "content": "list files"},
@@ -306,10 +306,12 @@ def test_messages_compacts_old_image_history_and_keeps_current_image(env):
     router.catalog.compact = {"messages": {"image_request_tokens": 2000}}
     messages = []
     for index in range(20):
-        messages.extend([
-            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "A" * 1200}}]},
-            {"role": "assistant", "content": f"Inspection {index}"},
-        ])
+        messages.extend(
+            [
+                {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "A" * 1200}}]},
+                {"role": "assistant", "content": f"Inspection {index}"},
+            ]
+        )
     latest = {"type": "image", "source": {"type": "url", "url": "https://example.test/current.png"}}
     messages.append({"role": "user", "content": [latest]})
 
@@ -332,9 +334,11 @@ def test_messages_model_mapping(env, monkeypatch):
         assert r.status_code == 200, r.text
         return r.headers["x-pcore-tier"]
 
-    assert tier("claude-opus-4-6[1m]") == "nova"
-    assert tier("claude-sonnet-4-5-20250929") == "solstice"
-    assert tier("claude-3-5-haiku-20241022") == "ember"
+    assert tier("claude-fable-5-2") == "nova"
+    assert tier("claude-opus-4-6[1m]") == "solstice"
+    assert tier("claude-sonnet-4-5-20250929") == "ember"
+    assert tier("claude-3-5-haiku-20241022") == "spark"
+    assert tier("claude-unknown-1") == "solstice"
     assert tier("solstice") == "solstice" and tier("tier-4") == "spark"
     r = c.post(
         "/v1/messages", json={"model": "b/tiny", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]}
@@ -349,7 +353,7 @@ def test_messages_falls_back_down(env):
     up.script["top"] = [500]
     r = c.post(
         "/v1/messages",
-        json={"model": "claude-opus-4-5", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]},
+        json={"model": "claude-fable-5-2", "max_tokens": 10, "messages": [{"role": "user", "content": "x"}]},
     )
     assert r.status_code == 200 and r.headers["x-pcore-tier"] == "solstice"  # nova failed, fallback "any"
 
@@ -371,7 +375,7 @@ def test_messages_streaming_event_sequence(env):
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 100,
             "stream": True,
             "tools": [
@@ -442,7 +446,7 @@ def test_messages_streaming_text_only_and_parallel_disabled(env):
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 10,
             "stream": True,
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
@@ -477,13 +481,13 @@ def test_messages_sticky_session_from_first_user_message(env):
     c, up, router = env
     up.script["front"] = [500, {"content": "ok"}]
     first = {"role": "user", "content": "build me a thing"}
-    r = c.post("/v1/messages", json={"model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [first]})
+    r = c.post("/v1/messages", json={"model": "claude-opus-4-5", "max_tokens": 10, "messages": [first]})
     assert r.headers["x-pcore-model"] == "b/front2"  # front failed once
     router.state.health.clear()  # front is healthy again
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 10,
             "messages": [first, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "more"}],
         },
@@ -492,7 +496,7 @@ def test_messages_sticky_session_from_first_user_message(env):
     r = c.post(
         "/v1/messages",
         json={
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-5",
             "max_tokens": 10,
             "messages": [{"role": "user", "content": "another conversation"}],
         },
@@ -501,7 +505,7 @@ def test_messages_sticky_session_from_first_user_message(env):
     r = c.post(
         "/v1/messages",
         headers={"x-tierlm-session": "s1"},
-        json={"model": "claude-sonnet-4-5", "max_tokens": 10, "messages": [first]},
+        json={"model": "claude-opus-4-5", "max_tokens": 10, "messages": [first]},
     )
     assert r.headers["x-pcore-model"] == "a/front"  # an explicit session header wins over the hash
 

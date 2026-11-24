@@ -3,10 +3,11 @@
   ANTHROPIC_BASE_URL=http://127.0.0.1:4141 ANTHROPIC_AUTH_TOKEN=<PCORE_TOKEN or anything> claude
 
 Requests are translated to OpenAI chat and served through the Router like /v1/chat/completions (one model, no
-ensemble). Claude model ids map to tiers by family: opus -> PCORE_MAP_OPUS (default the strongest tier, "nova"),
-sonnet -> PCORE_MAP_SONNET ("solstice"), haiku -> PCORE_MAP_HAIKU ("ember"), anything else -> PCORE_MAP_DEFAULT
-(the sonnet mapping). A tier name, alias or catalog id passes through. Values may end in ":none|down1|any" to set the
-fallback; the adapter default is PCORE_ANTHROPIC_FALLBACK ("any": step down rather than fail a coding agent).
+ensemble). Claude model ids map to tiers by family: fable -> PCORE_MAP_FABLE (default the strongest tier, "nova"),
+opus -> PCORE_MAP_OPUS ("solstice"), sonnet -> PCORE_MAP_SONNET ("ember"), haiku -> PCORE_MAP_HAIKU ("spark"), anything
+else -> PCORE_MAP_DEFAULT (the opus mapping). A tier name, alias or catalog id passes through. Values may end in
+":none|down1|any" to set the fallback; the adapter default is PCORE_ANTHROPIC_FALLBACK ("any": step down rather than
+fail a coding agent).
 
 Supported: system (string or text blocks), text / image (base64 or url) / tool_use / tool_result / text documents,
 tools, tool_choice, disable_parallel_tool_use (enforced by keeping the first call), max_tokens (capped, see
@@ -22,6 +23,9 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..context import compact
+from ..routing.router import NoCapacity, Router, has_images
+from ..settings import env
 from .adapters import (
     Target,
     UpstreamStream,
@@ -36,11 +40,14 @@ from .adapters import (
     session_key,
     text_of,
 )
-from ..context import compact
-from ..routing.router import NoCapacity, Router, has_images
-from ..settings import env
 
-FAMILY_DEFAULTS = {"opus": ("nova", 0), "sonnet": ("solstice", 1), "haiku": ("ember", 2)}  # (tier, position)
+# (tier, position)
+FAMILY_DEFAULTS = {
+    "fable": ("nova", 0),
+    "opus": ("solstice", 1),
+    "sonnet": ("ember", 2),
+    "haiku": ("spark", 3),
+}
 
 
 def error(status: int, kind: str, message: str) -> JSONResponse:
@@ -59,8 +66,8 @@ def map_model(router: Router, name: str) -> Target:
     if family:
         mapped = env(f"MAP_{family.upper()}")
     else:
-        mapped = env("MAP_DEFAULT") or env("MAP_SONNET")
-        family = "sonnet"
+        mapped = env("MAP_DEFAULT") or env("MAP_OPUS")
+        family = "opus"
     t = resolve_target(router, mapped, fallback) if mapped else None
     if t:
         return t
