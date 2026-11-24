@@ -120,11 +120,28 @@ def test_prepare_a_background_only_copy(tmp_path, monkeypatch):
     # Chrome moved on to 158: the copy is too old for profiles that Chrome writes now, and nothing newer is here
     monkeypatch.setattr(bh, "installed_chrome_version", lambda: "158.0.8127.40")
     assert bh.current(root, need=158) is None and bh.ensure(root=root, download=False) is None
-    # a newer build shows up (e.g. shipped inside Provenance.app): prepared, and the old one removed
+    # a newer build shows up (e.g. shipped inside Provenance.app): prepared; the one before it is kept, so that a
+    # build which turns out to delete the saved sign-ins can be undone, and only older ones are removed
     src2 = fake_app(tmp_path / "src2", "158.0.8127.36")
     monkeypatch.setattr(bh, "local_sources", lambda: [src, src2])
     rec2 = bh.ensure(root=root, download=False)
-    assert rec2["version"] == "158.0.8127.36" and not (root / "157.0.1.2").exists()
+    assert rec2["version"] == "158.0.8127.36" and (root / "157.0.1.2").exists()
+    src3 = fake_app(tmp_path / "src3", "159.0.8200.5")
+    monkeypatch.setattr(bh, "installed_chrome_version", lambda: "159.0.8200.9")
+    monkeypatch.setattr(bh, "local_sources", lambda: [src3])
+    assert bh.ensure(root=root, download=False)["version"] == "159.0.8200.5"
+    assert (root / "158.0.8127.36").exists() and not (root / "157.0.1.2").exists()
+    # 159 deleted the saved sign-ins (cookie_guard.py): held back on 158, from the kept copy, whatever Chrome is at
+    bh.pin(158, refused=159, root=root)
+    monkeypatch.setattr(bh, "root_dir", lambda: root)
+    assert bh.required_major() == 158 and bh.current(root, need=158) is None  # 159 is not offered any more
+    back = bh.ensure(root=root, download=False)
+    assert back["version"] == "158.0.8127.36" and back["source"].startswith("local:") and bh.current(root) == back
+    assert (root / "159.0.8200.5").exists()  # the newer one stays on disk, unused
+    bh.pin(157, refused=158, root=root)  # a build that cannot be had: nothing, rather than the refused one
+    assert bh.ensure(root=root, download=False) is None
+    bh.unpin(root)
+    assert bh.required_major() == 159 and bh.pinned(root) is None
 
 
 @mac

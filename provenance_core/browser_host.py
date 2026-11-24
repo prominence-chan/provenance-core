@@ -203,6 +203,9 @@ def profile_version(profile) -> str | None:
 
 
 def required_major(profile=None) -> int:
+    held = pinned()
+    if held:  # a newer build deleted the saved sign-ins once: stay on the one that can read them
+        return int(held["major"])
     return max(major(installed_chrome_version()), major(profile_version(profile)) if profile else 0)
 
 
@@ -214,6 +217,34 @@ def platform_key() -> str | None:
 
 def root_dir() -> Path:
     return Path(env("BROWSER_DIR") or Path(env("HOME") or Path.home() / ".tierlm") / "browser").expanduser()
+
+
+# ---- held back on a major version --------------------------------------------------------------------------------------
+# Measured 2026-11-23 (cookie_guard.py): Chrome for Testing 158 deletes every cookie 157 wrote under the bridge's
+# switches. When the bridge sees that happen it puts the backup back and pins the build that wrote it here
+# (<root>/pin.json: {"major", "refused", "at"}): from then on only that major version is prepared and used, until
+# the file is removed by hand (the next newer build is then tried again; if it deletes the sign-ins as well, the
+# same happens once more).
+def pinned(root=None) -> dict | None:
+    try:
+        d = json.loads((Path(root) if root else root_dir()).joinpath("pin.json").read_text())
+        return d if isinstance(d, dict) and int(d.get("major") or 0) > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def pin(major_version: int, refused: int = 0, root=None) -> dict:
+    root = Path(root) if root else root_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    rec = {"major": int(major_version), "refused": int(refused), "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    tmp = root / "pin.json.tmp"
+    tmp.write_text(json.dumps(rec, indent=1))
+    tmp.replace(root / "pin.json")
+    return rec
+
+
+def unpin(root=None):
+    (Path(root) if root else root_dir()).joinpath("pin.json").unlink(missing_ok=True)
 
 
 # ---- preparing a copy ----------------------------------------------------------------------------------------------
@@ -286,6 +317,14 @@ def local_sources() -> list[Path]:
             for sub in d.glob("chrome-mac*"):
                 out += _apps_in(sub)
     return [p for p in out if app_version(p) and p.resolve() != CHROME_APP.resolve()]
+
+
+def kept_sources(root: Path) -> list[Path]:
+    """The builds prepared under `root` before (the previous one is kept so that a newer one can be undone)."""
+    try:
+        return [a for d in sorted(Path(root).glob("*/plain")) for a in _apps_in(d) if app_version(a)]
+    except OSError:
+        return []
 
 
 def choose(versions: list[str], need: int) -> str | None:
@@ -381,6 +420,9 @@ def current(root: Path | None = None, need: int = 0) -> dict | None:
     exe = Path(rec.get("exe") or "")
     if not exe.is_file() or not os.access(exe, os.X_OK) or major(rec.get("version")) < need:
         return None
+    held = pinned(root)
+    if held and major(rec.get("version")) != int(held["major"]):
+        return None
     if app_version(rec.get("app") or "") != rec.get("version"):
         return None
     return rec
@@ -400,12 +442,12 @@ def _prepare_from(src_app: Path, root: Path, source: str) -> dict:
     return _record(root, {"version": v, "exe": str(exe), "app": str(bg), "plain_app": str(plain), "source": source})
 
 
-def _record(root: Path, rec: dict) -> dict:
+def _record(root: Path, rec: dict, previous: int = 1) -> dict:
     rec = {**rec, "prepared_at": int(time.time())}
     tmp = root / "current.json.tmp"
     tmp.write_text(json.dumps(rec, indent=1))
     tmp.replace(root / "current.json")
-    _prune(root, keep=rec["version"])
+    _prune(root, keep=rec["version"], previous=previous)
     return rec
 
 
@@ -414,10 +456,12 @@ def _in_use(path: Path) -> bool:
     return bool(r.stdout.strip())
 
 
-def _prune(root: Path, keep: str):
-    """Remove older prepared versions that are not running."""
-    for d in root.iterdir():
-        if d.is_dir() and re.fullmatch(r"\d+(\.\d+)+", d.name) and d.name != keep and not _in_use(d):
+def _prune(root: Path, keep: str, previous: int = 1):
+    """Remove older prepared versions that are not running, except the newest `previous` of them: a new build that
+    turns out to delete the saved sign-ins (cookie_guard.py) is undone by going back to the one before it."""
+    others = [d for d in root.iterdir() if d.is_dir() and re.fullmatch(r"\d+(\.\d+)+", d.name) and d.name != keep]
+    for d in sorted(others, key=lambda d: vkey(d.name))[: len(others) - previous]:
+        if not _in_use(d):
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -444,6 +488,8 @@ def ensure(profile=None, root=None, download: bool = True, index: dict | None = 
         _progress(preparing=True, stage="look", done=0, total=None, error=None, need=need, started_at=time.time())
         try:
             out = _ensure_locked(root, need, plat, rec, download, index)
+            if out and pinned(root) and major(out["version"]) != need:
+                out = None  # held back on `need`: never the build that deleted the sign-ins
             if not out:
                 _progress(error="No browser for this Mac could be found to download. It will be tried again later.")
             return out
@@ -456,19 +502,19 @@ def ensure(profile=None, root=None, download: bool = True, index: dict | None = 
                 else "The browser could not be set up on this Mac. It will be tried again later.",
                 error_detail=str(e)[:300],
             )
-            return rec  # new enough but of a newer major, or None
+            return None if pinned(root) else rec  # new enough but of a newer major, or None
         finally:
             _progress(preparing=False, stage=None, finished_at=time.time())
 
 
 def _ensure_locked(root: Path, need: int, plat: str, rec, download: bool, index) -> dict | None:
-    local = {v: a for a in local_sources() if (v := app_version(a))}
+    local = {v: a for a in [*local_sources(), *kept_sources(root)] if (v := app_version(a))}
     v = choose(list(local), need)
     if v and (major(v) == need or not need):
         _progress(stage="copy", version=v)
         return _prepare_from(local[v], root, f"local:{local[v]}")
     hit = cft_download_url(need, plat, index) if download else None
-    if hit and (major(hit[0]) == need or not rec):
+    if hit and (major(hit[0]) == need or not (rec or pinned(root))):
         _progress(version=hit[0])
         with tempfile.TemporaryDirectory(dir=root, prefix=".dl-") as tmp:
             app = _download(hit[1], Path(tmp))
@@ -479,6 +525,8 @@ def _ensure_locked(root: Path, need: int, plat: str, rec, download: bool, index)
             shutil.move(str(app), str(dst))
         _progress(stage="copy")
         return _prepare_from(dst, root, f"download:{hit[1]}")
+    if pinned(root):
+        return None
     if v and not rec:  # only newer majors around: still better than nothing
         _progress(stage="copy", version=v)
         return _prepare_from(local[v], root, f"local:{local[v]}")
@@ -510,7 +558,7 @@ def ensure_chrome_clone(profile=None, root=None) -> dict | None:
                 raise OSError(f"the clone of Chrome {v} does not start")
             app = str(exe.parent.parent.parent)
             return _record(croot, {"version": v, "exe": str(exe), "app": app, "plain_app": str(CHROME_APP),
-                                   "source": f"clone:{CHROME_APP}"})  # fmt: skip
+                                   "source": f"clone:{CHROME_APP}"}, previous=0)  # fmt: skip
         except (OSError, ValueError, subprocess.SubprocessError) as e:
             print(f"bundled browser: could not clone Chrome ({e})", file=sys.stderr)
             return None

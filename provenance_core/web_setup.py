@@ -45,14 +45,13 @@ import json
 import os
 import re
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import browser_host, pool_help, provider_settings, web_signin
+from . import browser_host, cookie_guard, pool_help, provider_settings, web_signin
 from .chatgpt_web import Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
 
 ACCOUNT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
@@ -112,45 +111,7 @@ def apply_accounts(providers: dict, home: Path | None = None):
 
 
 # ---- reading the profile from outside -------------------------------------------------------------------------------
-def _cookie_db(profile: Path) -> Path | None:
-    for p in (Path(profile) / "Default" / "Network" / "Cookies", Path(profile) / "Default" / "Cookies"):
-        if p.exists():
-            return p
-    return None
-
-
-def _matches(name: str, names) -> bool:
-    return any(name.startswith(n[:-1]) if n.endswith("*") else name == n for n in names)
-
-
-def session_cookies(profile: Path, spec: dict | None) -> dict:
-    """{(host, name): (created, updated, expires)} of the site's session cookies in the profile. Only names, hosts
-    and dates are read; the value columns are never selected. Chrome keeps the database open but does not lock out
-    readers (measured on Chrome 157); a read that collides with a write is simply tried again on the next poll."""
-    if not spec or not spec.get("names"):
-        return {}
-    db = _cookie_db(profile)
-    if not db:
-        return {}
-    domains = [d.lstrip(".").lower() for d in spec.get("domains") or []]
-    try:
-        con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=1)
-        try:
-            cols = {r[1] for r in con.execute("pragma table_info(cookies)")}
-            upd = "last_update_utc" if "last_update_utc" in cols else "0"
-            rows = con.execute(f"select host_key, name, creation_utc, {upd}, expires_utc from cookies").fetchall()
-        finally:
-            con.close()
-    except sqlite3.Error:
-        return {}
-    out = {}
-    for host, name, created, updated, expires in rows:
-        h = str(host).lstrip(".").lower()
-        if domains and not any(h == d or h.endswith("." + d) for d in domains):
-            continue
-        if _matches(str(name), spec["names"]):
-            out[(host, name)] = (created, updated, expires)
-    return out
+_cookie_db, _matches, session_cookies = cookie_guard.cookie_db, cookie_guard._matches, cookie_guard.session_cookies
 
 
 # ---- the visible window --------------------------------------------------------------------------------------------
@@ -1007,6 +968,8 @@ class WebSetup:
             reason = plain_reason(s, b)
         elif s["needs_confirmation"]:  # connected, idle until the person has chosen
             reason = plain_reason({**s, "kind": s["needs_confirmation"]}, b)
+        elif s.get("notice"):  # in use; the saved sign-ins were lost and a backup was put back
+            reason = s["notice"].get("text")
         return {
             "id": a,
             "signed_in": s["signed_in"],
@@ -1025,6 +988,7 @@ class WebSetup:
             if s["plan"] == "unknown" and s["signed_in"]
             else None,
             "needs_confirmation": s["needs_confirmation"],  # null or "paid_plan" (POST .../confirm)
+            "notice": (s.get("notice") or {}).get("kind"),  # null or "cookies_lost" (a backup was put back; `reason`)
             "autologin": web_signin.view(b),
             "signing_in": s["signing_in"],
             "window_open": s["window_open"],
@@ -1049,6 +1013,8 @@ def plain_reason(s: dict, b: Bridge) -> str:
             "likely faster than Codex would. It is connected but not used until you choose: use it anyway, or "
             "connect a different account."
         )
+    if s.get("kind") == "cookies_lost":  # written for the person already (cookie_guard.py)
+        return s.get("reason") or cookie_guard.LOST_NO_BACKUP
     if s.get("kind") == "login":
         auto = web_signin.note(b)  # where automatic sign-in stands, when it was tried or has stopped
         if auto:
@@ -1068,6 +1034,10 @@ def plain_reason(s: dict, b: Bridge) -> str:
         "closed": "The browser window was closed. It will reopen when needed.",
         "cap": f"Today's limit of {s.get('daily_cap')} chats on this account is used up. It resets at midnight.",
         "browser": "The browser could not start. It will be tried again shortly.",
+        "clock": "This computer's clock looks wrong, and starting the browser on a wrong clock can erase the saved "
+        f"sign-ins, so it was not started. It will be tried again in about {mins} minutes.",
+        "disk": "This computer's disk is almost full, and starting the browser on a full disk can erase the saved "
+        f"sign-ins, so it was not started. Free some space; it will be tried again in about {mins} minutes.",
         "setup": "The browser could not start. It will be tried again shortly.",
     }.get(s.get("kind"), f"{name} cannot be used on this account for the moment. It will be tried again later.")
 

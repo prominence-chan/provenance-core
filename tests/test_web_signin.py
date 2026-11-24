@@ -376,6 +376,7 @@ def test_signed_out_account_is_revived_and_serves_the_next_request(mock, tmp_pat
     assert mock.posted == [("email", {"email": WHO}), ("password", {"password": SECRET})] and mock.signins == 1
     assert set(mock.touched) == {("login", "username"), ("password", "password")}
     ev = [json.loads(x) for x in (tmp_path / "web-events.jsonl").read_text().splitlines()]
+    ev = [x for x in ev if not x["kind"].startswith(("browser_", "cookie"))]  # the cookie guard's own lines
     assert [(x["kind"], x.get("result")) for x in ev] == [("login", None), ("autologin", "ok")]
     out = capfd.readouterr()
     assert SECRET not in out.out + out.err and not leaks(tmp_path)
