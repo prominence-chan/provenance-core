@@ -3049,6 +3049,7 @@ class Bridge:
             self._model = model
             await self._gap()
 
+            t_start = self.clock()
             session = self._sessions.get(key) if key else None
             reuse = continues()
             compacted, fresh_info = False, {"pruned": None, "compaction": None}
@@ -3173,6 +3174,25 @@ class Bridge:
                         prompt, tools, rules, compacted, fresh_info = self.fresh_prompt(body)
                         text, calls, extra = await self._guarded(run)
                         extra["restarted"] = True
+            except asyncio.CancelledError:
+                # the caller gave up while the page was still being waited on (a client's own silence limit is
+                # shorter than reply_timeout_s): say so and keep what the page looked like, or nothing is left to
+                # tell a hung page from a client that left
+                if key:
+                    self._sessions.pop(key, None)
+                try:
+                    waited = int(self.clock() - t_start)
+                    print(
+                        f"chatgpt-web: {model_id or model} abandoned by the caller after {waited} s "
+                        f"({'continued' if reuse else 'new'} chat, {len(prompt)} chars typed, "
+                        f"account {self.account or 'main'})",
+                        flush=True,
+                    )
+                    p = await asyncio.wait_for(asyncio.shield(self._probe(page, False)), 5)
+                    await asyncio.wait_for(asyncio.shield(self._dump(page, p, "abandoned")), 8)
+                except BaseException:  # noqa: BLE001 - best effort while being cancelled
+                    pass
+                raise
             except Exception as e:
                 if key:
                     self._sessions.pop(key, None)  # the page may contain a partial reply
