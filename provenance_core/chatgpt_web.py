@@ -749,7 +749,8 @@ def repair_message(err: Malformed) -> str:
 _STALL = re.compile(
     r"\b(?:is|are)(?: not|n['’]t) (?:currently |yet )?(?:available|enabled|accessible|exposed|provided|connected)\b"
     r"|\b(?:do not|don['’]t|did not|didn['’]t) have (?:access|a way|the ability|any tools?|a tool|tools|a shell|the tools?)\b"
-    r"|\b(?:can['’]?t|cannot|unable to|not able to) (?:directly )?(?:run|execute|access|inspect|reach|open|read|call|use|see|modify|edit)\b"
+    r"|\b(?:can['’]?t|cannot|unable to|not able to) (?:directly )?(?:run|execute|access|inspect|reach|open|read|call|use|see|modify|edit|create|write|save|delete|change|update|touch|make|apply)\b"
+    r"|\b(?:does not|doesn['’]t|do not|don['’]t) (?:expose|provide|include|offer|give me|have)\b[^.\n]{0,60}\b(?:tools?|shell|terminal|command|access)\b"
     r"|\b(?:retry|try again|re-?run)\b[^.\n]{0,60}\b(?:enabled|available|tools?)\b"
     r"|\bplease (?:retry|re-?run|run|try again|execute|paste|share|provide|send)\b"
     r"|\bso (?:that )?I can (?:continue|proceed)\b"

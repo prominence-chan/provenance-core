@@ -762,6 +762,8 @@ def test_a_reply_about_its_own_sandbox_failing_is_a_stall():
         "I’m ready to create and test the two files, but the local command execution interface returned an error "
         "before confirming that either file was written. No successful changes are verified.",
         "The execution environment hit an internal error. No changes were made.",
+        "I can write the polyglot, but this chat does not expose the `exec_command` tool you described. I can’t "
+        "directly create or modify files on your computer through the available tools. I won’t pretend a command ran.",
         "BLOCKED: The terminal command was not successfully executed, so the file has not been created or validated."
         "\n\nRESULT: No verified changes.\nCHANGES: None.\nVALIDATION: Not run.\nBLOCKERS: Terminal tool-call interface "
         "rejected the command.\nSTATUS: BLOCKED",
