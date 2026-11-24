@@ -393,7 +393,7 @@ def create_app(
         check(authorization)
         b = await body_of(request)
         try:
-            return await setup.start(str(b.get("provider") or ""), b.get("account"), b.get("bounds"))
+            return await setup.start(str(b.get("provider") or ""), b.get("account"), b.get("bounds"), b.get("method"))
         except web_setup.SetupError as e:
             return fail(e, setup.login_state(str(b.get("provider")), b.get("account"))["state"])
         except KeyError as e:

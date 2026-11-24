@@ -1248,6 +1248,22 @@ SITES = {
             "email": 'input[name="email"]',
             "password": 'input[type="password"]',
             "submit": {"css": 'button[type="submit"]', "text": "^(?:log in|sign in|continue)$"},
+            "sso": {
+                "google": {
+                    "button": {
+                        "css": 'button, [role="button"], a',
+                        "text": r"continue with google|sign in with google|log in with google|\bgoogle\b",
+                    },
+                    "hosts": ["accounts.google.com"],
+                },
+                "github": {
+                    "button": {
+                        "css": 'button, [role="button"], a',
+                        "text": r"continue with github|sign in with github|log in with github|\bgithub\b",
+                    },
+                    "hosts": ["github.com"],
+                },
+            },
         },
     },
     "gemini": {  # gemini.google.com, signed in; temporary chats via the page's toggle
@@ -1305,6 +1321,29 @@ CHATGPT_SITE = {
         "continue": {"css": 'button[type="submit"]', "text": "^continue$"},
         "password": 'input[type="password"]',
         "submit": {"css": 'button[type="submit"]', "text": "^(?:continue|log in|sign in)$"},
+        "sso": {
+            "google": {
+                "button": {
+                    "css": 'button, [role="button"], a',
+                    "text": r"continue with google|sign in with google|log in with google",
+                },
+                "hosts": ["accounts.google.com"],
+            },
+            "microsoft": {
+                "button": {
+                    "css": 'button, [role="button"], a',
+                    "text": r"continue with microsoft|sign in with microsoft|log in with microsoft",
+                },
+                "hosts": ["login.microsoftonline.com", "login.live.com", "account.live.com"],
+            },
+            "apple": {
+                "button": {
+                    "css": 'button, [role="button"], a',
+                    "text": r"continue with apple|sign in with apple|log in with apple",
+                },
+                "hosts": ["appleid.apple.com", "idmsa.apple.com"],
+            },
+        },
     },
     "plan": True,  # the account's plan is read from the page (PLAN_JS); a paid one must be acknowledged before use
 }
@@ -1334,7 +1373,7 @@ FREE_PLANS = ("free", "chatgptfreeplan")  # every other label is a paid plan
 # True when the page holds something that must never be written to disk: a filled password or one-time-code field, or
 # it is a sign-in page at all. _dump keeps nothing of such a page.
 SECRET_PAGE_JS = r"""() => {
-  if (/(^|\.)auth\.openai\.com$|(^|\.)auth0\.|(^|\.)accounts\.google\.com$/.test(location.hostname) || /^\/(auth(\/|$)|log-?in|sign-?in)/.test(location.pathname)) return true;
+  if (/(^|\.)auth\.openai\.com$|(^|\.)auth0\.|(^|\.)accounts\.google\.com$|(^|\.)login\.microsoftonline\.com$|(^|\.)login\.live\.com$|(^|\.)account\.live\.com$|(^|\.)appleid\.apple\.com$|(^|\.)idmsa\.apple\.com$/.test(location.hostname) || /^\/(auth(\/|$)|log-?in|sign-?in)/.test(location.pathname)) return true;
   return [...document.querySelectorAll('input[type="password"], input[autocomplete="current-password"], input[autocomplete="new-password"], input[autocomplete="one-time-code"]')].some(e => !!e.value);
 }"""
 
@@ -1609,6 +1648,7 @@ class Bridge:
         # automatic sign-in (web_signin.py): the attempt in the background, and what to tell once it worked (the
         # router forgets the cooldown it gave this provider's models)
         self._autologin_task: asyncio.Task | None = None
+        self._autologin_requeue_task: asyncio.Task | None = None
         self._autologin_running = False
         self.on_revived = None
         # summarising compaction: the router hands over its own (shared cache, and `summarize`, which asks a cheap
@@ -1745,6 +1785,9 @@ class Bridge:
     def _seen_signed_in(self):
         """A page showed the account signed in. Automatic sign-in that had stopped for a person (a code, a captcha)
         may run again the next time: the person has signed in since."""
+        from . import web_signin
+
+        web_signin.cancel_requeue(self)
         ch: dict = {"signed_in": True, "checked_at": int(self.clock())}
         al = self.load().get("autologin")
         if al and al.get("hold") == "needs_person":
@@ -1822,6 +1865,9 @@ class Bridge:
 
     def reset(self):
         """Forget a block (after `weblogin`, or when you've dealt with a notice by hand)."""
+        from . import web_signin
+
+        web_signin.cancel_requeue(self)
         self._notified = None
         self._gone = False
         self.save(blocked_until=0, reason=None, kind=None, strikes=0)
@@ -1860,7 +1906,10 @@ class Bridge:
         if e.kind in ("login", "challenge", "tempchat"):
             self._event(e.kind, e.reason)
         if e.kind == "login":
+            prev_identity = self.load().get("identity")
             ch.update(signed_in=False, checked_at=int(self.clock()), identity=None)
+            if prev_identity:
+                ch["last_identity"] = prev_identity
         self.save(**ch)
         if e.kind == "login":  # established (not a first sighting): a saved sign-in, if the person agreed to one
             from . import web_signin
@@ -2233,6 +2282,15 @@ class Bridge:
         return page
 
     async def _shutdown(self):
+        from . import web_signin
+
+        requeue = self._autologin_requeue_task
+        web_signin.cancel_requeue(self)
+        if requeue and not requeue.done() and requeue is not asyncio.current_task():
+            try:
+                await requeue
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         self._closing = True
         if self.host:  # only this bridge's tabs: the Chrome belongs to the host
             pages = [x["page"] for x in self._sessions.values()] + [self._page]
@@ -3255,7 +3313,11 @@ class Bridge:
             who = await page.evaluate(IDENTITY_JS, self.site_info.get("identity"))
         except Exception:  # noqa: BLE001
             who = None
-        self.save(identity=who if isinstance(who, str) and who.strip() else None)
+        email = who if isinstance(who, str) and who.strip() else None
+        ch: dict = {"identity": email}
+        if email:
+            ch["last_identity"] = email
+        self.save(**ch)
 
     async def check(self, model: str = "auto", close: bool = False) -> dict:
         """Open a fresh temporary chat without sending anything: is the login there, is temporary chat there?"""

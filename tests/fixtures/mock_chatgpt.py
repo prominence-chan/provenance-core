@@ -116,11 +116,12 @@ const val = n => slot.querySelector('input[name="' + n + '"]').value;
 const pages = {
   login() {
     if (T === 'passkey') { slot.innerHTML = '<p>Use your passkey to sign in to this account</p><button type="button">Try another way</button>'; return; }
-    slot.innerHTML = '<button type="button">Continue with Google</button><form onsubmit="return false">'
+    slot.innerHTML = '<button type="button" id="google">Continue with Google</button><form onsubmit="return false">'
       + '<input type="email" name="username" autocomplete="email" placeholder="Email address">'
       + '<button type="submit" id="go">Continue</button></form><a href="/terms">Terms of use</a>';
     if (T === 'captcha') slot.innerHTML += '<iframe title="Widget containing a security challenge" src="/__frame?challenge=1" width="300" height="65"></iframe>';
     document.getElementById('go').onclick = async () => { location.href = (await post('/__auth/email', {email: val('username')})).next; };
+    if (S.sso_url) document.getElementById('google').onclick = () => { location.href = S.sso_url; };
   },
   password() {
     slot.innerHTML = '<form onsubmit="return false"><input type="text" name="username" style="display:none">'
@@ -157,6 +158,61 @@ const pages = {
   odd() { slot.innerHTML = '<h2>One more thing</h2><p>Tell us about yourself.</p><input type="text" name="birthday"><button>Next</button>'; },
   sso() { slot.innerHTML = '<h2>Example Identity</h2><p>Sign in with your organisation account.</p><form onsubmit="return false">'
       + '<input type="email" name="username"><input type="password" name="password"><button type="submit">Continue</button></form>'; },
+  idp() {
+    const mode = S.sso_mode || 'direct';
+    const done = S.sso_return || '/';
+    if (mode === 'direct') { location.href = done; return; }
+    if (mode === 'chooser') {
+      slot.innerHTML = '<h2>Choose an account</h2>'
+        + '<div data-identifier="other@example.com" role="button" tabindex="0">Other Person<br>other@example.com</div>'
+        + '<div data-identifier="person@example.com" role="button" tabindex="0">Test Person<br>person@example.com</div>';
+      slot.querySelectorAll('[data-identifier]').forEach(el => {
+        el.onclick = () => { location.href = done + '?email=' + encodeURIComponent(el.getAttribute('data-identifier')); };
+      });
+      return;
+    }
+    if (mode === 'chooser_one') {
+      slot.innerHTML = '<h2>Choose an account</h2>'
+        + '<div data-identifier="person@example.com" role="button" tabindex="0">Test Person<br>person@example.com</div>';
+      slot.querySelector('[data-identifier]').onclick = () => { location.href = done + '?email=person%40example.com'; };
+      return;
+    }
+    if (mode === 'chooser_ambiguous') {
+      slot.innerHTML = '<h2>Choose an account</h2>'
+        + '<div data-identifier="alice@example.com" role="button" tabindex="0">Alice<br>alice@example.com</div>'
+        + '<div data-identifier="bob@example.com" role="button" tabindex="0">Bob<br>bob@example.com</div>';
+      return;
+    }
+    if (mode === 'idp_password') {
+      slot.innerHTML = '<h2>Sign in with Google</h2><form onsubmit="return false">'
+        + '<input type="email" name="identifier" placeholder="Email or phone">'
+        + '<input type="password" name="password" placeholder="Enter your password">'
+        + '<button type="submit">Next</button></form>';
+      return;
+    }
+    if (mode === 'idp_code') {
+      slot.innerHTML = '<h2>2-Step Verification</h2><p>Enter the verification code from your authenticator app.</p>'
+        + '<input type="text" name="code" autocomplete="one-time-code"><button type="submit">Next</button>';
+      return;
+    }
+    if (mode === 'idp_captcha') {
+      slot.innerHTML = '<h2>Sign in</h2><iframe title="Widget containing a security challenge" src="/__frame?challenge=1" width="300" height="65"></iframe>';
+      return;
+    }
+    if (mode === 'idp_consent') {
+      slot.innerHTML = '<h2>Sign in to ChatGPT</h2><p>ChatGPT wants to access your Google Account.</p>'
+        + '<button type="button">Cancel</button><button type="button">Allow</button>';
+      return;
+    }
+    if (mode === 'idp_passkey') {
+      slot.innerHTML = '<h2>Sign in with passkey</h2><p>Use your passkey to sign in to this account.</p>';
+      return;
+    }
+    if (mode === 'idp_suspicious') {
+      slot.innerHTML = '<h2>Suspicious activity detected</h2><p>Confirm your identity to continue.</p>';
+      return;
+    }
+  },
 };
 setTimeout(() => { pages[PAGE](); watch(); }, S.signin_slow_ms || 0);
 if (S.signin_auto && PAGE === 'login') setTimeout(async () => {
@@ -210,11 +266,15 @@ class Mock:
             "plan": "free",  # the account's plan in the bootstrap data ("plus", "team", ...); None: not shown
             "signin_trouble": "",  # see SIGNIN
             "signin_slow_ms": 0,
+            "sso_url": "",  # where "Continue with Google" navigates (e.g. http://localhost:<port>/auth/idp)
+            "sso_mode": "",  # direct | chooser | chooser_one | chooser_ambiguous | idp_password | idp_code | ...
+            "sso_return": "",  # callback URL on 127.0.0.1 that sets SESSION and redirects to /
         }
         self.accounts = {"person@example.com": "mock-password"}  # who the sign-in form lets in
         self.session_tail = ""  # more characters for the session cookie's value (a value tests can search for)
         self.touched: list[tuple[str, str]] = []  # (page, field) typed into on the sign-in pages
         self.posted: list[tuple[str, dict]] = []  # (step, what was sent)
+        self.sso_chosen: list[str] = []  # account emails chosen on the mock IdP
         self._email = None
         self.replies: list = ["<p>ok</p>"]
         self.sent: list[dict] = []
@@ -234,10 +294,22 @@ class Mock:
 
             def do_GET(self):
                 path = urlparse(self.path).path
+                if path == "/__sso_complete":
+                    chosen = parse_qs(urlparse(self.path).query).get("email", [""])[0]
+                    if chosen:
+                        mock.sso_chosen.append(chosen)
+                        mock.state["email"] = chosen
+                    mock.signins += 1
+                    self.send_response(302)
+                    self.send_header("Set-Cookie", f"{SESSION}=1{mock.session_tail}; Max-Age=86400; Path=/; HttpOnly")
+                    self.send_header("Location", "/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if path == "/auth/login":
                     mock.signin_pages += 1
                 if path.startswith("/auth/") and path[6:] in (
-                    "login", "password", "single", "code", "terms", "suspicious", "odd", "sso"
+                    "login", "password", "single", "code", "terms", "suspicious", "odd", "sso", "idp"
                 ):  # fmt: skip
                     page = SIGNIN.replace("__STATE__", json.dumps(mock.state)).replace("__PAGE__", json.dumps(path[6:]))
                     return self._out(page)

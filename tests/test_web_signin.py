@@ -6,6 +6,7 @@ no test touches the system's. The test password is searched for in everything th
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -650,3 +651,530 @@ def test_key_page_window_opens_is_left_alone_and_closes(mock, tmp_path, home, mo
     assert cancelled["state"] == "idle" and gone and after == (False, "idle")
     assert closed["state"] == "closed" and closed["reason"] is None and free
     assert not mock.sent and not mock.touched and not mock.posted  # the page was only shown
+
+
+# ---- remembered login methods, SSO auto-relogin, and automatic requeuing ---------------------------------------------
+def _write_history(profile: Path, visits: list[tuple[str, float]]):
+    """Create a Chrome-shaped Default/History SQLite DB with (url, unix_ts) rows."""
+    db = profile / "Default" / "History"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    if db.exists():
+        db.unlink()
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT NOT NULL, last_visit_time INTEGER NOT NULL)")
+    con.execute("CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER NOT NULL, visit_time INTEGER NOT NULL)")
+    for idx, (u, ts) in enumerate(visits, 1):
+        ct = si.chrome_time_us(ts)
+        con.execute("INSERT INTO urls (id, url, last_visit_time) VALUES (?, ?, ?)", (idx, u, ct))
+        con.execute("INSERT INTO visits (id, url, visit_time) VALUES (?, ?, ?)", (idx, idx, ct))
+    con.commit()
+    con.close()
+
+
+def test_detect_login_method_from_history_and_fallbacks(tmp_path, _no_real_credential_store):
+    store = _no_real_credential_store
+    t0 = 1_800_000_000.0
+    tok = "SUPER-SECRET-OAUTH-TOKEN-999"
+    b = bridge(tmp_path, "https://chatgpt.com")
+    prof = b.profile
+
+    # 1. Google IdP (with secret token in query — must never leak)
+    _write_history(
+        prof,
+        [
+            ("https://chatgpt.com/auth/login", t0 + 1),
+            ("https://auth.openai.com/log-in", t0 + 2),
+            (f"https://accounts.google.com/o/oauth2/v2/auth?code={tok}&state=xyz", t0 + 3),
+            ("https://chatgpt.com/", t0 + 5),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("google", None)
+
+    # 2. Microsoft IdP
+    _write_history(
+        prof,
+        [
+            ("https://chatgpt.com/auth/login", t0 + 1),
+            (f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?token={tok}", t0 + 2),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("microsoft", None)
+    _write_history(prof, [("https://login.live.com/oauth20_authorize.srf", t0 + 2)])
+    assert si.detect_login_method(prof, b, t0) == ("microsoft", None)
+
+    # 3. Apple IdP
+    _write_history(prof, [("https://appleid.apple.com/auth/authorize?state=abc", t0 + 2)])
+    assert si.detect_login_method(prof, b, t0) == ("apple", None)
+
+    # 4. GitHub auth vs non-auth repo visit
+    _write_history(prof, [(f"https://github.com/login/oauth/authorize?code={tok}", t0 + 2)])
+    assert si.detect_login_method(prof, b, t0) == ("github", None)
+    _write_history(
+        prof,
+        [
+            ("https://chatgpt.com/auth/login", t0 + 1),
+            ("https://auth.openai.com/log-in/password", t0 + 2),
+            ("https://github.com/octocat/hello-world", t0 + 3),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("password", None)
+
+    # 5. Other external SSO (hostname ONLY; path/query/tokens discarded)
+    _write_history(
+        prof,
+        [
+            ("https://chatgpt.com/auth/login", t0 + 1),
+            (f"https://acme.okta.com/app/openai/sso/saml?SAMLRequest={tok}", t0 + 2),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("other", "acme.okta.com")
+
+    # 6. Normal password login with Cloudflare challenge in between (Cloudflare ignored)
+    _write_history(
+        prof,
+        [
+            ("https://chatgpt.com/auth/login", t0 + 1),
+            ("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g", t0 + 2),
+            ("https://auth.openai.com/log-in/password", t0 + 3),
+            ("https://chatgpt.com/", t0 + 4),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("password", None)
+
+    # 7. Old visit before window_started_at - 5s is ignored
+    _write_history(
+        prof,
+        [
+            ("https://accounts.google.com/o/oauth2/auth", t0 - 3600),
+            ("https://auth.openai.com/log-in", t0 + 2),
+        ],
+    )
+    assert si.detect_login_method(prof, b, t0) == ("password", None)
+
+    # 8. Missing / corrupt History fallbacks
+    (prof / "Default" / "History").write_bytes(b"not-a-sqlite-db")
+    assert si.detect_login_method(prof, b, t0) == (None, None)
+    assert si.detect_login_method(prof, b, t0, google_cookies_changed=True) == ("google", None)
+    assert si.detect_login_method(prof, b, t0, hint="microsoft") == ("microsoft", None)
+    gem = cw.Bridge("https://gemini.google.com", {"site": "gemini", "notify": False}, home=tmp_path / "gem")
+    assert si.detect_login_method(prof, gem, t0) == ("google", None)
+
+    # 9. Persisting method rules + never storing passwords/tokens silently
+    v_other = si.note_login_method(b, "other", "acme.okta.com")
+    assert v_other["method"] == "other" and v_other["method_label"] == "acme.okta.com"
+    assert not v_other["enabled"] and not v_other["needs_credentials"] and not store.items
+    assert tok not in (tmp_path / "chatgpt_web.json").read_text()
+
+    # Password remembered without consent: needs_credentials=True, enabled=False, nothing auto-runs
+    b_pw = bridge(tmp_path / "pw", "https://chatgpt.com", doubt_tries=1)
+    v_pw = si.note_login_method(b_pw, "password")
+    assert v_pw["method"] == "password" and v_pw["method_label"] is None
+    assert v_pw["needs_credentials"] is True and v_pw["enabled"] is False and v_pw["saved"] is False
+    assert not store.items
+
+    async def check_no_auto():
+        b_pw._block(cw.WebUnavailable("not signed in", 1800, "login"))
+        assert b_pw._autologin_task is None and not si.view(b_pw)["queued"]
+
+    asyncio.run(check_no_auto())
+
+    # Google remembered on ChatGPT: auto-enables SSO without storing a password; respects user_disabled
+    b_sso = bridge(tmp_path / "sso", "https://chatgpt.com")
+    v_sso = si.note_login_method(b_sso, "google")
+    assert v_sso["method"] == "google" and v_sso["enabled"] is True and v_sso["saved"] is False
+    assert v_sso["needs_credentials"] is False and not store.items
+    v_off = si.set_enabled(b_sso, False)
+    assert v_off["enabled"] is False and v_off["method"] == "google"
+    v_again = si.note_login_method(b_sso, "google")
+    assert v_again["enabled"] is False  # respected user_disabled!
+    v_on = si.set_enabled(b_sso, True)
+    assert v_on["enabled"] is True
+
+    # Gemini remembers method="google" while staying unsupported for autologin
+    v_gem = si.note_login_method(gem, "google")
+    assert v_gem["supported"] is False and v_gem["enabled"] is False and v_gem["method"] == "google"
+    assert v_gem["needs_credentials"] is False
+
+
+def test_sso_api_opt_in_patch_and_delete(tmp_path, home, monkeypatch, _no_real_credential_store):
+    store = _no_real_credential_store
+    router, app, setup = client_for(catalog(tmp_path))
+    base = "/web/accounts/chatgpt-web/b"
+    with TestClient(app) as c:
+        # Bad requests / unsupported SSO method
+        assert c.put(base + "/autologin", json={"agree": False, "method": "google"}).status_code == 400
+        assert c.put(base + "/autologin", json={"agree": True, "method": "bogus"}).status_code == 400
+        assert c.put(base + "/autologin", json={"agree": True, "method": "github"}).status_code == 409
+
+        # Opt into Google SSO without password
+        r = c.put(base + "/autologin", json={"agree": True, "method": "google"})
+        assert r.status_code == 200
+        al = r.json()["autologin"]
+        assert al["method"] == "google" and al["method_label"] is None
+        assert al["enabled"] is True and al["saved"] is False and al["needs_credentials"] is False
+        assert not store.items
+
+        # Toggle off and back on via PATCH
+        off = c.patch(base + "/autologin", json={"enabled": False})
+        assert off.status_code == 200 and off.json()["autologin"]["enabled"] is False
+        on = c.patch(base + "/autologin", json={"enabled": True})
+        assert on.status_code == 200 and on.json()["autologin"]["enabled"] is True
+
+        # Switch to password then back to SSO: old password deleted from credential store
+        pw = c.put(base + "/autologin", json={"agree": True, "username": WHO, "password": SECRET})
+        assert pw.status_code == 200 and pw.json()["autologin"]["method"] == "password"
+        assert pw.json()["autologin"]["saved"] is True and pw.json()["autologin"]["needs_credentials"] is False
+        assert list(store.items.values()) == [SECRET]
+        back = c.put(base + "/autologin", json={"agree": True, "method": "microsoft"})
+        assert back.status_code == 200 and back.json()["autologin"]["method"] == "microsoft"
+        assert back.json()["autologin"]["saved"] is False and back.json()["autologin"]["enabled"] is True
+        assert not store.items
+
+        # SSO remains supported even with no system password store, while password save still refuses
+        credstore.use(None)
+        monkeypatch.setattr(credstore.sys, "platform", "linux")
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        accts = c.get("/web/accounts").json()
+        acct_b = [a for a in accts["providers"][0]["accounts"] if a["id"] == "b"][0]
+        assert acct_b["autologin"]["supported"] is True and acct_b["autologin"]["enabled"] is True
+        assert c.put(base + "/autologin", json={"agree": True, "username": WHO, "password": SECRET}).status_code == 409
+
+        # Restore in-memory store and DELETE clears everything
+        credstore.use(store)
+        gone = c.delete(base + "/autologin")
+        assert gone.status_code == 200
+        gal = gone.json()["autologin"]
+        assert gal["method"] is None and gal["enabled"] is False and gal["saved"] is False and gal["queued"] is False
+        assert c.patch(base + "/autologin", json={"enabled": True}).status_code == 409
+
+
+def test_automatic_requeue_lifecycle(tmp_path, monkeypatch):
+    # 1. Transient error -> automatic requeue -> succeeds on retry
+    b1 = bridge(tmp_path / "r1", doubt_tries=1, autologin_gap_s=0.05, autologin_max_per_day=3)
+    seq1 = iter([("error", "temporary blip"), ("ok", None)])
+    calls1 = []
+
+    async def fake1(bridge_, username):
+        calls1.append(username)
+        res = next(seq1)
+        if res[0] == "ok":
+            bridge_.reset()
+            bridge_._seen_signed_in()
+        return res
+
+    monkeypatch.setattr(si, "_signin", fake1)
+
+    async def run1():
+        si.save_signin(b1, True, WHO, SECRET)
+        b1._block(cw.WebUnavailable("not signed in", 1800, "login"))
+        assert b1._autologin_task is not None
+        await b1._autologin_task
+        assert len(calls1) == 1 and si.view(b1)["queued"] is True
+        # Wait for requeue timer to fire and retry
+        end = time.time() + 3.0
+        while (len(calls1) < 2 or si.running(b1) or si.view(b1)["queued"]) and time.time() < end:
+            await asyncio.sleep(0.02)
+        if b1._autologin_task and not b1._autologin_task.done():
+            await b1._autologin_task
+        assert len(calls1) == 2 and si.view(b1)["last_try"]["result"] == "ok" and si.view(b1)["queued"] is False
+        await b1._shutdown()
+
+    asyncio.run(run1())
+
+    # 2. Bounded by autologin_max_per_day (never loops past cap)
+    b2 = bridge(tmp_path / "r2", doubt_tries=1, autologin_gap_s=0.04, autologin_max_per_day=3)
+    calls2 = []
+
+    async def fake2(bridge_, username):
+        calls2.append(username)
+        return "error", "down"
+
+    monkeypatch.setattr(si, "_signin", fake2)
+
+    async def run2():
+        si.save_signin(b2, True, WHO, SECRET)
+        b2._block(cw.WebUnavailable("not signed in", 1800, "login"))
+        end = time.time() + 3.0
+        while (len(calls2) < 3 or si.running(b2)) and time.time() < end:
+            await asyncio.sleep(0.02)
+        if b2._autologin_task and not b2._autologin_task.done():
+            await b2._autologin_task
+        await asyncio.sleep(0.2)
+        assert len(calls2) == 3 and si.view(b2)["attempts_today"] == 3 and si.view(b2)["queued"] is False
+        await b2._shutdown()
+
+    asyncio.run(run2())
+
+    # 3. Gap-wait requeue & busy requeue & hard stops never requeue
+    b3 = bridge(tmp_path / "r3", doubt_tries=1, autologin_gap_s=0.08, autologin_max_per_day=5)
+    calls3 = []
+    outcomes3 = [("needs_person", si.STOPS["code"])]
+
+    async def fake3(bridge_, username):
+        calls3.append(username)
+        return outcomes3[0]
+
+    monkeypatch.setattr(si, "_signin", fake3)
+
+    async def run3():
+        si.save_signin(b3, True, WHO, SECRET)
+        # Simulate recent try inside the backoff gap -> kick() queues instead of running now
+        si._save(b3, tries=[b3.clock()], gap_waived=False)
+        si.kick(b3)
+        assert b3._autologin_task is None and si.view(b3)["queued"] is True and len(calls3) == 0
+        # Wait for gap-wait timer to fire -> runs once, gets needs_person -> stops and clears queue
+        end = time.time() + 3.0
+        while (len(calls3) < 1 or si.running(b3)) and time.time() < end:
+            await asyncio.sleep(0.02)
+        if b3._autologin_task and not b3._autologin_task.done():
+            await b3._autologin_task
+        await asyncio.sleep(0.15)
+        assert len(calls3) == 1 and si.view(b3)["paused"] == "needs_person" and si.view(b3)["queued"] is False
+
+        # wrong_password also never requeues
+        si.save_signin(b3, True, WHO, SECRET)
+        outcomes3[0] = ("wrong_password", "nope")
+        b3._block(cw.WebUnavailable("not signed in", 1800, "login"))
+        await b3._autologin_task
+        assert len(calls3) == 2 and si.view(b3)["paused"] == "wrong_password" and si.view(b3)["queued"] is False
+
+        # Busy/running kick schedules requeue, and cancel paths clear it cleanly
+        si.save_signin(b3, True, WHO, SECRET)
+        b3._autologin_running = True
+        si.kick(b3)
+        assert si.view(b3)["queued"] is True
+        b3._autologin_running = False
+        si.set_enabled(b3, False)
+        assert si.view(b3)["queued"] is False
+
+        si.set_enabled(b3, True)
+        si._schedule_requeue(b3, 60.0)
+        assert si.view(b3)["queued"] is True
+        b3._seen_signed_in()  # manual login cancels requeue
+        assert si.view(b3)["queued"] is False
+
+        si._schedule_requeue(b3, 60.0)
+        assert si.view(b3)["queued"] is True
+        si.forget(b3)
+        assert si.view(b3)["queued"] is False
+
+        si.save_signin(b3, True, WHO, SECRET)
+        si._schedule_requeue(b3, 60.0)
+        assert si.view(b3)["queued"] is True
+        await b3.release()  # _shutdown cancels cleanly without warnings
+        assert si.view(b3)["queued"] is False
+
+    asyncio.run(run3())
+
+
+@browser
+def test_sso_auto_relogin_succeeds_and_obeys_hard_stops(mock, tmp_path, capfd, _no_real_credential_store):
+    store = _no_real_credential_store
+    port = mock.httpd.server_address[1]
+    sso_signin = {
+        **cw.CHATGPT_SITE["signin"],
+        "sso": {
+            "google": {
+                "button": cw.CHATGPT_SITE["signin"]["sso"]["google"]["button"],
+                "hosts": ["localhost"],
+            }
+        },
+    }
+    now = [time.time()]
+    b = bridge(
+        tmp_path,
+        mock.url,
+        now=now,
+        doubt_tries=1,
+        autologin_max_per_day=50,
+        autologin_gap_s=0,
+        signin=sso_signin,
+    )
+    revived = []
+    b.on_revived = lambda: revived.append(True)
+    mock.state["sso_url"] = f"http://localhost:{port}/auth/idp"
+    mock.state["sso_return"] = f"{mock.url}/__sso_complete"
+
+    async def clear_cookies():
+        if b._ctx is not None:
+            await b._ctx.clear_cookies()
+
+    async def go():
+        results = {}
+        try:
+            # 1. Remembered Google SSO auto-relogin with multi-account chooser matching expected email
+            si.note_login_method(b, "google")
+            b.save(signed_in=True, temp_ok=True, identity=WHO)
+            mock.state["sso_mode"] = "chooser"
+            with pytest.raises(cw.WebUnavailable) as e:
+                await b.complete("auto", BODY)
+            assert e.value.kind == "login" and b._autologin_task is not None
+            await b._autologin_task
+            results["chooser_st"] = b.status()
+            results["chooser_reply"] = (await b.complete("auto", BODY))["choices"][0]["message"]["content"]
+            results["chooser_chosen"] = list(mock.sso_chosen)
+
+            # 2. Direct SSO redirect (no chooser)
+            await clear_cookies()
+            b.save(signed_in=False)
+            mock.state["sso_mode"] = "direct"
+            results["direct"] = await si.attempt(b, "manual")
+
+            # 3. Sole-account chooser with no expected_email
+            await clear_cookies()
+            b.save(signed_in=False, identity=None, last_identity=None)
+            mock.state["sso_mode"] = "chooser_one"
+            results["sole"] = await si.attempt(b, "manual")
+
+            # 4. Hard stops on site and IdP (all stop as needs_person without typing anything)
+            for name, mode, trouble in (
+                ("site_captcha", "direct", "captcha"),
+                ("idp_captcha", "idp_captcha", ""),
+                ("idp_code", "idp_code", ""),
+                ("idp_password", "idp_password", ""),
+                ("idp_consent", "idp_consent", ""),
+                ("idp_passkey", "idp_passkey", ""),
+                ("idp_suspicious", "idp_suspicious", ""),
+                ("chooser_ambiguous", "chooser_ambiguous", ""),
+            ):
+                await clear_cookies()
+                b.save(signed_in=False, identity=None, last_identity=WHO)
+                mock.state["sso_mode"] = mode
+                mock.state["signin_trouble"] = trouble
+                results[name] = await si.attempt(b, "manual")
+
+            # 5. Unexpected host (localhost removed from allowed IdP hosts)
+            await clear_cookies()
+            b.save(signed_in=False)
+            mock.state["sso_mode"] = "chooser"
+            mock.state["signin_trouble"] = ""
+            b.o["signin"] = {
+                **sso_signin,
+                "sso": {"google": {"button": sso_signin["sso"]["google"]["button"], "hosts": ["accounts.google.com"]}},
+            }
+            results["unexpected_host"] = await si.attempt(b, "manual")
+            return results
+        finally:
+            await b.release()
+
+    res = asyncio.run(go())
+    assert res["chooser_st"]["signed_in"] is True and res["chooser_st"]["email"] == WHO
+    assert res["chooser_reply"] == "ok" and res["chooser_chosen"] == [WHO]
+    assert revived == [True, True, True]
+    assert res["direct"]["result"] == "ok" and res["sole"]["result"] == "ok"
+    for key_name, expected_fragment in (
+        ("site_captcha", "human check"),
+        ("idp_captcha", "human check"),
+        ("idp_code", "verification code"),
+        ("idp_password", "password or e-mail"),
+        ("idp_consent", "terms or a consent"),
+        ("idp_passkey", "passkey"),
+        ("idp_suspicious", "security notice"),
+        ("chooser_ambiguous", "which account"),
+        ("unexpected_host", "another sign-in provider"),
+    ):
+        got = res[key_name]
+        assert got["result"] == "needs_person" and expected_fragment in got["detail"], (key_name, got)
+    assert not store.items  # no password ever stored for SSO
+    assert mock.touched == []  # never typed into any field on site or IdP
+    assert si.view(b)["saved"] is False and si.view(b)["method"] == "google" and si.view(b)["queued"] is False
+
+
+def test_login_flow_detects_method_and_cancels_requeue(tmp_path, home, monkeypatch, _no_real_credential_store):
+    store = _no_real_credential_store
+    router, app, setup = client_for(catalog(tmp_path))
+    setup.poll_s, setup.cookie_poll_s, setup.grace_s = 0.01, 0.01, 0.01
+
+    history_plan: list[tuple[str, float]] = []
+
+    class FakeWindow:
+        def __init__(self, app_, profile, url, bounds=None, launch="open", extra_args=()):
+            self.profile = Path(profile)
+            self.pid = 42424
+            self._alive = False
+
+        async def open(self, wait_s=30.0):
+            self._alive = True
+            if history_plan:
+                _write_history(self.profile, list(history_plan))
+
+        def alive(self):
+            return False  # closes immediately after open -> triggers verify
+
+        def closed_by_hand(self):
+            return False
+
+        async def close(self, timeout=20.0):
+            self.pid = None
+            self._alive = False
+
+    async def fake_check(self, model="auto", close=False):
+        self.reset()
+        self._seen_signed_in()
+        return {**self.status(), "ok": True, "page_model": None}
+
+    monkeypatch.setattr(ws, "SigninWindow", FakeWindow)
+    monkeypatch.setattr(cw.Bridge, "check", fake_check)
+
+    b = setup.bridge_for("chatgpt-web", "b")
+    with TestClient(app) as c:
+        # Invalid method hint is rejected with 400
+        assert c.post("/web/login", json={"provider": "chatgpt-web", "account": "b", "method": "nope"}).status_code == 400
+
+        # 1. Google login detected from History -> method="google", auto-enables SSO, cancels pending requeue
+        si.save_signin(b, True, WHO, SECRET)
+        si._save(b, tries=[b.clock()], gap_waived=False)
+        # Wait for flow via API
+        history_plan[:] = [
+            ("https://chatgpt.com/auth/login", time.time()),
+            ("https://accounts.google.com/o/oauth2/auth?token=SHOULD_NOT_BE_SAVED", time.time() + 1),
+        ]
+        r = c.post("/web/login", json={"provider": "chatgpt-web", "account": "b"})
+        assert r.status_code == 200
+        end = time.time() + 5
+        st = r.json()
+        while st["state"] not in ("signed_in", "failed") and time.time() < end:
+            time.sleep(0.02)
+            st = c.get("/web/login", params={"provider": "chatgpt-web", "account": "b"}).json()
+        assert st["state"] == "signed_in" and st["method"] == "google"
+        acct_b = [a for a in c.get("/web/accounts").json()["providers"][0]["accounts"] if a["id"] == "b"][0]
+        assert acct_b["autologin"]["method"] == "google" and acct_b["autologin"]["enabled"] is True
+        assert acct_b["autologin"]["queued"] is False
+        assert "SHOULD_NOT_BE_SAVED" not in (tmp_path / "chatgpt_web-b.json").read_text()
+
+        # 2. Password login on main (no password saved) -> method="password", needs_credentials=True, enabled=False
+        history_plan[:] = [
+            ("https://chatgpt.com/auth/login", time.time()),
+            ("https://auth.openai.com/log-in/password", time.time() + 1),
+        ]
+        r2 = c.post("/web/login", json={"provider": "chatgpt-web", "account": "main"})
+        assert r2.status_code == 200
+        end = time.time() + 5
+        st2 = r2.json()
+        while st2["state"] not in ("signed_in", "failed") and time.time() < end:
+            time.sleep(0.02)
+            st2 = c.get("/web/login", params={"provider": "chatgpt-web", "account": "main"}).json()
+        assert st2["state"] == "signed_in" and st2["method"] == "password"
+        acct_main = [a for a in c.get("/web/accounts").json()["providers"][0]["accounts"] if a["id"] == "main"][0]
+        assert acct_main["autologin"]["method"] == "password"
+        assert acct_main["autologin"]["needs_credentials"] is True
+        assert acct_main["autologin"]["enabled"] is False
+        assert acct_main["autologin"]["saved"] is False
+        assert not [k for k in store.items if "main@" in k]
+
+        # 3. Empty History falls back to optional method hint on POST /web/login
+        history_plan.clear()
+        hist_file = setup.bridge_for("chatgpt-web", "main").profile / "Default" / "History"
+        if hist_file.exists():
+            hist_file.unlink()
+        r3 = c.post("/web/login", json={"provider": "chatgpt-web", "account": "main", "method": "apple"})
+        assert r3.status_code == 200
+        end = time.time() + 5
+        st3 = r3.json()
+        while st3["state"] not in ("signed_in", "failed") and time.time() < end:
+            time.sleep(0.02)
+            st3 = c.get("/web/login", params={"provider": "chatgpt-web", "account": "main"}).json()
+        assert st3["state"] == "signed_in" and st3["method"] == "apple"
+        acct_main = [a for a in c.get("/web/accounts").json()["providers"][0]["accounts"] if a["id"] == "main"][0]
+        assert acct_main["autologin"]["method"] == "apple" and acct_main["autologin"]["enabled"] is True
+

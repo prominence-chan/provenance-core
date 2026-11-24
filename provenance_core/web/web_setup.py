@@ -54,7 +54,7 @@ from urllib.parse import urlparse
 from . import browser_host, cookie_guard, web_signin
 from ..keys import pool_help
 from ..routing import provider_settings
-from .chatgpt_web import Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
+from .chatgpt_web import SITES, Bridge, BridgePool, enabled_by, home_dir, stop_watchdog, watchdog
 
 ACCOUNT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 ACTIVE = ("preparing", "open", "verifying")
@@ -316,11 +316,23 @@ class SigninWindow:
 
 # ---- one sign-in ---------------------------------------------------------------------------------------------------
 class LoginFlow:
-    def __init__(self, setup: WebSetup, provider: str, account: str, bounds: dict | None = None):
+    def __init__(
+        self,
+        setup: WebSetup,
+        provider: str,
+        account: str,
+        bounds: dict | None = None,
+        method_hint: str | None = None,
+    ):
         self.setup, self.provider, self.account, self.bounds = setup, provider, account, bounds
         self.bridge = setup.bridge_for(provider, account)
         self.owner = self.bridge.host or self.bridge  # the bridge whose browser holds the profile
         self.state, self.reason, self.how = "idle", None, None
+        self.method: str | None = None
+        self.method_label: str | None = None
+        self.method_hint: str | None = method_hint
+        self._detected_method: str | None = None
+        self._detected_method_label: str | None = None
         self.started_at = self.updated_at = time.time()
         self.window: SigninWindow | None = None
         self.task: asyncio.Task | None = None
@@ -332,13 +344,14 @@ class LoginFlow:
 
     def view(self) -> dict:
         return {"state": self.state, "reason": self.reason, "provider": self.provider, "account": self.account,
-                "since": int(self.updated_at), "how": self.how}  # fmt: skip
+                "since": int(self.updated_at), "how": self.how, "method": self.method}  # fmt: skip
 
     def _set(self, state: str, reason: str | None = None):
         self.state, self.reason, self.updated_at = state, reason, time.time()
 
     async def run(self):
         try:
+            web_signin.cancel_requeue(self.bridge)
             self._set("preparing")
             app = await self._app()
             await self._release()
@@ -347,7 +360,10 @@ class LoginFlow:
                     "This account's browser is still open in another window. Close that window and try again."
                 )
             spec = self.bridge.session_spec
+            google_spec = SITES["gemini"]["session"]
             before = await asyncio.to_thread(session_cookies, self.owner.profile, spec)
+            before_google = await asyncio.to_thread(session_cookies, self.owner.profile, google_spec)
+            window_started_at = time.time()
             self.window = SigninWindow(app, self.owner.profile, self.bridge.login_url, self.bounds,
                                        self.setup.launch, self.setup.extra_args)  # fmt: skip
             await self.window.open()
@@ -355,6 +371,16 @@ class LoginFlow:
             self.how = await self._watch(spec, before)
             self._set("verifying")
             await self.window.close()
+            after_google = await asyncio.to_thread(session_cookies, self.owner.profile, google_spec)
+            google_changed = any(before_google.get(k) != v for k, v in after_google.items())
+            self._detected_method, self._detected_method_label = await asyncio.to_thread(
+                web_signin.detect_login_method,
+                self.owner.profile,
+                self.bridge,
+                window_started_at,
+                google_cookies_changed=google_changed,
+                hint=self.method_hint,
+            )
             self._resume()
             await self._verify()
         except asyncio.CancelledError:
@@ -460,11 +486,17 @@ class LoginFlow:
             await self.owner.release()
         name, kind = self.name, r.get("kind")
         if r.get("ok"):
+            web_signin.cancel_requeue(self.bridge)
+            self.method, self.method_label = self._detected_method, self._detected_method_label
+            web_signin.note_login_method(self.bridge, self.method, self.method_label)
             self.setup.cleared(self.provider)
             if r.get("needs_confirmation"):  # connected, and not used until the person has chosen
                 return self._set("signed_in", plain_reason({**r, "kind": r["needs_confirmation"]}, self.bridge))
             return self._set("signed_in")
         if kind in ("limit", "busy", "page"):
+            web_signin.cancel_requeue(self.bridge)
+            self.method, self.method_label = self._detected_method, self._detected_method_label
+            web_signin.note_login_method(self.bridge, self.method, self.method_label)
             return self._set(
                 "signed_in",
                 f"Signed in. {name} says this account is limited right now; it will be used when that clears.",
@@ -600,9 +632,13 @@ class WebSetup:
         both = [*self.flows.values(), *self.opens.values()]
         return next((f for f in both if f.state in ACTIVE and f.owner.profile == profile), None)
 
-    async def start(self, provider: str, account: str | None, bounds: dict | None = None) -> dict:
+    async def start(
+        self, provider: str, account: str | None, bounds: dict | None = None, method: str | None = None
+    ) -> dict:
         account = account or "main"
         b = self.bridge_for(provider, account)
+        if method is not None and (not isinstance(method, str) or method not in web_signin.METHODS):
+            raise BadRequest("Send a recognised sign-in method.")
         busy = self._active_on((b.host or b).profile)
         if isinstance(busy, OpenFlow):
             raise SetupError("A window is already open on this account. Close it first.")
@@ -610,7 +646,7 @@ class WebSetup:
             what = "this" if busy.provider == provider else f"the {busy.name}"
             raise SetupError(f"A sign-in window is already open for {what} sign-in on this account. Finish or "
                              "cancel it first.")  # fmt: skip
-        flow = LoginFlow(self, provider, account, bounds)
+        flow = LoginFlow(self, provider, account, bounds, method_hint=method)
         self.flows[(provider, account)] = flow
         flow.task = asyncio.get_running_loop().create_task(flow.run())
         for _ in range(100):  # answer once the window is up (or it waits for the browser, or it failed)
@@ -744,10 +780,18 @@ class WebSetup:
             raise SetupError(str(e)) from None
 
     def autologin_save(self, provider: str, account: str | None, body: dict) -> dict:
-        """PUT /web/accounts/{provider}/{account}/autologin {agree: true, username, password}: write-only for the
-        password, which goes straight to the system's credential store."""
+        """PUT /web/accounts/{provider}/{account}/autologin: save a password sign-in ({agree: true, username,
+        password}, write-only to the system's credential store) or opt into a supported SSO sign-in
+        ({agree: true, method: "google" | "microsoft" | ...}, storing no password)."""
         b = self.bridge_for(provider, account)
-        self._signin_call(web_signin.save_signin, b, body.get("agree"), body.get("username"), body.get("password"))
+        self._signin_call(
+            web_signin.save_signin,
+            b,
+            body.get("agree"),
+            body.get("username"),
+            body.get("password"),
+            body.get("method"),
+        )
         return self.account_view(provider, account)
 
     def autologin_enable(self, provider: str, account: str | None, body: dict) -> dict:
