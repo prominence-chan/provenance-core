@@ -536,9 +536,9 @@ def test_daily_cap_blocks_and_persists(tmp_path):
     assert not b2.status()["blocked"]
     with pytest.raises(cw.WebSkip, match="over the bridge"):
         run(
-            cw.Bridge("https://chatgpt.test", {"max_prompt_chars": 50, "notify": False}, home=tmp_path).complete(
-                "luna", dict(USER)
-            )
+            cw.Bridge(  # the same clock as the state above was written by: a browser is not started on another
+                "https://chatgpt.test", {"max_prompt_chars": 50, "notify": False}, home=tmp_path, clock=lambda: now[0]
+            ).complete("luna", dict(USER))
         )
 
 

@@ -35,7 +35,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import compact, prune, settings
+from . import compact, cookie_guard, prune, settings
 from .settings import env
 
 
@@ -1468,6 +1468,24 @@ DEFAULTS = {
     # an account no check has ever seen signed in (a new one, nothing signed in yet) is skipped, without penalty,
     # instead of opening its browser to find the sign-in page. Provenance.app's catalog turns it on
     "skip_unchecked": False,
+    # keeping the saved sign-ins (cookie_guard.py): backups of the profile's cookie store, a wiped store noticed and
+    # a backup put back once a day, no browser started on a wrong clock or a nearly full disk
+    "cookie_guard": True,
+    "cookie_backup_keep": 5,  # the newest backups kept, plus one per day for cookie_backup_days days
+    "cookie_backup_days": 7,
+    "cookie_backup_every_s": 3600.0,  # while a browser runs: a snapshot this often (0: only at exit and launch)
+    "cookie_settle_s": 3.0,  # after a launch on a profile with sign-ins: watch the store this long before using it
+    "cookie_recheck_s": [45.0, 120.0],  # and look again this long after the launch (Chrome writes within 30 s)
+    "cookie_collapse_ratio": 0.25,  # a store with under this share of its rows left (or none) has collapsed,
+    "cookie_collapse_floor": 10,  # when it had at least this many
+    "clock_forward_max_s": 86400.0,  # the clock may not be further ahead of what it should be than this,
+    "clock_back_slack_s": 120.0,  # nor further behind than this;
+    "clock_settle_s": 600.0,  # a doubted clock that then runs steadily this long is taken as right after all
+    "disk_min_free_mb": 500,  # no browser is started with less free space on the home's disk (0: not checked)
+    "launch_tries": 3,  # a wrong clock or a full disk: looked at this many times,
+    "launch_wait_s": 5.0,  # this far apart, before the launch is refused
+    "launch_block_s": 300.0,  # and the account is out for this long (kind clock / disk), then it is tried again
+    "profile_wait_s": 20.0,  # a browser still exiting on the profile is waited for this long before a launch
     "profile": None,  # default: <PCORE_HOME>/chatgpt-web-profile
     "site": None,  # another chat site from SITES (e.g. zai) instead of chatgpt.com
 }
@@ -1520,6 +1538,9 @@ class Bridge:
     ):
         self.account = account
         self.host = host  # another Bridge whose Chrome this one works in, as extra tabs (`share:` in the catalog)
+        self._guests: list[Bridge] = []  # the bridges that work in this one's Chrome
+        if host:
+            host._guests.append(self)
         self._launch = asyncio.Lock()
         self._tabs = asyncio.Lock()  # one new tab at a time per Chrome: two at once could be handed the same tab
         self.base_url = base_url.rstrip("/")
@@ -1563,6 +1584,10 @@ class Bridge:
         # API model of its pool for the narrative; never this bridge)
         self.compactor = compact.Compactor()
         self.summarize = None
+        # the profile's cookie store: backups, a wiped store noticed and repaired, the launch gate (cookie_guard.py)
+        self.guard = cookie_guard.Guard(self)
+        self._guardian: asyncio.Task | None = None  # looks at the store again after a launch, then hourly
+        self._recovering: asyncio.Task | None = None  # closes the browser and puts a backup back
 
     # ---- what the app shows, and the sign-in flow uses --------------------------------------------------------
     @property
@@ -1584,6 +1609,12 @@ class Bridge:
 
     def signing_in(self) -> bool:
         return bool(self.signin or (self.host and self.host.signin))
+
+    def _held_why(self) -> str:
+        who = self.account or "main"
+        if cookie_guard.RESTORING in (self.signin, self.host and self.host.signin):
+            return f"this account's ({who}) saved sign-ins are being put back"
+        return f"a sign-in window is open on this account ({who})"
 
     # ---- persisted state: today's count, the last login check, why it's blocked -------------------------------
     def load(self) -> dict:
@@ -1626,7 +1657,9 @@ class Bridge:
             "needs_confirmation": self.needs_confirmation(s),
             "window_open": self._page is not None,
             "browser": self.browser_in_use(),
-            "signing_in": self.signing_in(),
+            "signing_in": self.signing_in() and self._held_why().startswith("a sign-in"),
+            # {kind, text, at} for a day after the saved sign-ins were lost and a backup was put back
+            "notice": n if (n := s.get("notice")) and self.clock() - (n.get("at") or 0) < 86400 else None,
             "profile": str(self.profile),
             **({"account": self.account} if self.account else {}),
         }
@@ -1763,6 +1796,19 @@ class Bridge:
         self.save(blocked_until=0, reason=None, kind=None, strikes=0)
 
     def _block(self, e: WebUnavailable):
+        if e.kind == "login":
+            s = self.load()
+            left = (s.get("blocked_until") or 0) - self.clock()
+            if s.get("kind") == "cookies_lost" and left > 0:  # already told why, in better words
+                e.reason, e.kind, e.cooldown = s.get("reason") or e.reason, "cookies_lost", left
+                return
+            if (self.host or self)._guard_poke("signed-out page"):
+                # not a sign-out: this computer lost the saved sign-ins, and a backup is being put back
+                wait = float(self.o["page_backoff_max_s"])
+                self.save(blocked_until=self.clock() + wait, kind="page",
+                          reason="the browser's saved sign-ins were lost; a backup is being put back")  # fmt: skip
+                e.cooldown, e.kind = wait, "page"
+                return
         if e.kind in ("tempchat", "login") and e.cooldown > float(self.o["page_backoff_max_s"]):
             # "no temporary chat" and "signed out" are read off the page, and a page that has not finished loading
             # (a busy computer) looks the same. These cost hours, so on an account where they worked before the
@@ -1821,7 +1867,7 @@ class Bridge:
                 f"{model} has reached its limit on this account ({self.account or 'main'})", u["limited_for_s"], "limit"
             )
         if self.signing_in():
-            raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
+            raise WebSkip(self._held_why())
         s = self.load()
         if self.o.get("skip_unchecked") and s.get("signed_in") is None:
             raise WebSkip(f"no one has signed in on this account ({self.account or 'main'}) yet")
@@ -1841,7 +1887,7 @@ class Bridge:
     # ---- the browser ---------------------------------------------------------------------------------------------
     async def _ensure_page(self):
         if self.signing_in():  # the profile is open in the sign-in window: a second browser cannot open it
-            raise WebSkip(f"a sign-in window is open on this account ({self.account or 'main'})")
+            raise WebSkip(self._held_why())
         if not self.host:
             async with self._launch:
                 return await self._ensure_own_page()
@@ -1882,7 +1928,21 @@ class Bridge:
         except ImportError:
             raise WebUnavailable(f"{driver} is not installed (pip install {driver})", 3600, "setup") from None
         self.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-        bundled = await self._bundled_browser()
+        await self._profile_free()
+        if not self.guard.on:
+            return await self._start_browser(async_playwright, driver, await self._bundled_browser())
+        await self._launch_gate()
+        bundled = await self._guard_before(await self._bundled_browser())
+        page = await self._start_browser(async_playwright, driver, bundled)
+        if await self._guard_after():  # wiped as the browser started: it was closed again, the wipe is on disk now
+            bundled = await self._guard_before(await self._bundled_browser())
+            page = await self._start_browser(async_playwright, driver, bundled)
+            await self._guard_after(last=True)
+        self._guardian = asyncio.get_running_loop().create_task(self._guard_watch(self._ctx))
+        return page
+
+    async def _start_browser(self, async_playwright, driver: str, bundled: dict | None):
+        """Start the browser on the profile (the bundled build `bundled`, else the installed Chrome) -> its page."""
         self._pw = await async_playwright().start()
         if bundled:
             try:
@@ -2069,22 +2129,26 @@ class Bridge:
             raise RuntimeError("the new tab was an existing one")
         return page
 
-    def _reap(self, proc, watch):
+    def _reap(self, proc, watch) -> str:
         """Wait for the bundled browser to exit after Browser.close; end it if it does not (only ever this process,
-        which this bridge started)."""
+        which this bridge started). -> how it ended: "closed", "terminated" or "killed"."""
+        how = "closed"
         try:
             if proc:
                 try:
                     proc.wait(timeout=15)
                 except subprocess.TimeoutExpired:
+                    how = "terminated"
                     proc.terminate()
                     try:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
+                        how = "killed"
                         proc.kill()
                         proc.wait(timeout=10)
         finally:
             stop_watchdog(watch)
+        return how
 
     async def _park(self):
         """quiet: push the window past the bottom right corner of the screen (macOS keeps a 40 pixel corner of it
@@ -2156,6 +2220,10 @@ class Bridge:
         if self._parker:
             self._parker.cancel()
             self._parker = None
+        if self._guardian:
+            if self._guardian is not asyncio.current_task():
+                self._guardian.cancel()
+            self._guardian = None
         proc, watch, bundled = self._proc, self._watch, self._bundled
         self._proc = self._watch = self._bundled = None
         try:
@@ -2171,9 +2239,269 @@ class Bridge:
                 await pw.stop()
         except Exception:  # noqa: BLE001
             pass
+        how = "closed"
         if proc or watch:
-            await asyncio.to_thread(self._reap, proc, watch)
+            how = await asyncio.to_thread(self._reap, proc, watch)
         self._closing = False
+        if (ctx or proc) and self.guard.on:  # a browser was running and has exited: note the store, back it up
+            await asyncio.to_thread(self._guard_exit, how)
+
+    # ---- the profile's cookie store (cookie_guard.py) ------------------------------------------------------------
+    def _others_on_profile(self) -> list[int]:
+        """Processes (not this one's own browser) started on this profile: a browser still exiting, its helpers."""
+        want = re.escape(f"--user-data-dir={self.profile}") + "( |$)"
+        try:
+            r = subprocess.run(["pgrep", "-f", want], capture_output=True, text=True, timeout=10)
+            return [int(x) for x in r.stdout.split()]
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return []
+
+    async def _profile_free(self):
+        """Never start a browser on a profile another one still has open (an earlier one on its way out, a window
+        somebody opened): Chrome would hand the launch to that process, or end it to take the profile over. It is
+        waited for, never ended. A lock left behind by a process that is gone does not count."""
+        from . import browser_host
+
+        end = time.monotonic() + float(self.o["profile_wait_s"])
+        while True:
+            pid = browser_host.window_pid(self.profile)
+            if not pid or pid not in await asyncio.to_thread(self._others_on_profile):
+                return
+            if time.monotonic() >= end:
+                raise WebUnavailable("another browser still has this account's profile open", 120, "browser")
+            await asyncio.sleep(0.25)
+
+    async def _launch_gate(self):
+        """No browser on a clock that looks wrong (Chrome deletes cookies it takes for expired) or a nearly full
+        disk: looked at a few times, then the launch is refused for a while with the reason."""
+        tries = max(1, int(self.o["launch_tries"]))
+        bad = None
+        for i in range(tries):
+            bad = await asyncio.to_thread(self.guard.gate)
+            if not bad:
+                return
+            if i + 1 < tries:
+                await self.sleep(float(self.o["launch_wait_s"]))
+        self.guard.event("launch_refused", why=bad[0], reason=bad[1][:200])
+        raise WebUnavailable(bad[1], float(self.o["launch_block_s"]), bad[0])
+
+    async def _guard_before(self, bundled: dict | None) -> dict | None:
+        """Before a launch, with nothing on the profile: note the store; if it is a wiped one, put the newest good
+        backup back (once a day), else back it up when it changed. -> the build to start (it changes when the
+        backup needs the previous one)."""
+        from . import browser_host
+
+        g = self.guard
+        pre = await asyncio.to_thread(g.snap)
+        gen = g.newest()
+        lost, g.pending = g.pending or g.lost(pre, gen), None
+        if lost:
+            g.event("cookies_wiped", where="before launch", lost=lost, now=g.brief(pre), backup=g.brief(gen))
+            bundled = await self._guard_restore(lost, gen, bundled)
+            pre = await asyncio.to_thread(g.snap)
+        else:
+            await asyncio.to_thread(g.backup, "prelaunch", False, browser_host.profile_version(self.profile))
+        g.pre, g.was = pre, browser_host.profile_version(self.profile)
+        return bundled
+
+    async def _guard_restore(self, lost: list[str], gen: dict | None, bundled: dict | None) -> dict | None:
+        from . import browser_host
+
+        g = self.guard
+        why = None
+        if not gen:
+            why = cookie_guard.LOST_NO_BACKUP
+        elif g.restored_today():
+            why = cookie_guard.LOST_AGAIN
+        else:
+            target = bundled["version"] if bundled else browser_host.installed_chrome_version()
+            wrote, now = browser_host.major(gen.get("browser")), browser_host.major(target)
+            if wrote and now and wrote != now:
+                # written by another major version: measured, the newer one deletes it again. Only together with
+                # the build that wrote it (kept on disk, or fetched again), which then stays (browser_host.pin)
+                rec = None
+                if bundled and str(self.o.get("browser_source") or "cft").lower() == "cft":
+                    had = browser_host.pinned()
+                    browser_host.pin(wrote, now)
+                    try:
+                        rec = await asyncio.to_thread(browser_host.ensure, self.profile)
+                    except Exception:  # noqa: BLE001
+                        rec = None
+                    if not rec or browser_host.major(rec["version"]) != wrote:
+                        rec = None
+                        if had:
+                            browser_host.pin(had["major"], had.get("refused") or 0)
+                        else:
+                            browser_host.unpin()
+                    g.event("browser_pinned", major=wrote, refused=now, ok=bool(rec))
+                if not rec:
+                    why = cookie_guard.LOST_VERSION
+                bundled = rec or bundled
+        if why:
+            self._mark_lost(lost, why)
+            return bundled
+        try:
+            r = await asyncio.to_thread(g.put_back, gen)
+        except OSError as e:
+            g.event("restore_failed", lost=lost, reason=type(e).__name__)
+            self._mark_lost(lost, cookie_guard.LOST_NO_BACKUP)
+            return bundled
+        g.restored = {"lost": lost, "backup": Path(gen["dir"]).name}
+        g.event("cookies_restored", lost=lost, backup=Path(gen["dir"]).name, aside=r["aside"],
+                wrote=gen.get("browser"), cookies={k: gen.get(k) for k in ("size", "rows", "sites")})  # fmt: skip
+        return bundled
+
+    def _mark_lost(self, lost: list[str], why: str):
+        """The saved sign-ins are gone and were not put back: say so on every account it concerns."""
+        from . import web_signin
+
+        self.guard.event("cookies_lost", lost=lost, reason=why)
+        for b in self.guard.bridges():
+            if b.display_name in lost:
+                b.save(signed_in=False, checked_at=int(b.clock()), identity=None, doubts={}, notice=None,
+                       blocked_until=b.clock() + float(b.o["cooldown_login_s"]), reason=why, kind="cookies_lost")  # fmt: skip
+                web_signin.kick(b)  # a saved sign-in, if the person agreed to one
+
+    async def _guard_after(self, last: bool = False) -> bool:
+        """After a launch: one line for the record, then (on a profile with sign-ins) watch the store for
+        `cookie_settle_s`. True when it was wiped as the browser started and the browser was closed again, for the
+        backup to be put back; a store wiped again after that is reported and left as it is."""
+        from . import browser_host
+
+        g = self.guard
+        version = self._bundled or browser_host.installed_chrome_version()
+        gen = g.newest()
+        now = await asyncio.to_thread(g.snap)
+        g.event("browser_launch", browser=version, was=g.was, cookies=g.brief(now))
+        restored, g.restored = g.restored, None
+        if not g.worth_watching(g.pre, gen):
+            return False
+        await self._load_cookies()
+        end = time.monotonic() + float(self.o["cookie_settle_s"])
+        while True:
+            now = await asyncio.to_thread(g.snap)
+            lost = g.lost(now, g.pre, gen)
+            if lost or time.monotonic() >= end:
+                break
+            await asyncio.sleep(0.25)
+        if not lost:
+            if restored:
+                g.event("cookies_back", lost=restored["lost"], backup=restored["backup"], cookies=g.brief(now))
+                for b in g.bridges():
+                    if b.display_name in restored["lost"]:
+                        ch: dict = {"notice": {"kind": "cookies_lost", "text": cookie_guard.LOST_RESTORED,
+                                               "at": int(b.clock())}, "doubts": {}}  # fmt: skip
+                        if b.load().get("kind") in ("page", "login", "cookies_lost"):
+                            ch.update(blocked_until=0, reason=None, kind=None)
+                        b.save(**ch)
+            return False
+        g.event("cookies_wiped", where="after launch", lost=lost, before=g.brief(g.pre), now=g.brief(now),
+                browser=version, was=g.was)  # fmt: skip
+        if last or restored or g.restored_today():
+            self._mark_lost(lost, cookie_guard.LOST_AGAIN if restored or g.restored_today()
+                            else cookie_guard.LOST_NO_BACKUP)  # fmt: skip
+            return False
+        g.pending = lost
+        await self._shutdown()
+        return True
+
+    async def _load_cookies(self):
+        """Make the browser read its cookie store now instead of at the first page (what it deletes while reading
+        shows up then): ask for the cookies of an address that has none. No cookie comes back."""
+        try:
+            cdp = await self._ctx.new_cdp_session(self._page)
+            try:
+                await asyncio.wait_for(cdp.send("Network.getCookies", {"urls": ["https://cookie-guard.invalid/"]}), 5)
+            finally:
+                await cdp.detach()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+    def _guard_exit(self, how: str):
+        """The browser has exited: one line for the record, and a backup once nothing of it is left running."""
+        from . import browser_host
+
+        g = self.guard
+        end = time.monotonic() + 8.0
+        while (left := self._others_on_profile()) and time.monotonic() < end:
+            time.sleep(0.25)  # its helper processes (one of them writes the cookies) follow it out
+        version = browser_host.profile_version(self.profile)
+        g.event("browser_exit", how=how, browser=version, left=len(left) or None, cookies=g.brief(g.snap()))
+        if not left and not browser_host.window_pid(self.profile):
+            g.backup("exit", False, version)
+
+    def _guard_poke(self, where: str) -> bool:
+        """Look at the store of the running browser now. True when it has been wiped: the browser is then closed
+        and the backup put back in the background (requests skip the profile's accounts meanwhile)."""
+        if self._recovering and not self._recovering.done():
+            return True
+        g = self.guard
+        sib = [*self._guests, self]
+        if not g.on or self._ctx is None or any(b.signin for b in sib):  # (a sign-in window has the profile)
+            return False
+        try:
+            now = g.snap()
+            lost = g.lost(now, g.pre, g.newest())
+            if not lost:
+                return False
+            loop = asyncio.get_running_loop()
+        except (OSError, RuntimeError):
+            return False
+        g.event("cookies_wiped", where=where, lost=lost, before=g.brief(g.pre), now=g.brief(now), was=g.was)
+        g.pending = lost
+        for b in sib:  # from now on requests skip the profile's accounts, without penalty
+            b.signin = cookie_guard.RESTORING
+        self._recovering = loop.create_task(self._guard_recover())
+        return True
+
+    async def _guard_watch(self, ctx):
+        """While this browser runs: look at the store again after Chrome has written what it changed at start,
+        then a snapshot about hourly."""
+        from . import browser_host
+
+        started = time.monotonic()
+        try:
+            for at in sorted(float(x) for x in self.o.get("cookie_recheck_s") or []):
+                await asyncio.sleep(max(0.0, started + at - time.monotonic()))
+                if self._ctx is not ctx or self._guard_poke("recheck"):
+                    return
+            every = float(self.o["cookie_backup_every_s"])
+            while every > 0:
+                await asyncio.sleep(every)
+                if self._ctx is not ctx or self._guard_poke("hourly"):
+                    return
+                await asyncio.to_thread(self.guard.backup, "hourly", True, browser_host.profile_version(self.profile))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - never in the way of the bridge
+            pass
+
+    async def _guard_recover(self):
+        """A wiped store under a running browser: pause the profile's accounts, let a chat in flight finish (30 s),
+        close the browser and start it again, which puts the backup back (_guard_before)."""
+        sib = [*self._guests, self]
+        held, end = [], time.monotonic() + 30.0
+        try:
+            for b in sib:
+                try:
+                    await asyncio.wait_for(b.lock.acquire(), max(0.1, end - time.monotonic()))
+                    held.append(b)
+                except TimeoutError:
+                    pass  # it goes anyway: that request is skipped without penalty (_guarded)
+            for b in sib:
+                await b._shutdown()
+            async with self._launch:
+                try:
+                    await self._ensure_own_page()
+                    self._arm_idle()
+                except WebError as e:
+                    self.guard.event("launch_failed", reason=str(e)[:200])
+        finally:
+            for b in held:
+                b.lock.release()
+            for b in sib:
+                if b.signin == cookie_guard.RESTORING:
+                    b.signin = None
 
     async def release(self):
         """Close the window (frees the profile for `weblogin`)."""
@@ -2573,7 +2901,8 @@ class Bridge:
             model = getattr(self, "_model", None)
             if e.kind == "limit" and self.site and model and self.model_usage(model) is not None:
                 self._model_limited(model, e)  # this model's allowance only: the account's other models go on
-            elif e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy", "page"):
+            elif e.kind in ("login", "challenge", "limit", "tempchat", "model", "closed", "busy", "page", "clock",
+                            "disk"):  # fmt: skip
                 self._block(e)
             raise
         except WebError:
@@ -2940,6 +3269,8 @@ class BridgePool:
         b = self.bridges.pop(account, None)
         if b:
             await b.release()
+            if b.host and b in b.host._guests:
+                b.host._guests.remove(b)
 
     def pick(self, account: str | None = None) -> Bridge:
         if account and account not in self.bridges:

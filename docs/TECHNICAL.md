@@ -617,6 +617,7 @@ page is fine again.
 | `skip_unchecked` | false | an account no check has ever seen signed in (`signed_in` still null: a new one, nothing signed in yet) is skipped without penalty and not counted as capacity, instead of having its browser opened to find the sign-in page. `catalog.app.yaml` turns it on |
 | `notify` | true | macOS notifications when the provider goes unavailable, and at start when a sign-in is missing |
 | `name`, `login_url`, `session_cookies` | the site's | what the app calls the provider, where the sign-in window opens, and `{domains, names}` of the cookie that means signed in (`CHATGPT_SITE` / `SITES`) |
+| `cookie_guard`, `cookie_*`, `clock_*`, `disk_min_free_mb`, `launch_*`, `profile_wait_s` | on; see `DEFAULTS` | backups of the profile's cookie store, a wiped store put back once a day, no browser started on a wrong clock or a nearly full disk ("Keeping the sign-ins") |
 | `endpoints` | `[responses]` | front ends whose tier requests may use it |
 
 A model's `model` is the name to pick in the page's model picker (`auto` = leave the page's choice; on a page with no picker, as on the Free plan, the account's one model answers). The page
@@ -651,7 +652,11 @@ normal window (the bundled build's plain copy): a background-only app cannot tak
   must be at least as new as the installed Chrome's major version and as the profile's `Last Version` (an older
   browser must not open a newer profile); the closest major from above is chosen, so the installed Chrome (used by
   `weblogin`) can still open the profile. When Chrome updates to a new major version, a matching build is prepared
-  on the next launch. If nothing suitable can be had, the installed Chrome is used as before.
+  on the next launch; the build before it stays on disk (one previous version), because a new major version can
+  turn out to delete the saved sign-ins (next section): the bridge then goes back to the previous build and is
+  held on it (`<PCORE_HOME>/browser/pin.json`, `{major, refused, at}`; while it exists only that major version is
+  prepared and used; remove the file to let the next build be tried). If nothing suitable can be had, the
+  installed Chrome is used as before.
 - **Shipping it in Provenance.app** (done: `ui/scripts/fetch-browser.ts`): a build step downloads the Chrome for Testing build for the
   current Stable milestone into `ui/vendor/browser/` and electron-builder copies it unmodified with
   `"extraResources": [{"from": "vendor/browser", "to": "browser"}]` (outside the asar) to
@@ -704,6 +709,82 @@ normal window (the bundled build's plain copy): a background-only app cannot tak
   browser/chrome/`, re-cloned whenever Chrome updates, never older than the profile); it is for this Mac only, as
   Google Chrome cannot be shipped inside Provenance.app. Device-bound Google sessions (DBSC) keep their keys per
   browser app, so a Google sign-in made in the installed Chrome may have to be renewed in the bundled one.
+
+### Keeping the sign-ins (`cookie_guard.py`)
+
+**What happened (2026-11-23).** After an ordinary restart all three profiles came up with an empty cookie store
+(every row for every site gone, the files the same size, zero-filled) and nine sign-ins had to be redone by hand.
+Reproduced afterwards on scratch profiles with the bridge's own switches and the mock page: Chrome for Testing
+158.0.8127.88 deletes every cookie that 157.0.8103.78 (or 153) wrote. 157 stores cookie values with the marker
+`v10`, 158 with `v11`; the rows are deleted when 158 reads the store, and the same file opened by 157 again is
+intact and signed in (157 -> 158: 61 rows -> 0; the kept copy put back and opened by 158: 0 again; by 157: 61,
+signed in). The installed Chrome had updated itself to 158 at 18:39 that day; the restart at 18:47 therefore
+prepared a 158 build (`required_major` follows the installed Chrome) and opened all three 157 profiles with it at
+18:48, and the 157 build was removed. Not established: why 158 cannot read `v10` values under
+`--use-mock-keychain --password-store=basic`, and whether later versions will do the same to 158's. Nothing was
+found wrong in the shutdown / launch sequence itself.
+
+**Backups.** `<PCORE_HOME>/cookie-backups/<profile>/<YYYYmmdd-HHMMSS>-<kind>/` (folders 0700, files 0600):
+`Cookies` (+ `-journal` / `-wal`) and `meta.json` (`ts`, `kind`, `rows`, session cookies per site, the browser
+version that last wrote the profile). Taken by the bridge that owns the profile's browser: after the browser has
+exited and none of its processes is left (`exit`: `release`, the idle close, the router's shutdown), before a
+launch when the file changed since (`prelaunch`), both as a plain copy of files nothing has open; and every
+`cookie_backup_every_s` (1 h) while a browser runs (`hourly`), through SQLite's backup API on a read-only
+connection that is dropped the moment the file is locked. A copy is kept only if it opens, passes SQLite's quick
+check, has a `cookies` table with at least one row, and has not collapsed against the last kept one (under
+`cookie_collapse_ratio` of its rows when it had `cookie_collapse_floor` or more) while losing every session cookie
+of a site the bridge knows as signed in. Kept: the newest `cookie_backup_keep` (5) and the newest of each of the
+last `cookie_backup_days` (7) days. Values are never read: the files are copied as bytes, SQLite copies pages,
+and every query names its columns (`host_key`, `name`, dates).
+
+**A wiped store.** A site the bridge's state has as signed in, with none of its session cookies left, in a store
+whose row count collapsed (against the store just before the launch, or the newest backup): that is this computer
+losing the store, not the site signing the account out. Looked for before a launch, for `cookie_settle_s` (3 s)
+after one on a profile with sign-ins (the browser is first made to read its store: `Network.getCookies` for an
+address that has no cookies, so none comes back; 158's deletions were on disk by the time its debugging port was
+up), again `cookie_recheck_s` (45 s, 120 s) later (Chrome writes other changes to disk within 30 s), hourly, and
+whenever a page says "signed out" (that sighting then counts as a
+short `page` wait, not towards the sign-out). Then, at most once per profile per local day: the profile's accounts
+are paused (requests skip them, no penalty), the browser is closed, the wiped files are moved to
+`cookie-backups/<profile>/wiped-<stamp>/` (the last 5 are kept), the newest backup is copied into place and the
+browser started again; cookies back -> `notice: "cookies_lost"` and "This computer lost the browser's saved
+sign-ins; a backup was put back." on the account in `GET /web/accounts` for a day. A backup written by another
+major version of the browser is only put back together with that build (kept on disk, or fetched again), which
+is then pinned (above); the installed Chrome (`browser: chrome`, `browser_source: chrome`) cannot go back, so
+there it is reported instead. A second wipe the same day, no backup, or a restore that cannot be done: nothing
+more is changed, and the accounts concerned are out with kind `cookies_lost` and the reason in plain words ("…and
+no backup could be restored: sign in again"), signed out, for `cooldown_login_s` (a saved automatic sign-in is
+tried as after any sign-out).
+
+**The launch gate.** No browser is started while free space on the home's disk is under `disk_min_free_mb` (500)
+or the clock looks wrong: looked at `launch_tries` (3) times `launch_wait_s` (5 s) apart, then the account is out
+for `launch_block_s` (5 min) with kind `disk` / `clock`, and it is tried again. The clock is compared with one
+that only counts and keeps counting through sleep (`CLOCK_MONOTONIC`; `time.monotonic()` stops while a Mac sleeps),
+from the start of the process and from a note of both clocks an earlier process of the same boot left in
+`cookie-backups/clock.json`: more than `clock_forward_max_s` (a day) ahead or `clock_back_slack_s` (2 min) behind
+where it should be is wrong. Where neither can tell (a new boot), it is compared with the newest timestamps the
+router wrote (each account state's `checked_at`, the usage ledger's last line, the newest cookie backup): behind
+them, or more than a day ahead. A doubted clock that then runs steadily for `clock_settle_s` (10 min) is taken as
+right after all, so a long weekend switched off costs one 10 minute wait and a timestamp written during a
+moment of wrong clock does not block anything for good. Also before a launch: a live browser that still has the
+profile open (an earlier one on its way out) is waited for (`profile_wait_s`, 20 s), never ended, and no second
+browser is started on the profile.
+
+Run end to end on a scratch home with the real builds (157 profile signed in to the mock page, the installed
+Chrome "updates", 158 is prepared and opens the profile): wiped store seen in the first second after the launch,
+158 closed, backup put back, 157 pinned and prepared again from the kept copy (4 s), relaunched, cookies back, the
+waiting request served signed in.
+
+**For next time.** `<PCORE_HOME>/web-events.jsonl` gets one line per `browser_launch` (the build, `was`: the
+version that had last written the profile, the store's size / rows / session cookies per site) and `browser_exit`
+(`how`: closed / terminated / killed), and per `cookie_backup`, `cookies_wiped` (`where`, before and now),
+`cookies_restored`, `cookies_back`, `cookies_lost`, `browser_pinned`, `launch_refused`; each with the date, the
+router's uptime, both clocks (`wall`, `mono`) and the free disk space. `cookie_guard: false` turns all of it off.
+
+**Not covered.** A backup holds sessions as they were: a site may have ended them since, and a backup put back can
+be up to an hour (running) older than what was lost. The settle check sees only what is on disk, so a wipe Chrome
+has not written yet is caught at the next look (45 s), during which a request can meet the signed-out page once.
+A sign-out by the site that also clears most of a small store looks like a wipe and costs one needless restore.
 
 ### Account setup from the app (`/web/*`, `provenance-core/web_setup.py`)
 
@@ -1035,7 +1116,8 @@ page (`tests/mock_chatgpt.py`) in headless Chrome; those tests are skipped witho
 The bundled-browser tests run the same mock page in the background-only browser (its window off screen); the
 Chrome for Testing one is skipped unless a copy is already prepared (`python -m provenance_core.browser_host`).
 `tests/test_web_setup.py` runs the sign-in flow against the mock page's sign-in page (`login: "cookie"`) with a
-headless window on scratch profiles. `tests/test_app_router.py` covers what Provenance.app needs (`catalog.app.yaml`,
+headless window on scratch profiles. `tests/test_cookie_guard.py` covers the cookie backups, a wiped store put back
+once (headless Chrome; with the bundled browser when one is prepared), the browser-version pin and the launch gate. `tests/test_app_router.py` covers what Provenance.app needs (`catalog.app.yaml`,
 settings and keys from the app, `/health`, `needs`, `--watch-stdin`); `tests/test_multikey.py` covers several
 keys per provider, removed and temporary providers and the setup outcomes, and `tests/conftest.py` points
 `PCORE_HOME` at a scratch directory so no test reads the real home; `tests/serve_mock.py` is not a test but the

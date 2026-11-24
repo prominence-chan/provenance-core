@@ -212,6 +212,7 @@ class Mock:
             "signin_slow_ms": 0,
         }
         self.accounts = {"person@example.com": "mock-password"}  # who the sign-in form lets in
+        self.session_tail = ""  # more characters for the session cookie's value (a value tests can search for)
         self.touched: list[tuple[str, str]] = []  # (page, field) typed into on the sign-in pages
         self.posted: list[tuple[str, dict]] = []  # (step, what was sent)
         self._email = None
@@ -270,7 +271,7 @@ class Mock:
                     self.rfile.read(int(self.headers.get("Content-Length") or 0))
                     mock.signins += 1
                     self.send_response(200)
-                    self.send_header("Set-Cookie", f"{SESSION}=1; Max-Age=86400; Path=/; HttpOnly")
+                    self.send_header("Set-Cookie", f"{SESSION}=1{mock.session_tail}; Max-Age=86400; Path=/; HttpOnly")
                     self.send_header("Content-Length", "2")
                     self.end_headers()
                     self.wfile.write(b"{}")
@@ -300,7 +301,7 @@ class Mock:
                     mock.signins += 1
                     data = json.dumps({"next": "/"}).encode()
                     self.send_response(200)
-                    self.send_header("Set-Cookie", f"{SESSION}=1; Max-Age=86400; Path=/; HttpOnly")
+                    self.send_header("Set-Cookie", f"{SESSION}=1{mock.session_tail}; Max-Age=86400; Path=/; HttpOnly")
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
