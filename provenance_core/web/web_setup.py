@@ -283,13 +283,17 @@ class SigninWindow:
         pid, self.pid = self.pid, None
         if pid:
             asked = self._pid_alive(pid) and await asyncio.to_thread(quit_app, pid)
-            for sig in ([None] if asked else []) + [signal.SIGTERM, signal.SIGKILL]:
+            sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+            sigs = ([None] if asked else []) + [signal.SIGTERM]
+            if sigkill != signal.SIGTERM:
+                sigs.append(sigkill)
+            for sig in sigs:
                 if sig is not None:
                     try:
                         os.kill(pid, sig)
-                    except (ProcessLookupError, PermissionError):
+                    except (ProcessLookupError, PermissionError, OSError):
                         pass
-                end = time.time() + (5 if sig == signal.SIGKILL else timeout)
+                end = time.time() + (5 if sig == sigkill else timeout)
                 while time.time() < end and self._pid_alive(pid):
                     await asyncio.sleep(0.2)
                 if not self._pid_alive(pid):

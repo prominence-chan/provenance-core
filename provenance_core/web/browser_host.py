@@ -25,7 +25,14 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
@@ -402,12 +409,26 @@ _lock = threading.Lock()
 @contextlib.contextmanager
 def _locked(root: Path):
     root.mkdir(parents=True, exist_ok=True)
-    with _lock, open(root / ".lock", "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)  # several bridges (or processes) preparing at once: one does it
-        try:
+    with _lock, open(root / ".lock", "a+b") as f:
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)  # several bridges (or processes) preparing at once: one does it
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        else:
             yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def current(root: Path | None = None, need: int = 0) -> dict | None:
