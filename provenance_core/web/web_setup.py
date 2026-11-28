@@ -188,8 +188,8 @@ class SigninWindow:
     `launch`: "open" (macOS LaunchServices: a new instance, brought to the front like any app the user opens) or
     "exec" (started directly; tests use it with a headless switch so that nothing shows)."""
 
-    def __init__(self, app: Path, profile: Path, url: str, bounds: dict | None = None, launch: str = "open",
-                 extra_args=()):  # fmt: skip
+    def __init__(self, app: Path, profile: Path, url: str, bounds: dict | None = None,
+                 launch: str = "open" if sys.platform == "darwin" else "exec", extra_args=()):  # fmt: skip
         self.app, self.profile, self.url, self.launch = Path(app), Path(profile), url, launch
         self.bounds = {**DEFAULT_BOUNDS, **{k: int(v) for k, v in (bounds or {}).items() if k in DEFAULT_BOUNDS}}
         self.extra_args = list(extra_args)
@@ -234,16 +234,24 @@ class SigninWindow:
         if not exe or not exe.exists():
             raise SetupError("The browser used for signing in could not be found. Try again in a minute.")
         self.profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if self.launch == "open":
+        if self.launch == "open" and sys.platform == "darwin":
             cmd = ["open", "-n", "-W", "-a", str(self.app), "--args", *self.args()]
         else:
             cmd = [str(exe), *self.args()]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL)  # fmt: skip
+        if sys.platform == "win32":
+            # Windows Chrome does not create a POSIX SingletonLock symlink; confirm the child stayed up.
+            await asyncio.sleep(0.6)
+            if self._proc.poll() is None:
+                self.pid = self._proc.pid
+                return
+            await self.close()
+            raise SetupError("The sign-in window did not open. Try again.")
         end = time.time() + wait_s
         while time.time() < end:
             pid = browser_host.window_pid(self.profile)
-            if pid and (self.launch == "open" or pid == self._proc.pid):
+            if pid and ((self.launch == "open" and sys.platform == "darwin") or pid == self._proc.pid):
                 self.pid = pid
                 self._watch = watchdog(pid)  # the router going away closes the window too
                 return
@@ -584,7 +592,8 @@ class WebSetup:
     `extra_args` and `app` are for tests (a headless window started directly); `close_after` is for the command
     line, which must not leave a background browser running when it exits."""
 
-    def __init__(self, router, launch: str = "open", extra_args=(), app=None, close_after: bool = False):
+    def __init__(self, router, launch: str = "open" if sys.platform == "darwin" else "exec", extra_args=(),
+                 app=None, close_after: bool = False):  # fmt: skip
         self.router = router
         self.launch, self.extra_args, self.app, self.close_after = launch, list(extra_args), app, close_after
         self.poll_s, self.cookie_poll_s, self.grace_s, self.release_wait_s = 1.0, 2.0, 3.0, 120.0

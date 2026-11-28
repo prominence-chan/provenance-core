@@ -32,6 +32,7 @@ import random
 import re
 import secrets
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -2137,9 +2138,13 @@ class Bridge:
         args = browser_host.launch_args(self.profile, driver, trim=bool(self.o.get("browser_trim", True)))
         port_file = self.profile / "DevToolsActivePort"
         started = time.time()
-        self._proc = subprocess.Popen(
-            [rec["exe"], *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        popen_kw: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7  # SW_SHOWMINNOACTIVE: start minimized without stealing focus
+            popen_kw["startupinfo"] = si
+        self._proc = subprocess.Popen([rec["exe"], *args], **popen_kw)
         self._watch = watchdog(self._proc.pid)
         self._bundled = rec["version"]
         port = None
@@ -3530,6 +3535,8 @@ def watchdog(pid: int):
     """A tiny shell that ends the bundled browser `pid` when this process goes away, however it goes (even
     SIGKILL): it waits on a pipe only this process holds. Without it a background-only browser, which has no Dock
     icon and no window on screen, could be left running unseen. Its own session, so Ctrl+C here leaves it to act."""
+    if sys.platform == "win32":
+        return None
     try:
         return subprocess.Popen(
             ["/bin/sh", "-c", f"read _ignored; kill -TERM {int(pid)} 2>/dev/null"],
@@ -3560,6 +3567,8 @@ def stop_watchdog(watch):
 def hide_chrome(profile: Path):
     """Hide (as Cmd+H does) the Chrome that runs on this profile; the user's own Chrome is another process and is
     left alone. Best effort: needs macOS and permission to use System Events."""
+    if sys.platform != "darwin":
+        return
     try:
         pids = subprocess.run(
             ["pgrep", "-f", f"user-data-dir={profile}"], capture_output=True, text=True
@@ -3580,6 +3589,8 @@ def hide_chrome(profile: Path):
 
 
 def notify(text: str):
+    if sys.platform != "darwin":
+        return
     try:
         subprocess.Popen(
             ["osascript", "-e", f'display notification {json.dumps(text)} with title "provenance-core"'],

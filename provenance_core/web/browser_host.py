@@ -159,7 +159,7 @@ def launch_args(profile, driver: str = "patchright", trim: bool = True, window=(
     return [
         f"--user-data-dir={profile}",
         "--remote-debugging-port=0",  # a free port, written to <profile>/DevToolsActivePort; 127.0.0.1 only
-        "--no-startup-window",
+        *("--no-startup-window" if sys.platform == "darwin" else "--window-position=20000,20000",),
         f"--window-size={window[0]},{window[1]}",
         # after a crash (or the watchdog's kill) Chrome offers to restore the last session in a bubble; nothing must
         # ever be drawn, and no page can tell this switch is there
@@ -179,13 +179,68 @@ def _plist(app: Path) -> dict:
         return {}
 
 
+_VERSION_CACHE: dict[str, str | None] = {}
+
+
+def _system_chrome_paths() -> list[Path]:
+    if sys.platform == "darwin":
+        return [CHROME_APP]
+    if sys.platform == "win32":
+        roots = [os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")]
+        return [Path(r) / "Google" / "Chrome" / "Application" / "chrome.exe" for r in roots if r]
+    return [
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+    ]
+
+
 def app_version(app) -> str | None:
-    return _plist(app).get("CFBundleShortVersionString")
+    if not app:
+        return None
+    p = Path(app)
+    if sys.platform == "darwin" or p.suffix == ".app":
+        return _plist(p).get("CFBundleShortVersionString")
+    stamp = (p / "VERSION.txt") if p.is_dir() else (p.parent / "VERSION.txt")
+    try:
+        raw = stamp.read_text().strip().split(":", 1)[0].strip()
+        if re.match(r"\d+\.\d+", raw):
+            return raw
+    except OSError:
+        pass
+    exe = app_exe(p)
+    if not exe or not exe.is_file():
+        return None
+    key = str(exe)
+    if key in _VERSION_CACHE:
+        return _VERSION_CACHE[key]
+    ver = None
+    try:
+        r = _run([str(exe), "--version"], timeout=15)
+        m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", (r.stdout or "") + " " + (r.stderr or ""))
+        if m:
+            ver = m.group(1)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    _VERSION_CACHE[key] = ver
+    return ver
 
 
 def app_exe(app) -> Path | None:
-    name = _plist(app).get("CFBundleExecutable")
-    return Path(app) / "Contents/MacOS" / name if name else None
+    if not app:
+        return None
+    p = Path(app)
+    if sys.platform == "darwin" or p.suffix == ".app":
+        name = _plist(p).get("CFBundleExecutable")
+        return p / "Contents/MacOS" / name if name else None
+    if p.is_file():
+        return p
+    if p.is_dir():
+        cand = p / ("chrome.exe" if sys.platform == "win32" else "chrome")
+        if cand.is_file():
+            return cand
+    return None
 
 
 def major(version: str | None) -> int:
@@ -198,7 +253,14 @@ def vkey(version: str | None) -> tuple:
 
 
 def installed_chrome_version() -> str | None:
-    return app_version(CHROME_APP)
+    if sys.platform == "darwin":
+        return app_version(CHROME_APP)
+    for p in _system_chrome_paths():
+        if p.is_file():
+            v = app_version(p)
+            if v:
+                return v
+    return None
 
 
 def profile_version(profile) -> str | None:
@@ -217,9 +279,33 @@ def required_major(profile=None) -> int:
 
 
 def platform_key() -> str | None:
-    if sys.platform != "darwin":
-        return None
-    return "mac-arm64" if platform.machine() == "arm64" else "mac-x64"
+    if sys.platform == "darwin":
+        return "mac-arm64" if platform.machine() == "arm64" else "mac-x64"
+    if sys.platform == "win32":
+        return "win64"
+    if sys.platform.startswith("linux"):
+        return "linux64"
+    return None
+
+
+def _non_mac_bundled(need: int = 0) -> dict | None:
+    """Windows / Linux: use the shipped Chrome for Testing in PCORE_BROWSER_APP directly (or system Chrome)."""
+    cands: list[Path] = []
+    if env("BROWSER_APP"):
+        cands.append(Path(env("BROWSER_APP")).expanduser())
+    cands += _system_chrome_paths()
+    fallback_rec = None
+    for cand in cands:
+        exe = app_exe(cand)
+        if not exe or not exe.is_file():
+            continue
+        v = app_version(cand) or "0.0.0.0"
+        rec = {"version": v, "exe": str(exe), "app": str(cand), "plain_app": str(cand), "source": f"local:{cand}"}
+        if not need or major(v) >= need:
+            return rec
+        if fallback_rec is None:
+            fallback_rec = rec
+    return fallback_rec
 
 
 def root_dir() -> Path:
@@ -256,6 +342,8 @@ def unpin(root=None):
 
 # ---- preparing a copy ----------------------------------------------------------------------------------------------
 def _run(cmd, **kw):
+    if sys.platform == "win32":
+        kw.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.pop("timeout", 300), **kw)
 
 
@@ -433,6 +521,8 @@ def _locked(root: Path):
 
 def current(root: Path | None = None, need: int = 0) -> dict | None:
     """The prepared copy recorded in <root>/current.json, if it is still there, works and is new enough."""
+    if sys.platform != "darwin":
+        return _non_mac_bundled(need)
     root = Path(root) if root else root_dir()
     try:
         rec = json.loads((root / "current.json").read_text())
@@ -490,6 +580,8 @@ def ensure(profile=None, root=None, download: bool = True, index: dict | None = 
     """A usable bundled browser for `profile`: {"exe", "version", "app", "plain_app", "source"}, preparing one if
     needed (a local build, else a download when `download`). None when nothing suitable can be had: the caller then
     uses the installed Chrome as before."""
+    if sys.platform != "darwin":
+        return _non_mac_bundled(required_major(profile))
     plat = platform_key()
     if not plat:
         return None
@@ -643,6 +735,19 @@ def signin_app(profile, mode: str = "chrome", source: str = "cft", fallback: boo
     Chrome is the `fallback` when no bundled build is prepared. Never an app older than the profile's Last
     Version. None when nothing suitable is there (yet)."""
     need = major(profile_version(profile))
+    if sys.platform != "darwin":
+        cands: list[Path] = []
+        if env("BROWSER_APP"):
+            cands.append(Path(env("BROWSER_APP")).expanduser())
+        if fallback or mode == "chrome" or source == "chrome":
+            cands += _system_chrome_paths()
+        for app in cands:
+            exe = app_exe(app)
+            if exe and exe.is_file():
+                v = app_version(app)
+                if not need or not v or major(v) >= need:
+                    return app
+        return None
     cands = []
     if mode in ("bundled", "auto") and source != "chrome":
         rec = current(need=required_major(profile))
